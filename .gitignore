@@ -1,0 +1,20 @@
+# builds
+
+./debug/
+/target
+
+# ide
+
+.devcontainer
+.idea
+.vscode
+*.code-workspace
+
+# runtime
+
+.envrc
+.direnv/
+
+# temporary files
+
+.temp
