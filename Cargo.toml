@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+
+members = [
+    "crates/attested-tls",
+    "crates/nested-tls",
+]
+
+[workspace.lints.rust]
+unreachable_pub = "deny"
+
+[workspace.lints.clippy]
+manual_let_else = "warn"
+match_same_arms = "warn"
+uninlined_format_args = "warn"
+unused_async = "warn"
