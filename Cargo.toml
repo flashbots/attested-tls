@@ -4,7 +4,12 @@ resolver = "3"
 members = [
     "crates/attested-tls",
     "crates/nested-tls",
+    "crates/attestation",
 ]
+
+[workspace.dependencies]
+tokio = "1.48.0"
+tokio-rustls = "0.26.4"
 
 [workspace.lints.rust]
 unreachable_pub = "deny"
