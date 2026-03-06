@@ -19,7 +19,7 @@ This feature is disabled by default. Note that without this feature, verificatio
 
 ### `mock`
 
-Enables mock quote support via `tdx-quote` for tests and development on non-TDX hardware.
+Enables mock quote support via `tdx-quote` for tests and development on non-TDX hardware. Do not use in production.  Disabled by default.
 
 ## Attestation Types
 
