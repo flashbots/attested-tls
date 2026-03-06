@@ -260,7 +260,7 @@ impl AttestationVerifier {
     }
 
     /// Expect mock measurements used in tests
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(any(test, feature = "mock"))]
     pub fn mock() -> Self {
         Self {
             measurement_policy: MeasurementPolicy::mock(),

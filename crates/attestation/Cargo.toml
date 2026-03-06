@@ -50,10 +50,7 @@ default = []
 # Adds support for Microsoft Azure attestation generation and verification
 azure = ["tss-esapi", "az-tdx-vtpm", "openssl"]
 
-# Exposes helper functions for testing - do not enable in production as this allows dangerous configuration
-test-helpers = []
-
-# Allows mock quotes used in tests
+# Allows mock quotes used in tests and exposes related functions for testing
 mock = ["tdx-quote"]
 
 [lints]

@@ -193,7 +193,7 @@ impl MultiMeasurements {
 }
 
 /// All-zero measurment values used in some tests
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(any(test, feature = "mock"))]
 pub fn mock_dcap_measurements() -> MultiMeasurements {
     MultiMeasurements::Dcap(HashMap::from([
         (DcapMeasurementRegister::MRTD, [0u8; 48]),
