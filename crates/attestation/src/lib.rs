@@ -5,15 +5,15 @@ pub mod azure;
 pub mod dcap;
 pub mod measurements;
 
-use measurements::MultiMeasurements;
-use parity_scale_codec::{Decode, Encode};
-use serde::{Deserialize, Serialize};
 use std::{
     fmt::{self, Display, Formatter},
     net::IpAddr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use measurements::MultiMeasurements;
+use parity_scale_codec::{Decode, Encode};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy};
@@ -27,13 +27,14 @@ const GCP_METADATA_API: &str =
 pub struct AttestationExchangeMessage {
     /// What CVM platform is used (including none)
     pub attestation_type: AttestationType,
-    /// The attestation evidence as bytes - in the case of DCAP this is a quote
+    /// The attestation evidence as bytes - in the case of DCAP this is a
+    /// quote
     pub attestation: Vec<u8>,
 }
 
 impl AttestationExchangeMessage {
-    /// Create an empty attestation payload for the case that we are running in a non-confidential
-    /// environment
+    /// Create an empty attestation payload for the case that we are running
+    /// in a non-confidential environment
     pub fn without_attestation() -> Self {
         Self { attestation_type: AttestationType::None, attestation: Vec::new() }
     }
@@ -77,7 +78,8 @@ impl AttestationType {
                 return Ok(AttestationType::AzureTdx);
             }
         }
-        // Otherwise try DCAP quote - this internally checks that the quote provider is `tdx_guest`
+        // Otherwise try DCAP quote - this internally checks that the quote provider
+        // is `tdx_guest`
         if configfs_tsm::create_tdx_quote([0; 64]).is_ok() {
             if running_on_gcp().await? {
                 return Ok(AttestationType::GcpTdx);
@@ -125,15 +127,16 @@ impl AttestationGenerator {
         attestation_type: AttestationType,
         attestation_provider_url: Option<String>,
     ) -> Result<Self, AttestationError> {
-        // If an attestation provider is given, normalize the URL and check that it looks like a local IP
+        // If an attestation provider is given, normalize the URL and check that it
+        // looks like a local IP
         let attestation_provider_url =
             attestation_provider_url.map(map_attestation_provider_url).transpose()?;
 
         Ok(Self { attestation_type, attestation_provider_url })
     }
 
-    /// Detect what confidential compute platform is present and create the appropriate attestation
-    /// generator
+    /// Detect what confidential compute platform is present and create the
+    /// appropriate attestation generator
     pub async fn detect() -> Result<Self, AttestationError> {
         Self::new_with_detection(None, None).await
     }
@@ -143,7 +146,8 @@ impl AttestationGenerator {
         Self { attestation_type: AttestationType::None, attestation_provider_url: None }
     }
 
-    /// Create an [AttestationGenerator] detecting the attestation type if it is not given
+    /// Create an [AttestationGenerator] detecting the attestation type if
+    /// it is not given
     pub async fn new_with_detection(
         attestation_type_string: Option<String>,
         attestation_provider_url: Option<String>,
@@ -183,7 +187,8 @@ impl AttestationGenerator {
         }
     }
 
-    /// Generate attestation evidence bytes based on attestation type, with given input data
+    /// Generate attestation evidence bytes based on attestation type, with
+    /// given input data
     async fn generate_attestation_bytes(
         &self,
         input_data: [u8; 64],
@@ -207,7 +212,8 @@ impl AttestationGenerator {
         }
     }
 
-    /// Generate an attestation by using an external service for the attestation generation
+    /// Generate an attestation by using an external service for the
+    /// attestation generation
     async fn use_attestation_provider(
         url: &str,
         attestation_type: AttestationType,
@@ -223,8 +229,8 @@ impl AttestationGenerator {
             .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?
             .to_vec();
 
-        // If the response is not already wrapped in an attestation exchange message, wrap it in
-        // one
+        // If the response is not already wrapped in an attestation exchange
+        // message, wrap it in one
         if let Ok(message) = AttestationExchangeMessage::decode(&mut &response[..]) {
             Ok(message)
         } else {
@@ -238,9 +244,9 @@ impl AttestationGenerator {
 pub struct AttestationVerifier {
     /// The measurement policy with accepted values and attestation types
     pub measurement_policy: MeasurementPolicy,
-    /// If this is empty, anything will be accepted - but measurements are always injected into HTTP
-    /// headers, so that they can be verified upstream
-    /// A PCCS service to use - defaults to Intel PCS
+    /// If this is empty, anything will be accepted - but measurements are
+    /// always injected into HTTP headers, so that they can be verified
+    /// upstream A PCCS service to use - defaults to Intel PCS
     pub pccs_url: Option<String>,
     /// Whether to log quotes to a file
     pub log_dcap_quote: bool,
@@ -249,7 +255,8 @@ pub struct AttestationVerifier {
 }
 
 impl AttestationVerifier {
-    /// Create an [AttestationVerifier] which will allow no remote attestation
+    /// Create an [AttestationVerifier] which will allow no remote
+    /// attestation
     pub fn expect_none() -> Self {
         Self {
             measurement_policy: MeasurementPolicy::expect_none(),
@@ -270,7 +277,8 @@ impl AttestationVerifier {
         }
     }
 
-    /// Verify an attestation, and ensure the measurements match one of our accepted measurements
+    /// Verify an attestation, and ensure the measurements match one of our
+    /// accepted measurements
     pub async fn verify_attestation(
         &self,
         attestation_exchange_message: AttestationExchangeMessage,
@@ -346,7 +354,8 @@ async fn log_attestation(attestation: &AttestationExchangeMessage) {
     }
 }
 
-/// Test whether it looks like we are running on GCP by hitting the metadata API
+/// Test whether it looks like we are running on GCP by hitting the metadata
+/// API
 async fn running_on_gcp() -> Result<bool, AttestationError> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("Metadata-Flavor", "Google".parse().expect("Cannot parse header"));
@@ -359,16 +368,18 @@ async fn running_on_gcp() -> Result<bool, AttestationError> {
     let resp = client.get(GCP_METADATA_API).send().await;
 
     if let Ok(r) = resp {
-        return Ok(r.status().is_success()
-            && r.headers().get("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
+        return Ok(r.status().is_success() &&
+            r.headers().get("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
     }
 
     Ok(false)
 }
 
-/// If an attestion provider service is used, we ensure that it looks like a local IP
+/// If an attestion provider service is used, we ensure that it looks like a
+/// local IP
 ///
-/// This is to avoid dangerous configuration where the attestation is provided by a remote machine
+/// This is to avoid dangerous configuration where the attestation is
+/// provided by a remote machine
 ///
 /// This by no means guarantees a safe configuration
 fn map_attestation_provider_url(url: String) -> Result<String, AttestationError> {
@@ -452,9 +463,12 @@ pub enum AttestationError {
 
 #[cfg(test)]
 mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
 
     async fn spawn_test_attestation_provider_server(body: Vec<u8>) -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -480,7 +494,8 @@ mod tests {
 
     #[tokio::test]
     async fn attestation_detection_does_not_panic() {
-        // We dont enforce what platform the test is run on, only that the function does not panic
+        // We dont enforce what platform the test is run on, only that the function
+        // does not panic
         let _ = AttestationGenerator::new_with_detection(None, None).await;
     }
 

@@ -1,16 +1,19 @@
 //! Generation and verification of AK certificates from the vTPM
-use crate::azure::{MaaError, nv_index};
-use once_cell::sync::Lazy;
 use std::time::Duration;
+
+use once_cell::sync::Lazy;
 use tokio_rustls::rustls::pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use webpki::EndEntityCert;
 
-/// The NV index where we expect to be able to read the AK certificate from the vTPM
+use crate::azure::{MaaError, nv_index};
+
+/// The NV index where we expect to be able to read the AK certificate from
+/// the vTPM
 const TPM_AK_CERT_IDX: u32 = 0x1C101D0;
 
-// microsoftRSADevicesRoot2021 is the root CA certificate used to sign Azure TDX vTPM certificates.
-// This is different from the AME root CA used by TrustedLaunch VMs.
-// The certificate can be downloaded from:
+// microsoftRSADevicesRoot2021 is the root CA certificate used to sign Azure
+// TDX vTPM certificates. This is different from the AME root CA used by
+// TrustedLaunch VMs. The certificate can be downloaded from:
 // http://www.microsoft.com/pkiops/certs/Microsoft%20RSA%20Devices%20Root%20CA%202021.crt
 const MICROSOFT_RSA_DEVICES_ROOT_2021: &str = "-----BEGIN CERTIFICATE-----
 MIIFkjCCA3qgAwIBAgIQGWCAkS2F96VGa+6hm2M3rjANBgkqhkiG9w0BAQwFADBa
@@ -45,8 +48,8 @@ yp8up+KbjfH/NIWfPBXhYMW64DagB9P2cW5LBRz+AzDA+JF/OdYpb6vxv3lzjLQb
 U9zMFwSrzEF5o2Aa/n+xZ90Naj78AYaTM18DalA17037fjucDN8=
 -----END CERTIFICATE-----";
 
-// azureVirtualTPMRoot2023 is the root CA for Azure vTPM (used by both Trusted Launch and TDX)
-// Source: https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch-faq
+// azureVirtualTPMRoot2023 is the root CA for Azure vTPM (used by both
+// Trusted Launch and TDX) Source: https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch-faq
 // Valid until: 2048-06-01
 const AZURE_VIRTUAL_TPM_ROOT_2023: &str = "-----BEGIN CERTIFICATE-----
 MIIFsDCCA5igAwIBAgIQUfQx2iySCIpOKeDZKd5KpzANBgkqhkiG9w0BAQwFADBp
@@ -82,8 +85,8 @@ EZSq8a4rSlwqthaELNpeoTLUk6iVoUkK/iLvaMvrkdj9yJY1O/gvlfN2aiNTST/2
 bd+PA4RBToG9rXn6vNkUWdbLibU=
 -----END CERTIFICATE-----";
 
-// globalVirtualTPMCA03 is the intermediate CA that issues TDX vTPM AK certificates
-// Source: https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch-faq
+// globalVirtualTPMCA03 is the intermediate CA that issues TDX vTPM AK
+// certificates Source: https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch-faq
 // Issuer: Azure Virtual TPM Root Certificate Authority 2023
 // Valid: 2025-04-24 to 2027-04-24
 const GLOBAL_VIRTUAL_TPMCA03_PEM: &str = "-----BEGIN CERTIFICATE-----
@@ -170,15 +173,16 @@ pub(crate) fn read_ak_certificate_from_tpm() -> Result<Vec<u8>, tss_esapi::Error
 /// Convert a PEM-encoded cert into a TrustAnchor
 fn pem_to_trust_anchor(pem: &str) -> TrustAnchor<'static> {
     let (_type_label, der_vec) = pem_rfc7468::decode_vec(pem.as_bytes()).unwrap();
-    // Leaking is ok here because plan is to set this up so it is only called once
+    // Leaking is ok here because plan is to set this up so it is only called
+    // once
     let leaked: &'static [u8] = Box::leak(der_vec.into_boxed_slice());
     let cert_der: &'static CertificateDer<'static> =
         Box::leak(Box::new(CertificateDer::from(leaked)));
     webpki::anchor_from_trusted_cert(cert_der).expect("Failed to create trust anchor")
 }
 
-/// Allows any EKU - we could change this to only accept 1.3.6.1.4.1.567.10.3.12 which is the EKU
-/// given in the AK certificate
+/// Allows any EKU - we could change this to only accept
+/// 1.3.6.1.4.1.567.10.3.12 which is the EKU given in the AK certificate
 struct AnyEku;
 
 impl webpki::ExtendedKeyUsageValidator for AnyEku {

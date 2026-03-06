@@ -1,6 +1,5 @@
-//! Data Center Attestation Primitives (DCAP) evidence generation and verification
-use crate::{AttestationError, measurements::MultiMeasurements};
-
+//! Data Center Attestation Primitives (DCAP) evidence generation and
+//! verification
 use configfs_tsm::QuoteGenerationError;
 use dcap_qvl::{
     QuoteCollateralV3,
@@ -10,7 +9,10 @@ use dcap_qvl::{
 };
 use thiserror::Error;
 
-/// FMSPC with which to override TCB level checks on Azure (not used for GCP or other platforms)
+use crate::{AttestationError, measurements::MultiMeasurements};
+
+/// FMSPC with which to override TCB level checks on Azure (not used for GCP
+/// or other platforms)
 const AZURE_BAD_FMSPC: &str = "90C06F000000";
 
 /// For fetching collateral directly from Intel, if no PCCS is specified
@@ -43,9 +45,11 @@ pub async fn verify_dcap_attestation(
     .await
 }
 
-/// Allows the timestamp to be given, making it possible to test with existing attestations
+/// Allows the timestamp to be given, making it possible to test with
+/// existing attestations
 ///
-/// If collateral is given, it is used instead of contacting PCCS (used in tests)
+/// If collateral is given, it is used instead of contacting PCCS (used in
+/// tests)
 pub async fn verify_dcap_attestation_with_given_timestamp(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
@@ -60,7 +64,8 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
     let ca = quote.ca()?;
     let fmspc = hex::encode_upper(quote.fmspc()?);
 
-    // Override outdated TCB only if we are on Azure and the FMSPC is known to be outdated
+    // Override outdated TCB only if we are on Azure and the FMSPC is known to
+    // be outdated
     let override_outdated_tcb = if override_azure_outdated_tcb {
         |mut tcb_info: TcbInfo| {
             if tcb_info.fmspc == AZURE_BAD_FMSPC {
@@ -166,16 +171,15 @@ pub enum DcapVerificationError {
 
 #[cfg(test)]
 mod tests {
-    use crate::measurements::MeasurementPolicy;
-
     use super::*;
+    use crate::measurements::MeasurementPolicy;
     #[tokio::test]
     async fn test_dcap_verify() {
         let attestation_bytes: &'static [u8] =
             include_bytes!("../test-assets/dcap-tdx-1766059550570652607");
 
-        // To avoid this test stopping working when the certificate is no longer valid we pass in a
-        // timestamp
+        // To avoid this test stopping working when the certificate is no longer
+        // valid we pass in a timestamp
         let now = 1769509141;
 
         let measurements_json = br#"
@@ -225,8 +229,8 @@ mod tests {
         let attestation_bytes: &'static [u8] =
             include_bytes!("../test-assets/azure_failed_dcap_quote_10.bin");
 
-        // To avoid this test stopping working when the certificate is no longer valid we pass in a
-        // timestamp
+        // To avoid this test stopping working when the certificate is no longer
+        // valid we pass in a timestamp
         let now = 1771414156;
 
         let collateral_bytes: &'static [u8] =

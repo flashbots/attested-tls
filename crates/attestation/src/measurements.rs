@@ -1,12 +1,13 @@
-//! Measurements and policy for enforcing them when validating a remote attestation
-use crate::{AttestationError, AttestationType, dcap::DcapVerificationError};
-use std::{collections::HashMap, path::PathBuf};
-use std::{fmt, fmt::Formatter};
+//! Measurements and policy for enforcing them when validating a remote
+//! attestation
+use std::{collections::HashMap, fmt, fmt::Formatter, path::PathBuf};
 
 use dcap_qvl::quote::Report;
 use http::{HeaderValue, header::InvalidHeaderValue};
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::{AttestationError, AttestationType, dcap::DcapVerificationError};
 
 /// Represents the measurement register types in a TDX quote
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -35,7 +36,8 @@ impl TryFrom<u8> for DcapMeasurementRegister {
     }
 }
 
-/// Represents a set of measurements values for one of the supported CVM platforms
+/// Represents a set of measurements values for one of the supported CVM
+/// platforms
 #[derive(Clone, PartialEq)]
 pub enum MultiMeasurements {
     Dcap(HashMap<DcapMeasurementRegister, [u8; 48]>),
@@ -238,7 +240,8 @@ pub enum MeasurementFormatError {
 /// An accepted measurement value given in the measurements file
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeasurementRecord {
-    /// An identifier, for example the name and version of the corresponding OS image
+    /// An identifier, for example the name and version of the corresponding
+    /// OS image
     pub measurement_id: String,
     /// The expected measurement register values
     pub measurements: ExpectedMeasurements,
@@ -266,17 +269,20 @@ impl MeasurementRecord {
 
 /// Represents the measurement policy
 ///
-/// This is a set of acceptable attestation types (CVM platforms) which may or may not enforce
-/// acceptable measurement values for each attestation type
+/// This is a set of acceptable attestation types (CVM platforms) which may
+/// or may not enforce acceptable measurement values for each attestation
+/// type
 #[derive(Clone, Debug)]
 pub struct MeasurementPolicy {
     /// A map of accepted attestation types to accepted measurement values
-    /// A value of None means accept any measurement value for this measurement type
+    /// A value of None means accept any measurement value for this
+    /// measurement type
     pub(crate) accepted_measurements: Vec<MeasurementRecord>,
 }
 
 impl MeasurementPolicy {
-    /// This will only allow no attestation - and will reject it if one is given
+    /// This will only allow no attestation - and will reject it if one is
+    /// given
     pub fn expect_none() -> Self {
         Self { accepted_measurements: vec![MeasurementRecord::allow_no_attestation()] }
     }
@@ -330,7 +336,8 @@ impl MeasurementPolicy {
         }
     }
 
-    /// Given an attestation type and set of measurements, check whether they are acceptable
+    /// Given an attestation type and set of measurements, check whether
+    /// they are acceptable
     pub fn check_measurement(
         &self,
         measurements: &MultiMeasurements,
@@ -379,7 +386,8 @@ impl MeasurementPolicy {
             .any(|a| a.measurements == ExpectedMeasurements::NoAttestation)
     }
 
-    /// Given either a URL or the path to a file, parse the measurement policy from JSON
+    /// Given either a URL or the path to a file, parse the measurement
+    /// policy from JSON
     pub async fn from_file_or_url(file_or_url: String) -> Result<Self, MeasurementFormatError> {
         if file_or_url.starts_with("https://") || file_or_url.starts_with("http://") {
             let measurements_json = reqwest::get(file_or_url).await?.bytes().await?;
@@ -389,7 +397,8 @@ impl MeasurementPolicy {
         }
     }
 
-    /// Given the path to a JSON file containing measurements, return a [MeasurementPolicy]
+    /// Given the path to a JSON file containing measurements, return a
+    /// [MeasurementPolicy]
     pub async fn from_file(measurement_file: PathBuf) -> Result<Self, MeasurementFormatError> {
         let measurements_json = tokio::fs::read(measurement_file).await?;
         Self::from_json_bytes(measurements_json).await
@@ -404,14 +413,17 @@ impl MeasurementPolicy {
             measurements: Option<HashMap<String, MeasurementEntry>>,
         }
 
-        /// Measurement entry for a single register in the measurements JSON file.
-        /// Use `expected_any` for new configurations; `expected` is deprecated.
+        /// Measurement entry for a single register in the measurements JSON
+        /// file. Use `expected_any` for new configurations;
+        /// `expected` is deprecated.
         #[derive(Debug, Deserialize)]
         struct MeasurementEntry {
-            /// Deprecated: use `expected_any` instead. Single hex-encoded expected value.
+            /// Deprecated: use `expected_any` instead. Single hex-encoded
+            /// expected value.
             #[serde(default)]
             expected: Option<String>,
-            /// List of acceptable hex-encoded values (OR semantics - any value matches).
+            /// List of acceptable hex-encoded values (OR semantics - any
+            /// value matches).
             #[serde(default)]
             expected_any: Option<Vec<String>>,
         }
@@ -571,7 +583,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_measurements_file_non_specific() {
-        // This specifies a particular attestation type, but not specific measurements
+        // This specifies a particular attestation type, but not specific
+        // measurements
         let allowed_attestation_type =
             MeasurementPolicy::from_file("test-assets/measurements_2.json".into()).await.unwrap();
 

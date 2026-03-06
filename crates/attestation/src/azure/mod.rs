@@ -2,7 +2,6 @@
 mod ak_certificate;
 mod nv_index;
 use ak_certificate::{read_ak_certificate_from_tpm, verify_ak_cert_with_azure_roots};
-
 use az_tdx_vtpm::{hcl, imds, vtpm};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
 use dcap_qvl::QuoteCollateralV3;
@@ -37,7 +36,8 @@ struct TpmAttest {
     /// `/sys/kernel/security/ima/ascii_runtime_measurements`,
     /// `/sys/kernel/security/tpm0/binary_bios_measurements`,
     event_log: Vec<u8>,
-    /// Optional platform / instance metadata used to bind or verify the AK [currently not used]
+    /// Optional platform / instance metadata used to bind or verify the AK
+    /// [currently not used]
     instance_info: Option<Vec<u8>>,
 }
 
@@ -49,7 +49,8 @@ pub async fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, M
 
     let td_report_from_hcl = hcl.try_into()?;
 
-    // This makes a request to Azure Instance metadata service and gives us a binary response
+    // This makes a request to Azure Instance metadata service and gives us a
+    // binary response
     let td_quote_bytes = imds::get_td_quote(&td_report_from_hcl)?;
 
     let ak_certificate_der = read_ak_certificate_from_tpm()?;
@@ -99,7 +100,8 @@ pub async fn verify_azure_attestation(
 }
 
 /// Do the verification, passing in the current time
-/// This allows us to test this function without time checks going out of date
+/// This allows us to test this function without time checks going out of
+/// date
 async fn verify_azure_attestation_with_given_timestamp(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
@@ -221,7 +223,8 @@ struct HclRuntimeClaims {
     user_data: Option<String>,
 }
 
-/// This is only used as a common type to compare public keys with different formats
+/// This is only used as a common type to compare public keys with different
+/// formats
 #[derive(Debug, PartialEq)]
 struct RsaPubKey {
     n: BigUint,
@@ -329,9 +332,8 @@ pub enum MaaError {
 
 #[cfg(test)]
 mod tests {
-    use crate::measurements::MeasurementPolicy;
-
     use super::*;
+    use crate::measurements::MeasurementPolicy;
 
     fn input_data_from_attestation(attestation_bytes: &[u8]) -> [u8; 64] {
         let attestation_document: AttestationDocument =
@@ -346,7 +348,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_decode_hcl() {
-        // From cvm-reverse-proxy/internal/attestation/azure/tdx/testdata/hclreport.bin
+        // From cvm-reverse-proxy/internal/attestation/azure/tdx/testdata/hclreport.
+        // bin
         let hcl_bytes: &'static [u8] = include_bytes!("../../test-assets/hclreport.bin");
 
         let hcl_report = hcl::HclReport::new(hcl_bytes.to_vec()).unwrap();
@@ -363,8 +366,8 @@ mod tests {
         let attestation_bytes: &'static [u8] =
             include_bytes!("../../test-assets/azure-tdx-1764662251380464271");
 
-        // To avoid this test stopping working when the certificate is no longer valid we pass in a
-        // timestamp
+        // To avoid this test stopping working when the certificate is no longer
+        // valid we pass in a timestamp
         let now = 1771423480;
 
         let measurements_json = br#"
