@@ -19,6 +19,7 @@ pub enum DcapMeasurementRegister {
     RTMR3,
 }
 
+/// For converting from the format used in headers
 impl TryFrom<u8> for DcapMeasurementRegister {
     type Error = MeasurementFormatError;
 
@@ -189,6 +190,18 @@ impl MultiMeasurements {
     pub fn from_pcrs<'a>(pcrs: impl Iterator<Item = &'a [u8; 32]>) -> Self {
         Self::Azure(pcrs.copied().enumerate().map(|(index, value)| (index as u32, value)).collect())
     }
+}
+
+/// All-zero measurment values used in some tests
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn mock_dcap_measurements() -> MultiMeasurements {
+    MultiMeasurements::Dcap(HashMap::from([
+        (DcapMeasurementRegister::MRTD, [0u8; 48]),
+        (DcapMeasurementRegister::RTMR0, [0u8; 48]),
+        (DcapMeasurementRegister::RTMR1, [0u8; 48]),
+        (DcapMeasurementRegister::RTMR2, [0u8; 48]),
+        (DcapMeasurementRegister::RTMR3, [0u8; 48]),
+    ]))
 }
 
 /// An error when converting measurements / to or from HTTP header format
@@ -500,8 +513,6 @@ impl MeasurementPolicy {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-
-    use crate::test_helpers::mock_dcap_measurements;
 
     use super::*;
 

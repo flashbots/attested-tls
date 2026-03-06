@@ -5,9 +5,6 @@ pub mod azure;
 pub mod dcap;
 pub mod measurements;
 
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod test_helpers;
-
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
 use serde::{Deserialize, Serialize};
