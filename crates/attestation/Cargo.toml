@@ -9,7 +9,7 @@ keywords = ["attestation", "CVM", "TDX"]
 
 [dependencies]
 tokio = { workspace = true, features = ["fs"] }
-tokio-rustls = { workspace = true }
+tokio-rustls = { workspace = true, default-features = false }
 x509-parser = "0.18.0"
 thiserror = "2.0.17"
 anyhow = "1.0.100"
@@ -43,6 +43,7 @@ tdx-quote = { version = "0.0.5", features = ["mock"], optional = true }
 [dev-dependencies]
 tempfile = "3.23.0"
 tdx-quote = { version = "0.0.5", features = ["mock"] }
+tokio-rustls = { workspace = true, default-features = true }
 
 [features]
 default = []

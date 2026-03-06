@@ -9,7 +9,7 @@ members = [
 
 [workspace.dependencies]
 tokio = "1.48.0"
-tokio-rustls = "0.26.4"
+tokio-rustls = { version = "0.26.4", default-features = false }
 
 [workspace.lints.rust]
 unreachable_pub = "deny"
