@@ -196,7 +196,8 @@ mod tests {
         }]
         "#;
 
-        let measurement_policy = MeasurementPolicy::from_json_bytes(measurements_json.to_vec()).unwrap();
+        let measurement_policy =
+            MeasurementPolicy::from_json_bytes(measurements_json.to_vec()).unwrap();
 
         let collateral_bytes: &'static [u8] =
             include_bytes!("../test-assets/dcap-quote-collateral-00.json");
