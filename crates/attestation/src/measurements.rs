@@ -391,7 +391,7 @@ impl MeasurementPolicy {
     pub async fn from_file_or_url(file_or_url: String) -> Result<Self, MeasurementFormatError> {
         if file_or_url.starts_with("https://") || file_or_url.starts_with("http://") {
             let measurements_json = reqwest::get(file_or_url).await?.bytes().await?;
-            Self::from_json_bytes(measurements_json.to_vec()).await
+            Self::from_json_bytes(measurements_json.to_vec())
         } else {
             Self::from_file(file_or_url.into()).await
         }
@@ -401,11 +401,11 @@ impl MeasurementPolicy {
     /// [MeasurementPolicy]
     pub async fn from_file(measurement_file: PathBuf) -> Result<Self, MeasurementFormatError> {
         let measurements_json = tokio::fs::read(measurement_file).await?;
-        Self::from_json_bytes(measurements_json).await
+        Self::from_json_bytes(measurements_json)
     }
 
     /// Parse from JSON
-    pub async fn from_json_bytes(json_bytes: Vec<u8>) -> Result<Self, MeasurementFormatError> {
+    pub fn from_json_bytes(json_bytes: Vec<u8>) -> Result<Self, MeasurementFormatError> {
         #[derive(Debug, Deserialize)]
         struct MeasurementRecordSimple {
             measurement_id: Option<String>,
@@ -639,7 +639,7 @@ mod tests {
             }
         ]"#;
 
-        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).await.unwrap();
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
         assert_eq!(policy.accepted_measurements.len(), 1);
 
         let record = &policy.accepted_measurements[0];
@@ -668,7 +668,7 @@ mod tests {
             }
         ]"#;
 
-        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).await.unwrap();
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
 
         // First value should match
         let measurements1 =
@@ -700,7 +700,7 @@ mod tests {
             }
         ]"#;
 
-        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).await;
+        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec());
         assert!(matches!(result, Err(MeasurementFormatError::BothExpectedAndExpectedAny(_))));
     }
 
@@ -715,7 +715,7 @@ mod tests {
             }
         ]"#;
 
-        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).await;
+        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec());
         assert!(matches!(result, Err(MeasurementFormatError::NoExpectedValue(_))));
     }
 
@@ -732,7 +732,7 @@ mod tests {
             }
         ]"#;
 
-        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).await;
+        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec());
         assert!(matches!(result, Err(MeasurementFormatError::EmptyExpectedAny(_))));
     }
 
@@ -756,7 +756,7 @@ mod tests {
             }
         ]"#;
 
-        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).await.unwrap();
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
 
         // Both match (single + first of any)
         let measurements1 = MultiMeasurements::Dcap(HashMap::from([

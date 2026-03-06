@@ -74,7 +74,7 @@ impl AttestationType {
         // First attempt azure, if the feature is present
         #[cfg(feature = "azure")]
         {
-            if azure::create_azure_attestation([0; 64]).await.is_ok() {
+            if azure::create_azure_attestation([0; 64]).is_ok() {
                 return Ok(AttestationType::AzureTdx);
             }
         }
@@ -182,14 +182,14 @@ impl AttestationGenerator {
         } else {
             Ok(AttestationExchangeMessage {
                 attestation_type: self.attestation_type,
-                attestation: self.generate_attestation_bytes(input_data).await?,
+                attestation: self.generate_attestation_bytes(input_data)?,
             })
         }
     }
 
     /// Generate attestation evidence bytes based on attestation type, with
     /// given input data
-    async fn generate_attestation_bytes(
+    fn generate_attestation_bytes(
         &self,
         input_data: [u8; 64],
     ) -> Result<Vec<u8>, AttestationError> {
@@ -198,7 +198,7 @@ impl AttestationGenerator {
             AttestationType::AzureTdx => {
                 #[cfg(feature = "azure")]
                 {
-                    Ok(azure::create_azure_attestation(input_data).await?)
+                    Ok(azure::create_azure_attestation(input_data)?)
                 }
                 #[cfg(not(feature = "azure"))]
                 {
@@ -208,7 +208,7 @@ impl AttestationGenerator {
                     Err(AttestationError::AttestationTypeNotSupported)
                 }
             }
-            _ => dcap::create_dcap_attestation(input_data).await,
+            _ => dcap::create_dcap_attestation(input_data),
         }
     }
 

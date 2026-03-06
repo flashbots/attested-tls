@@ -19,7 +19,7 @@ const AZURE_BAD_FMSPC: &str = "90C06F000000";
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
 /// Quote generation using configfs_tsm
-pub async fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
+pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
     let quote = generate_quote(input_data)?;
     tracing::info!("Generated TDX quote of {} bytes", quote.len());
     Ok(quote)
@@ -196,8 +196,7 @@ mod tests {
         }]
         "#;
 
-        let measurement_policy =
-            MeasurementPolicy::from_json_bytes(measurements_json.to_vec()).await.unwrap();
+        let measurement_policy = MeasurementPolicy::from_json_bytes(measurements_json.to_vec()).unwrap();
 
         let collateral_bytes: &'static [u8] =
             include_bytes!("../test-assets/dcap-quote-collateral-00.json");

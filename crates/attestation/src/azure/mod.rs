@@ -42,7 +42,7 @@ struct TpmAttest {
 }
 
 /// Generate a TDX attestation on Azure
-pub async fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaError> {
+pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaError> {
     let hcl_report_bytes = vtpm::get_report_with_report_data(&input_data)?;
 
     let hcl = hcl::HclReport::new(hcl_report_bytes.clone())?;
@@ -246,9 +246,8 @@ impl RsaPubKey {
 
     fn from_certificate(cert: &X509Certificate) -> Result<Self, MaaError> {
         let spki = cert.public_key();
-        let rsa_from_cert = match spki.parsed() {
-            Ok(x509_parser::public_key::PublicKey::RSA(rsa)) => rsa,
-            _ => return Err(MaaError::NotRsa),
+        let Ok(x509_parser::public_key::PublicKey::RSA(rsa_from_cert)) = spki.parsed() else {
+            return Err(MaaError::NotRsa);
         };
 
         Ok(Self {
@@ -388,8 +387,7 @@ mod tests {
         }]
         "#;
 
-        let measurement_policy =
-            MeasurementPolicy::from_json_bytes(measurements_json.to_vec()).await.unwrap();
+        let measurement_policy = MeasurementPolicy::from_json_bytes(measurements_json.to_vec()).unwrap();
 
         let collateral_bytes: &'static [u8] =
             include_bytes!("../../test-assets/azure-collateral02.json");
