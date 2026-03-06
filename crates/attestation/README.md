@@ -7,17 +7,19 @@ This crate provides:
 - Attestation generation and verification for DCAP and (optionally) Azure
 - Parsing and evaluation of measurement policies
 
-## Features
+## Feature flags
 
-- `mock`
-Enables mock quote support via `tdx-quote` for tests and development on non-TDX hardware.
+### `azure`
 
-- `azure`
 Enables Microsoft Azure vTPM attestation support (generation and verification), through `tss-esapi`.
 
 This feature requires [tpm2](https://tpm2-software.github.io) and `openssl` to be installed. On Debian-based systems tpm2 is provided by [`libtss2-dev`](https://packages.debian.org/trixie/libtss2-dev), and on nix `tpm2-tss`. This dependency is currently not packaged for MacOS, meaning currently it is not possible to compile or run with the `azure` feature on MacOS. 
 
 This feature is disabled by default. Note that without this feature, verification of azure attestations is not possible and azure attestations will be rejected with an error.
+
+### `mock`
+
+Enables mock quote support via `tdx-quote` for tests and development on non-TDX hardware.
 
 ## Attestation Types
 
