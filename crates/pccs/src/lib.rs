@@ -1,0 +1,783 @@
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use dcap_qvl::{QuoteCollateralV3, collateral::get_collateral_for_fmspc, tcb_info::TcbInfo};
+use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::{
+    sync::{RwLock, Semaphore},
+    task::{JoinHandle, JoinSet},
+    time::{Duration, sleep},
+};
+
+/// For fetching collateral directly from Intel
+pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
+
+const REFRESH_MARGIN_SECS: i64 = 300;
+const REFRESH_RETRY_SECS: u64 = 60;
+const STARTUP_PREWARM_CONCURRENCY: usize = 8;
+
+/// PCCS collateral cache with proactive background refresh
+#[derive(Clone)]
+pub struct Pccs {
+    /// The URL of the service used to fetch collateral (PCS / PCCS)
+    pccs_url: String,
+    /// The internal cache
+    cache: Arc<RwLock<HashMap<PccsInput, CacheEntry>>>,
+    prewarm_stats: Arc<PrewarmStats>,
+}
+
+impl std::fmt::Debug for Pccs {
+    /// Formats PCCS config for debug output without exposing cache
+    /// internals
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pccs").field("pccs_url", &self.pccs_url).finish_non_exhaustive()
+    }
+}
+
+impl Pccs {
+    /// Creates a new PCCS cache using the provided URL or Intel PCS default
+    pub fn new(pccs_url: Option<String>) -> Self {
+        let pccs_url = pccs_url
+            .unwrap_or(PCS_URL.to_string())
+            .trim_end_matches('/')
+            .trim_end_matches("/sgx/certification/v4")
+            .trim_end_matches("/tdx/certification/v4")
+            .to_string();
+
+        let pccs = Self {
+            pccs_url,
+            cache: RwLock::new(HashMap::new()).into(),
+            prewarm_stats: Arc::new(PrewarmStats::default()),
+        };
+
+        // Start filling the cache right away
+        let pccs_for_prewarm = pccs.clone();
+        tokio::spawn(async move {
+            pccs_for_prewarm.startup_prewarm_all_tdx().await;
+        });
+
+        pccs
+    }
+
+    /// Returns collateral from cache when valid, otherwise fetches and
+    /// caches fresh collateral
+    pub async fn get_collateral(
+        &self,
+        fmspc: String,
+        ca: &'static str,
+        now: i64,
+    ) -> Result<(QuoteCollateralV3, bool), PccsError> {
+        let cache_key = PccsInput::new(fmspc.clone(), ca);
+
+        {
+            let cache = self.cache.read().await;
+            if let Some(entry) = cache.get(&cache_key) {
+                if now < entry.next_update {
+                    return Ok((entry.collateral.clone(), false));
+                }
+                tracing::warn!(
+                    fmspc,
+                    next_update = entry.next_update,
+                    now,
+                    "Cached collateral expired, refreshing from PCCS"
+                );
+            }
+        }
+
+        let collateral = fetch_collateral(&self.pccs_url, fmspc.clone(), ca).await?;
+        let next_update = extract_next_update(&collateral, now)?;
+
+        let mut cache = self.cache.write().await;
+        if let Some(existing) = cache.get(&cache_key) &&
+            now < existing.next_update
+        {
+            return Ok((existing.collateral.clone(), false));
+        }
+
+        upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
+        drop(cache);
+        self.ensure_refresh_task(&cache_key).await;
+        Ok((collateral, true))
+    }
+
+    /// Fetches fresh collateral, overwrites cache, and ensures proactive
+    /// refresh is scheduled
+    pub async fn refresh_collateral(
+        &self,
+        fmspc: String,
+        ca: &'static str,
+        now: i64,
+    ) -> Result<QuoteCollateralV3, PccsError> {
+        let collateral = fetch_collateral(&self.pccs_url, fmspc.clone(), ca).await?;
+        let next_update = extract_next_update(&collateral, now)?;
+        let cache_key = PccsInput::new(fmspc, ca);
+
+        {
+            let mut cache = self.cache.write().await;
+            upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
+        }
+        self.ensure_refresh_task(&cache_key).await;
+        Ok(collateral)
+    }
+
+    /// Starts a background refresh loop for a cache key when no task is
+    /// active
+    async fn ensure_refresh_task(&self, cache_key: &PccsInput) {
+        let mut cache = self.cache.write().await;
+        let Some(entry) = cache.get_mut(cache_key) else {
+            return;
+        };
+        if entry.refresh_task.is_some() {
+            return;
+        }
+
+        let weak_cache = Arc::downgrade(&self.cache);
+        let key = cache_key.clone();
+        let pccs_url = self.pccs_url.clone();
+        entry.refresh_task = Some(tokio::spawn(async move {
+            refresh_loop(weak_cache, pccs_url, key).await;
+        }));
+    }
+
+    /// Pre-provisions TDX collateral for discovered FMSPC values to reduce
+    /// hot-path fetches
+    async fn startup_prewarm_all_tdx(&self) {
+        // First get all FMSPCs
+        let fmspcs = match self.fetch_fmspcs().await {
+            Ok(fmspcs) => fmspcs,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to fetch FMSPC list for startup pre-provision");
+                self.prewarm_stats.completed.store(true, Ordering::SeqCst);
+                return;
+            }
+        };
+        self.prewarm_stats.discovered_fmspcs.store(fmspcs.len(), Ordering::SeqCst);
+
+        if fmspcs.is_empty() {
+            tracing::warn!("No FMSPC entries returned during startup pre-provision");
+            self.prewarm_stats.completed.store(true, Ordering::SeqCst);
+            return;
+        }
+
+        // For each FMSPC, get the 'processor' and 'platform' collateral
+        // concurrently
+        let semaphore = Arc::new(Semaphore::new(STARTUP_PREWARM_CONCURRENCY));
+        let mut join_set = JoinSet::new();
+        for entry in fmspcs {
+            for ca in ["processor", "platform"] {
+                let permit = semaphore.clone().acquire_owned().await;
+                let Ok(permit) = permit else {
+                    continue;
+                };
+                self.prewarm_stats.attempted.fetch_add(1, Ordering::SeqCst);
+                let pccs = self.clone();
+                let fmspc = entry.fmspc.clone();
+                join_set.spawn(async move {
+                    let _permit = permit;
+                    let now = unix_now()?;
+                    let result = pccs.refresh_collateral(fmspc.clone(), ca, now).await;
+                    Ok::<(String, &'static str, Result<(), PccsError>), PccsError>((
+                        fmspc,
+                        ca,
+                        result.map(|_| ()),
+                    ))
+                });
+            }
+        }
+
+        // Collect results
+        let mut successes = 0usize;
+        let mut failures = 0usize;
+        while let Some(task_result) = join_set.join_next().await {
+            match task_result {
+                Ok(Ok((_, _, Ok(())))) => {
+                    successes += 1;
+                    self.prewarm_stats.successes.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(Ok((fmspc, ca, Err(e)))) => {
+                    failures += 1;
+                    self.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
+                    tracing::debug!(
+                        fmspc,
+                        ca,
+                        error = %e,
+                        "Startup pre-provision failed for FMSPC/CA"
+                    );
+                }
+                Ok(Err(e)) => {
+                    failures += 1;
+                    self.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
+                    tracing::debug!(error = %e, "Startup pre-provision task failed");
+                }
+                Err(e) => {
+                    failures += 1;
+                    self.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
+                    tracing::debug!(error = %e, "Startup pre-provision join error");
+                }
+            }
+        }
+        self.prewarm_stats.completed.store(true, Ordering::SeqCst);
+
+        tracing::info!(
+            discovered_fmspcs = self.prewarm_stats.discovered_fmspcs.load(Ordering::SeqCst),
+            attempted = self.prewarm_stats.attempted.load(Ordering::SeqCst),
+            successes,
+            failures,
+            "Completed PCCS startup pre-provisioning for TDX collateral"
+        );
+    }
+
+    /// Fetches available FMSPC entries from configured PCCS/PCS endpoint
+    async fn fetch_fmspcs(&self) -> Result<Vec<FmspcEntry>, PccsError> {
+        let url = format!("{}/sgx/certification/v4/fmspcs", self.pccs_url);
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?;
+        let response = client.get(&url).send().await?;
+        if !response.status().is_success() {
+            return Err(PccsError::FmspcFetch(response.status()));
+        }
+        let body = response.text().await?;
+        let entries: Vec<FmspcEntry> = serde_json::from_str(&body)?;
+        Ok(entries)
+    }
+}
+
+/// Cache key for PCCS collateral entries
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct PccsInput {
+    fmspc: String,
+    ca: String,
+}
+
+impl PccsInput {
+    /// Builds a cache key from FMSPC and CA identifier
+    fn new(fmspc: String, ca: &'static str) -> Self {
+        Self { fmspc, ca: ca.to_string() }
+    }
+}
+
+/// Fetches collateral from PCCS for a given FMSPC and CA
+async fn fetch_collateral(
+    pccs_url: &str,
+    fmspc: String,
+    ca: &'static str,
+) -> Result<QuoteCollateralV3, PccsError> {
+    get_collateral_for_fmspc(
+        pccs_url, fmspc, ca, false, // Indicates not SGX
+    )
+    .await
+    .map_err(Into::into)
+}
+
+/// Extracts the earliest next update timestamp from collateral metadata
+fn extract_next_update(collateral: &QuoteCollateralV3, now: i64) -> Result<i64, PccsError> {
+    let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).map_err(|e| {
+        PccsError::PccsCollateralParse(format!("Failed to parse TCB info JSON: {e}"))
+    })?;
+    let qe_identity: QeIdentityNextUpdate =
+        serde_json::from_str(&collateral.qe_identity).map_err(|e| {
+            PccsError::PccsCollateralParse(format!("Failed to parse QE identity JSON: {e}"))
+        })?;
+
+    let tcb_next_update = parse_next_update("tcb_info.nextUpdate", &tcb_info.next_update)?;
+    let qe_next_update = parse_next_update("qe_identity.nextUpdate", &qe_identity.next_update)?;
+    let next_update = tcb_next_update.min(qe_next_update);
+
+    if now >= next_update {
+        return Err(PccsError::PccsCollateralExpired(format!(
+            "Collateral expired (tcb_next_update={}, qe_next_update={}, now={now})",
+            tcb_info.next_update, qe_identity.next_update
+        )));
+    }
+
+    Ok(next_update)
+}
+
+/// Parses an RFC3339 nextUpdate value into a unix timestamp
+fn parse_next_update(field: &str, value: &str) -> Result<i64, PccsError> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|e| {
+            PccsError::PccsCollateralParse(format!("Failed to parse {field} as RFC3339: {e}"))
+        })
+        .map(|parsed| parsed.unix_timestamp())
+}
+
+/// Returns current unix time in seconds
+fn unix_now() -> Result<i64, PccsError> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64)
+}
+
+/// Computes how many seconds to sleep before refresh should start
+fn refresh_sleep_seconds(next_update: i64, now: i64) -> u64 {
+    let refresh_at = next_update - REFRESH_MARGIN_SECS;
+    if refresh_at <= now { 0 } else { (refresh_at - now) as u64 }
+}
+
+/// Inserts or updates a cache entry while preserving any active refresh
+/// task
+fn upsert_cache_entry(
+    cache: &mut HashMap<PccsInput, CacheEntry>,
+    key: PccsInput,
+    collateral: QuoteCollateralV3,
+    next_update: i64,
+) {
+    match cache.get_mut(&key) {
+        Some(existing) => {
+            existing.collateral = collateral;
+            existing.next_update = next_update;
+        }
+        None => {
+            cache.insert(key, CacheEntry { collateral, next_update, refresh_task: None });
+        }
+    }
+}
+
+/// Converts CA identifier string into the expected static literal
+fn ca_as_static(ca: &str) -> Option<&'static str> {
+    match ca {
+        "processor" => Some("processor"),
+        "platform" => Some("platform"),
+        _ => None,
+    }
+}
+
+/// Background loop that refreshes collateral for a single cache key
+async fn refresh_loop(
+    weak_cache: Weak<RwLock<HashMap<PccsInput, CacheEntry>>>,
+    pccs_url: String,
+    key: PccsInput,
+) {
+    let Some(ca_static) = ca_as_static(&key.ca) else {
+        tracing::warn!(ca = key.ca, "Unsupported collateral CA value, refresh loop stopping");
+        return;
+    };
+
+    loop {
+        let Some(cache) = weak_cache.upgrade() else {
+            return;
+        };
+        let next_update = {
+            let cache_guard = cache.read().await;
+            let Some(entry) = cache_guard.get(&key) else {
+                return;
+            };
+            entry.next_update
+        };
+
+        let now = match unix_now() {
+            Ok(now) => now,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to read system time for PCCS refresh");
+                sleep(Duration::from_secs(REFRESH_RETRY_SECS)).await;
+                continue;
+            }
+        };
+        let sleep_secs = refresh_sleep_seconds(next_update, now);
+        sleep(Duration::from_secs(sleep_secs)).await;
+
+        match fetch_collateral(&pccs_url, key.fmspc.clone(), ca_static).await {
+            Ok(collateral) => match extract_next_update(&collateral, now) {
+                Ok(new_next_update) => {
+                    let Some(cache) = weak_cache.upgrade() else {
+                        return;
+                    };
+                    let mut cache_guard = cache.write().await;
+                    let Some(entry) = cache_guard.get_mut(&key) else {
+                        return;
+                    };
+                    entry.collateral = collateral;
+                    entry.next_update = new_next_update;
+                    tracing::debug!(
+                        fmspc = key.fmspc,
+                        ca = key.ca,
+                        next_update = new_next_update,
+                        "Refreshed PCCS collateral in background"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        fmspc = key.fmspc,
+                        ca = key.ca,
+                        error = %e,
+                        "Fetched PCCS collateral but nextUpdate validation failed"
+                    );
+                    sleep(Duration::from_secs(REFRESH_RETRY_SECS)).await;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    fmspc = key.fmspc,
+                    ca = key.ca,
+                    error = %e,
+                    "Background PCCS collateral refresh failed"
+                );
+                sleep(Duration::from_secs(REFRESH_RETRY_SECS)).await;
+            }
+        }
+    }
+}
+
+/// Cached collateral entry with refresh metadata
+struct CacheEntry {
+    collateral: QuoteCollateralV3,
+    next_update: i64,
+    refresh_task: Option<JoinHandle<()>>,
+}
+
+/// Minimal QE identity shape needed to read nextUpdate
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QeIdentityNextUpdate {
+    next_update: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FmspcEntry {
+    fmspc: String,
+    #[allow(dead_code)]
+    platform: String,
+}
+
+#[derive(Default)]
+struct PrewarmStats {
+    discovered_fmspcs: AtomicUsize,
+    attempted: AtomicUsize,
+    successes: AtomicUsize,
+    failures: AtomicUsize,
+    completed: AtomicBool,
+}
+
+#[derive(Error, Debug)]
+pub enum PccsError {
+    #[error("DCAP quote verification: {0}")]
+    DcapQvl(#[from] anyhow::Error),
+    #[error("PCCS collateral parse error: {0}")]
+    PccsCollateralParse(String),
+    #[error("PCCS collateral expired: {0}")]
+    PccsCollateralExpired(String),
+    #[error("System Time: {0}")]
+    SystemTime(#[from] std::time::SystemTimeError),
+    #[error("HTTP client: {0}")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("Failed to fetch FMSPC: {0}")]
+    FmspcFetch(reqwest::StatusCode),
+    #[error("JSON: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap as StdHashMap,
+        net::SocketAddr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use axum::{
+        Json,
+        Router,
+        extract::{Query, State},
+        response::IntoResponse,
+        routing::get,
+    };
+    use dcap_qvl::QuoteCollateralV3;
+    use serde_json::{Value, json};
+    use tokio::{net::TcpListener, task::JoinHandle, time::Duration};
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct MockPcsConfig {
+        fmspc: String,
+        ca: &'static str,
+        tcb_next_update: String,
+        qe_next_update: String,
+        refreshed_tcb_next_update: Option<String>,
+        refreshed_qe_next_update: Option<String>,
+    }
+
+    /// A mock PCS server so we can run tests without using the Intel PCS
+    struct MockPcsServer {
+        base_url: String,
+        _task: JoinHandle<()>,
+        tcb_calls: Arc<AtomicUsize>,
+        qe_calls: Arc<AtomicUsize>,
+    }
+
+    impl Drop for MockPcsServer {
+        fn drop(&mut self) {
+            self._task.abort();
+        }
+    }
+
+    impl MockPcsServer {
+        fn tcb_call_count(&self) -> usize {
+            self.tcb_calls.load(Ordering::SeqCst)
+        }
+
+        fn qe_call_count(&self) -> usize {
+            self.qe_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockPcsState {
+        fmspc: String,
+        ca: String,
+        base_tcb_info: Value,
+        base_qe_identity: Value,
+        tcb_signature_hex: String,
+        qe_signature_hex: String,
+        tcb_next_update: String,
+        qe_next_update: String,
+        refreshed_tcb_next_update: Option<String>,
+        refreshed_qe_next_update: Option<String>,
+        pck_crl: Vec<u8>,
+        pck_crl_issuer_chain: String,
+        tcb_issuer_chain: String,
+        qe_issuer_chain: String,
+        root_ca_crl_hex: String,
+        tcb_calls: Arc<AtomicUsize>,
+        qe_calls: Arc<AtomicUsize>,
+    }
+
+    async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServer {
+        let base_collateral: QuoteCollateralV3 = serde_json::from_slice(include_bytes!(
+            "../../attestation/test-assets/dcap-quote-collateral-00.json"
+        ))
+        .unwrap();
+
+        let mut tcb_info: Value = serde_json::from_str(&base_collateral.tcb_info).unwrap();
+        tcb_info["nextUpdate"] = Value::String(config.tcb_next_update.clone());
+
+        let mut qe_identity: Value = serde_json::from_str(&base_collateral.qe_identity).unwrap();
+        qe_identity["nextUpdate"] = Value::String(config.qe_next_update.clone());
+
+        let tcb_calls = Arc::new(AtomicUsize::new(0));
+        let qe_calls = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(MockPcsState {
+            fmspc: config.fmspc,
+            ca: config.ca.to_string(),
+            base_tcb_info: tcb_info,
+            base_qe_identity: qe_identity,
+            tcb_signature_hex: hex::encode(&base_collateral.tcb_info_signature),
+            qe_signature_hex: hex::encode(&base_collateral.qe_identity_signature),
+            tcb_next_update: config.tcb_next_update,
+            qe_next_update: config.qe_next_update,
+            refreshed_tcb_next_update: config.refreshed_tcb_next_update,
+            refreshed_qe_next_update: config.refreshed_qe_next_update,
+            pck_crl: base_collateral.pck_crl,
+            pck_crl_issuer_chain: "mock-pck-crl-issuer-chain".to_string(),
+            tcb_issuer_chain: "mock-tcb-info-issuer-chain".to_string(),
+            qe_issuer_chain: "mock-qe-issuer-chain".to_string(),
+            root_ca_crl_hex: hex::encode(base_collateral.root_ca_crl),
+            tcb_calls: tcb_calls.clone(),
+            qe_calls: qe_calls.clone(),
+        });
+
+        let app = Router::new()
+            .route("/sgx/certification/v4/pckcrl", get(mock_pck_crl_handler))
+            .route("/tdx/certification/v4/tcb", get(mock_tcb_handler))
+            .route("/tdx/certification/v4/qe/identity", get(mock_qe_identity_handler))
+            .route("/sgx/certification/v4/rootcacrl", get(mock_root_ca_crl_handler))
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        MockPcsServer { base_url: format!("http://{addr}"), _task: task, tcb_calls, qe_calls }
+    }
+
+    async fn mock_pck_crl_handler(
+        State(state): State<Arc<MockPcsState>>,
+        Query(params): Query<StdHashMap<String, String>>,
+    ) -> impl IntoResponse {
+        assert_eq!(params.get("ca"), Some(&state.ca));
+        assert_eq!(params.get("encoding"), Some(&"der".to_string()));
+        ([("SGX-PCK-CRL-Issuer-Chain", state.pck_crl_issuer_chain.clone())], state.pck_crl.clone())
+    }
+
+    async fn mock_tcb_handler(
+        State(state): State<Arc<MockPcsState>>,
+        Query(params): Query<StdHashMap<String, String>>,
+    ) -> impl IntoResponse {
+        assert_eq!(params.get("fmspc"), Some(&state.fmspc));
+        let call_number = state.tcb_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut tcb_info = state.base_tcb_info.clone();
+        let next_update = if call_number == 1 {
+            state.tcb_next_update.clone()
+        } else {
+            state.refreshed_tcb_next_update.clone().unwrap_or_else(|| state.tcb_next_update.clone())
+        };
+        tcb_info["nextUpdate"] = Value::String(next_update);
+        (
+            [("SGX-TCB-Info-Issuer-Chain", state.tcb_issuer_chain.clone())],
+            Json(json!({
+                "tcbInfo": tcb_info,
+                "signature": state.tcb_signature_hex,
+            })),
+        )
+    }
+
+    async fn mock_qe_identity_handler(
+        State(state): State<Arc<MockPcsState>>,
+        Query(params): Query<StdHashMap<String, String>>,
+    ) -> impl IntoResponse {
+        assert_eq!(params.get("update"), Some(&"standard".to_string()));
+        let call_number = state.qe_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut qe_identity = state.base_qe_identity.clone();
+        let next_update = if call_number == 1 {
+            state.qe_next_update.clone()
+        } else {
+            state.refreshed_qe_next_update.clone().unwrap_or_else(|| state.qe_next_update.clone())
+        };
+        qe_identity["nextUpdate"] = Value::String(next_update);
+        (
+            [("SGX-Enclave-Identity-Issuer-Chain", state.qe_issuer_chain.clone())],
+            Json(json!({
+                "enclaveIdentity": qe_identity,
+                "signature": state.qe_signature_hex,
+            })),
+        )
+    }
+
+    async fn mock_root_ca_crl_handler(State(state): State<Arc<MockPcsState>>) -> impl IntoResponse {
+        state.root_ca_crl_hex.clone()
+    }
+
+    #[tokio::test]
+    async fn test_mock_pcs_server_helper_with_get_collateral() {
+        let mock = spawn_mock_pcs_server(MockPcsConfig {
+            fmspc: "00806F050000".to_string(),
+            ca: "processor",
+            tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
+            qe_next_update: "2999-01-01T00:00:00Z".to_string(),
+            refreshed_tcb_next_update: None,
+            refreshed_qe_next_update: None,
+        })
+        .await;
+
+        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let now = 1_700_000_000_i64;
+        let (_, is_fresh) =
+            pccs.get_collateral("00806F050000".to_string(), "processor", now).await.unwrap();
+        assert!(is_fresh);
+    }
+
+    #[tokio::test]
+    async fn test_proactive_refresh_updates_cached_entry() {
+        let initial_now = unix_now().unwrap();
+        let initial_next_update =
+            OffsetDateTime::from_unix_timestamp(initial_now + 2).unwrap().format(&Rfc3339).unwrap();
+        let refreshed_next_update = OffsetDateTime::from_unix_timestamp(initial_now + 3600)
+            .unwrap()
+            .format(&Rfc3339)
+            .unwrap();
+
+        let mock = spawn_mock_pcs_server(MockPcsConfig {
+            fmspc: "00806F050000".to_string(),
+            ca: "processor",
+            tcb_next_update: initial_next_update.clone(),
+            qe_next_update: initial_next_update,
+            refreshed_tcb_next_update: Some(refreshed_next_update.clone()),
+            refreshed_qe_next_update: Some(refreshed_next_update),
+        })
+        .await;
+
+        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let (_, is_fresh) = pccs
+            .get_collateral("00806F050000".to_string(), "processor", initial_now)
+            .await
+            .unwrap();
+        assert!(is_fresh);
+        assert_eq!(mock.tcb_call_count(), 1);
+        assert_eq!(mock.qe_call_count(), 1);
+
+        let (_, is_fresh_second) = pccs
+            .get_collateral("00806F050000".to_string(), "processor", initial_now)
+            .await
+            .unwrap();
+        assert!(!is_fresh_second);
+        assert_eq!(mock.tcb_call_count(), 1);
+        assert_eq!(mock.qe_call_count(), 1);
+
+        for _ in 0..60 {
+            if mock.tcb_call_count() >= 2 && mock.qe_call_count() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        assert!(mock.tcb_call_count() >= 2, "expected proactive TCB refresh to run");
+        assert!(mock.qe_call_count() >= 2, "expected proactive QE identity refresh to run");
+
+        let before_check_calls = mock.tcb_call_count();
+        let now_after_background = unix_now().unwrap();
+        let (_, is_fresh_again) = pccs
+            .get_collateral("00806F050000".to_string(), "processor", now_after_background)
+            .await
+            .unwrap();
+        assert!(!is_fresh_again);
+        assert_eq!(mock.tcb_call_count(), before_check_calls);
+    }
+
+    #[tokio::test]
+    async fn test_startup_prewarm_populates_cache_from_intel_pcs() {
+        let pccs = Pccs::new(None);
+
+        let mut prewarm_completed = false;
+        for _ in 0..40 {
+            if pccs.prewarm_stats.completed.load(Ordering::SeqCst) {
+                prewarm_completed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        let cache_guard = pccs.cache.read().await;
+        let total_entries = cache_guard.len();
+        let unique_fmspcs: std::collections::HashSet<_> =
+            cache_guard.keys().map(|k| k.fmspc.clone()).collect();
+        println!(
+            "startup prewarm summary: completed={}, discovered_fmspcs={}, attempted={}, successes={}, failures={}, cache_entries_total={}, cache_unique_fmspcs={}",
+            prewarm_completed,
+            pccs.prewarm_stats.discovered_fmspcs.load(Ordering::SeqCst),
+            pccs.prewarm_stats.attempted.load(Ordering::SeqCst),
+            pccs.prewarm_stats.successes.load(Ordering::SeqCst),
+            pccs.prewarm_stats.failures.load(Ordering::SeqCst),
+            total_entries,
+            unique_fmspcs.len()
+        );
+        if pccs.prewarm_stats.discovered_fmspcs.load(Ordering::SeqCst) == 0 {
+            println!(
+                "startup prewarm made no discovery progress in test window, skipping cache assertions"
+            );
+            return;
+        }
+        assert!(total_entries > 0, "expected startup pre-provision to populate PCCS cache");
+
+        let (fmspc, ca) = cache_guard
+            .keys()
+            .next()
+            .map(|k| (k.fmspc.clone(), k.ca.clone()))
+            .expect("expected startup pre-provision to populate PCCS cache");
+        drop(cache_guard);
+        let ca_static = ca_as_static(&ca).expect("unexpected CA value in warmed cache entry");
+        let now = unix_now().unwrap();
+        let (_, is_fresh) = pccs.get_collateral(fmspc, ca_static, now).await.unwrap();
+        assert!(!is_fresh);
+    }
+}

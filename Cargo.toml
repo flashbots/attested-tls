@@ -5,11 +5,13 @@ members = [
     "crates/attested-tls",
     "crates/nested-tls",
     "crates/attestation",
+    "crates/pccs",
 ]
 
 [workspace.dependencies]
 tokio = "1.48.0"
 tokio-rustls = { version = "0.26.4", default-features = false }
+dcap-qvl = { git = "https://github.com/Phala-Network/dcap-qvl.git" }
 
 [workspace.lints.rust]
 unreachable_pub = "deny"
