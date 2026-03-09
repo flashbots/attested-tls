@@ -383,34 +383,47 @@ async fn refresh_loop(
         sleep(Duration::from_secs(sleep_secs)).await;
 
         match fetch_collateral(&pccs_url, key.fmspc.clone(), ca_static).await {
-            Ok(collateral) => match extract_next_update(&collateral, now) {
-                Ok(new_next_update) => {
-                    let Some(cache) = weak_cache.upgrade() else {
-                        return;
-                    };
-                    let mut cache_guard = cache.write().await;
-                    let Some(entry) = cache_guard.get_mut(&key) else {
-                        return;
-                    };
-                    entry.collateral = collateral;
-                    entry.next_update = new_next_update;
-                    tracing::debug!(
-                        fmspc = key.fmspc,
-                        ca = key.ca,
-                        next_update = new_next_update,
-                        "Refreshed PCCS collateral in background"
-                    );
+            Ok(collateral) => {
+                let validate_now = match unix_now() {
+                    Ok(timestamp) => timestamp,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to read system time for PCCS refresh validation"
+                        );
+                        sleep(Duration::from_secs(REFRESH_RETRY_SECS)).await;
+                        continue;
+                    }
+                };
+                match extract_next_update(&collateral, validate_now) {
+                    Ok(new_next_update) => {
+                        let Some(cache) = weak_cache.upgrade() else {
+                            return;
+                        };
+                        let mut cache_guard = cache.write().await;
+                        let Some(entry) = cache_guard.get_mut(&key) else {
+                            return;
+                        };
+                        entry.collateral = collateral;
+                        entry.next_update = new_next_update;
+                        tracing::debug!(
+                            fmspc = key.fmspc,
+                            ca = key.ca,
+                            next_update = new_next_update,
+                            "Refreshed PCCS collateral in background"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            fmspc = key.fmspc,
+                            ca = key.ca,
+                            error = %e,
+                            "Fetched PCCS collateral but nextUpdate validation failed"
+                        );
+                        sleep(Duration::from_secs(REFRESH_RETRY_SECS)).await;
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        fmspc = key.fmspc,
-                        ca = key.ca,
-                        error = %e,
-                        "Fetched PCCS collateral but nextUpdate validation failed"
-                    );
-                    sleep(Duration::from_secs(REFRESH_RETRY_SECS)).await;
-                }
-            },
+            }
             Err(e) => {
                 tracing::warn!(
                     fmspc = key.fmspc,
