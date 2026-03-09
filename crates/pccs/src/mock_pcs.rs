@@ -22,7 +22,7 @@ use tokio::{net::TcpListener, task::JoinHandle};
 #[derive(Clone)]
 pub(super) struct MockPcsConfig {
     pub(super) fmspc: String,
-    pub(super) ca: &'static str,
+    pub(super) include_fmspcs_listing: bool,
     pub(super) tcb_next_update: String,
     pub(super) qe_next_update: String,
     pub(super) refreshed_tcb_next_update: Option<String>,
@@ -56,7 +56,7 @@ impl MockPcsServer {
 #[derive(Clone)]
 struct MockPcsState {
     fmspc: String,
-    ca: String,
+    include_fmspcs_listing: bool,
     base_tcb_info: Value,
     base_qe_identity: Value,
     tcb_signature_hex: String,
@@ -90,7 +90,7 @@ pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServe
     let qe_calls = Arc::new(AtomicUsize::new(0));
     let state = Arc::new(MockPcsState {
         fmspc: config.fmspc,
-        ca: config.ca.to_string(),
+        include_fmspcs_listing: config.include_fmspcs_listing,
         base_tcb_info: tcb_info,
         base_qe_identity: qe_identity,
         tcb_signature_hex: hex::encode(&base_collateral.tcb_info_signature),
@@ -109,6 +109,7 @@ pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServe
     });
 
     let app = Router::new()
+        .route("/sgx/certification/v4/fmspcs", get(mock_fmspcs_handler))
         .route("/sgx/certification/v4/pckcrl", get(mock_pck_crl_handler))
         .route("/tdx/certification/v4/tcb", get(mock_tcb_handler))
         .route("/tdx/certification/v4/qe/identity", get(mock_qe_identity_handler))
@@ -128,9 +129,23 @@ async fn mock_pck_crl_handler(
     State(state): State<Arc<MockPcsState>>,
     Query(params): Query<StdHashMap<String, String>>,
 ) -> impl IntoResponse {
-    assert_eq!(params.get("ca"), Some(&state.ca));
+    assert!(
+        matches!(params.get("ca").map(String::as_str), Some("processor") | Some("platform")),
+        "unexpected ca query value for pckcrl"
+    );
     assert_eq!(params.get("encoding"), Some(&"der".to_string()));
     ([("SGX-PCK-CRL-Issuer-Chain", state.pck_crl_issuer_chain.clone())], state.pck_crl.clone())
+}
+
+async fn mock_fmspcs_handler(State(state): State<Arc<MockPcsState>>) -> impl IntoResponse {
+    if state.include_fmspcs_listing {
+        Json(json!([{
+            "fmspc": state.fmspc,
+            "platform": "all",
+        }]))
+    } else {
+        Json(json!([]))
+    }
 }
 
 async fn mock_tcb_handler(

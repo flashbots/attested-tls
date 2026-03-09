@@ -12,7 +12,7 @@ use dcap_qvl::{QuoteCollateralV3, collateral::get_collateral_for_fmspc, tcb_info
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
-    sync::{RwLock, Semaphore},
+    sync::{RwLock, Semaphore, watch},
     task::{JoinHandle, JoinSet},
     time::{Duration, sleep},
 };
@@ -36,6 +36,8 @@ pub struct Pccs {
     cache: Arc<RwLock<HashMap<PccsInput, CacheEntry>>>,
     /// The state of the initial pre-warm fetch
     prewarm_stats: Arc<PrewarmStats>,
+    /// Completion signal for startup pre-warm, shared across all clones
+    prewarm_outcome_tx: watch::Sender<Option<PrewarmOutcome>>,
 }
 
 impl std::fmt::Debug for Pccs {
@@ -56,19 +58,38 @@ impl Pccs {
             .trim_end_matches("/tdx/certification/v4")
             .to_string();
 
+        let (prewarm_outcome_tx, _) = watch::channel(None);
         let pccs = Self {
             pccs_url,
             cache: RwLock::new(HashMap::new()).into(),
             prewarm_stats: Arc::new(PrewarmStats::default()),
+            prewarm_outcome_tx,
         };
 
         // Start filling the cache right away
         let pccs_for_prewarm = pccs.clone();
         tokio::spawn(async move {
-            pccs_for_prewarm.startup_prewarm_all_tdx().await;
+            let outcome = pccs_for_prewarm.startup_prewarm_all_tdx().await;
+            pccs_for_prewarm.finish_prewarm(outcome);
         });
 
         pccs
+    }
+
+    /// Resolves when cache is pre-warmed with all available collateral
+    pub async fn ready(&self) -> Result<PrewarmSummary, PccsError> {
+        let mut outcome_rx = self.prewarm_outcome_tx.subscribe();
+        loop {
+            if let Some(outcome) = outcome_rx.borrow_and_update().clone() {
+                return match outcome {
+                    PrewarmOutcome::Ready(summary) => Ok(summary),
+                    PrewarmOutcome::Failed(message) => Err(PccsError::PrewarmFailed(message)),
+                };
+            }
+            if outcome_rx.changed().await.is_err() {
+                return Err(PccsError::PrewarmSignalClosed);
+            }
+        }
     }
 
     /// Returns collateral from cache when valid, otherwise fetches and
@@ -153,22 +174,22 @@ impl Pccs {
 
     /// Pre-provisions TDX collateral for discovered FMSPC values to reduce
     /// hot-path fetches
-    async fn startup_prewarm_all_tdx(&self) {
+    async fn startup_prewarm_all_tdx(&self) -> PrewarmOutcome {
         // First get all FMSPCs
         let fmspcs = match self.fetch_fmspcs().await {
             Ok(fmspcs) => fmspcs,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to fetch FMSPC list for startup pre-provision");
-                self.prewarm_stats.completed.store(true, Ordering::SeqCst);
-                return;
+                return PrewarmOutcome::Failed(format!(
+                    "Failed to fetch FMSPC list for prewarm: {e}"
+                ));
             }
         };
         self.prewarm_stats.discovered_fmspcs.store(fmspcs.len(), Ordering::SeqCst);
 
         if fmspcs.is_empty() {
             tracing::warn!("No FMSPC entries returned during startup pre-provision");
-            self.prewarm_stats.completed.store(true, Ordering::SeqCst);
-            return;
+            return PrewarmOutcome::Ready(self.prewarm_stats.snapshot());
         }
 
         // For each FMSPC, get the 'processor' and 'platform' collateral
@@ -228,8 +249,6 @@ impl Pccs {
                 }
             }
         }
-        self.prewarm_stats.completed.store(true, Ordering::SeqCst);
-
         tracing::info!(
             discovered_fmspcs = self.prewarm_stats.discovered_fmspcs.load(Ordering::SeqCst),
             attempted = self.prewarm_stats.attempted.load(Ordering::SeqCst),
@@ -237,6 +256,12 @@ impl Pccs {
             failures,
             "Completed PCCS startup pre-provisioning for TDX collateral"
         );
+        PrewarmOutcome::Ready(self.prewarm_stats.snapshot())
+    }
+
+    fn finish_prewarm(&self, outcome: PrewarmOutcome) {
+        self.prewarm_stats.completed.store(true, Ordering::SeqCst);
+        let _ = self.prewarm_outcome_tx.send(Some(outcome));
     }
 
     /// Fetches available FMSPC entries from configured PCCS/PCS endpoint
@@ -251,6 +276,21 @@ impl Pccs {
         let entries: Vec<FmspcEntry> = serde_json::from_str(&body)?;
         Ok(entries)
     }
+}
+
+/// Final startup pre-warm status and counters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrewarmSummary {
+    pub discovered_fmspcs: usize,
+    pub attempted: usize,
+    pub successes: usize,
+    pub failures: usize,
+}
+
+#[derive(Clone, Debug)]
+enum PrewarmOutcome {
+    Ready(PrewarmSummary),
+    Failed(String),
 }
 
 /// Cache key for PCCS collateral entries
@@ -471,6 +511,17 @@ struct PrewarmStats {
     completed: AtomicBool,
 }
 
+impl PrewarmStats {
+    fn snapshot(&self) -> PrewarmSummary {
+        PrewarmSummary {
+            discovered_fmspcs: self.discovered_fmspcs.load(Ordering::SeqCst),
+            attempted: self.attempted.load(Ordering::SeqCst),
+            successes: self.successes.load(Ordering::SeqCst),
+            failures: self.failures.load(Ordering::SeqCst),
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum PccsError {
     #[error("DCAP quote verification: {0}")]
@@ -487,6 +538,10 @@ pub enum PccsError {
     FmspcFetch(reqwest::StatusCode),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("PCCS prewarm failed: {0}")]
+    PrewarmFailed(String),
+    #[error("PCCS prewarm signal channel closed before completion")]
+    PrewarmSignalClosed,
 }
 
 #[cfg(test)]
@@ -494,8 +549,6 @@ mod mock_pcs;
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
-
     use tokio::time::Duration;
 
     use super::{
@@ -507,7 +560,7 @@ mod tests {
     async fn test_mock_pcs_server_helper_with_get_collateral() {
         let mock = spawn_mock_pcs_server(MockPcsConfig {
             fmspc: "00806F050000".to_string(),
-            ca: "processor",
+            include_fmspcs_listing: false,
             tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
@@ -534,7 +587,7 @@ mod tests {
 
         let mock = spawn_mock_pcs_server(MockPcsConfig {
             fmspc: "00806F050000".to_string(),
-            ca: "processor",
+            include_fmspcs_listing: false,
             tcb_next_update: initial_next_update.clone(),
             qe_next_update: initial_next_update,
             refreshed_tcb_next_update: Some(refreshed_next_update.clone()),
@@ -580,39 +633,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_startup_prewarm_populates_cache_from_intel_pcs() {
-        let pccs = Pccs::new(None);
-
-        let mut prewarm_completed = false;
-        for _ in 0..40 {
-            if pccs.prewarm_stats.completed.load(Ordering::SeqCst) {
-                prewarm_completed = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+    async fn test_ready_waits_for_startup_prewarm() {
+        let mock = spawn_mock_pcs_server(MockPcsConfig {
+            fmspc: "00806F050000".to_string(),
+            include_fmspcs_listing: true,
+            tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
+            qe_next_update: "2999-01-01T00:00:00Z".to_string(),
+            refreshed_tcb_next_update: None,
+            refreshed_qe_next_update: None,
+        })
+        .await;
+        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let summary =
+            tokio::time::timeout(Duration::from_secs(5), pccs.ready()).await.unwrap().unwrap();
+        assert_eq!(summary.discovered_fmspcs, 1);
+        assert_eq!(summary.attempted, 2);
+        assert_eq!(summary.successes, 2);
+        assert_eq!(summary.failures, 0);
 
         let cache_guard = pccs.cache.read().await;
         let total_entries = cache_guard.len();
-        let unique_fmspcs: std::collections::HashSet<_> =
-            cache_guard.keys().map(|k| k.fmspc.clone()).collect();
-        println!(
-            "startup prewarm summary: completed={}, discovered_fmspcs={}, attempted={}, successes={}, failures={}, cache_entries_total={}, cache_unique_fmspcs={}",
-            prewarm_completed,
-            pccs.prewarm_stats.discovered_fmspcs.load(Ordering::SeqCst),
-            pccs.prewarm_stats.attempted.load(Ordering::SeqCst),
-            pccs.prewarm_stats.successes.load(Ordering::SeqCst),
-            pccs.prewarm_stats.failures.load(Ordering::SeqCst),
-            total_entries,
-            unique_fmspcs.len()
-        );
-        if pccs.prewarm_stats.discovered_fmspcs.load(Ordering::SeqCst) == 0 {
-            println!(
-                "startup prewarm made no discovery progress in test window, skipping cache assertions"
-            );
-            return;
-        }
-        assert!(total_entries > 0, "expected startup pre-provision to populate PCCS cache");
+        assert_eq!(total_entries, 2, "expected startup pre-provision to cache processor+platform");
 
         let (fmspc, ca) = cache_guard
             .keys()
@@ -624,5 +665,34 @@ mod tests {
         let now = unix_now().unwrap();
         let (_, is_fresh) = pccs.get_collateral(fmspc, ca_static, now).await.unwrap();
         assert!(!is_fresh);
+    }
+
+    #[tokio::test]
+    async fn test_ready_supports_multiple_waiters() {
+        let mock = spawn_mock_pcs_server(MockPcsConfig {
+            fmspc: "00806F050000".to_string(),
+            include_fmspcs_listing: true,
+            tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
+            qe_next_update: "2999-01-01T00:00:00Z".to_string(),
+            refreshed_tcb_next_update: None,
+            refreshed_qe_next_update: None,
+        })
+        .await;
+        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let pccs_clone = pccs.clone();
+
+        let (first, second) = tokio::join!(pccs.ready(), pccs_clone.ready());
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.discovered_fmspcs, 1);
+    }
+
+    #[tokio::test]
+    async fn test_ready_returns_error_when_prewarm_bootstrap_fails() {
+        let pccs = Pccs::new(Some("http://127.0.0.1:1".to_string()));
+        let ready_result =
+            tokio::time::timeout(Duration::from_secs(2), pccs.ready()).await.unwrap();
+        assert!(matches!(ready_result, Err(PccsError::PrewarmFailed(_))));
     }
 }
