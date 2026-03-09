@@ -8,6 +8,7 @@ repository = "https://github.com/flashbots/attested-tls"
 keywords = ["attestation", "CVM", "TDX"]
 
 [dependencies]
+pccs = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
 tokio-rustls = { workspace = true, default-features = false }
 x509-parser = "0.18.0"

@@ -100,6 +100,7 @@ dependencies = [
  "once_cell",
  "openssl",
  "parity-scale-codec",
+ "pccs",
  "pem-rfc7468",
  "rand_core 0.6.4",
  "reqwest",

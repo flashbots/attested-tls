@@ -12,6 +12,7 @@ members = [
 tokio = "1.48.0"
 tokio-rustls = { version = "0.26.4", default-features = false }
 dcap-qvl = { git = "https://github.com/Phala-Network/dcap-qvl.git" }
+pccs = { path = "crates/pccs" }
 
 [workspace.lints.rust]
 unreachable_pub = "deny"
