@@ -16,6 +16,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::{Duration, sleep},
 };
+use tracing::debug;
 
 /// For fetching collateral directly from Intel
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
@@ -223,8 +224,9 @@ impl Pccs {
         let mut failures = 0usize;
         while let Some(task_result) = join_set.join_next().await {
             match task_result {
-                Ok(Ok((_, _, Ok(())))) => {
+                Ok(Ok((fmspc, ca, Ok(())))) => {
                     successes += 1;
+                    debug!("Successfully cached: {fmspc} {ca}");
                     self.prewarm_stats.successes.fetch_add(1, Ordering::SeqCst);
                 }
                 Ok(Ok((fmspc, ca, Err(e)))) => {
