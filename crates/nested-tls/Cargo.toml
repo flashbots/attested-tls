@@ -5,3 +5,39 @@ edition = "2024"
 
 [lints]
 workspace = true
+
+[features]
+default = []
+
+actix = [
+    "actix-http",
+    "actix-rt",
+    "actix-service",
+    "actix-tls",
+    "actix-tls/uri",
+    "actix-utils",
+    "impl-more",
+    "pin-project-lite",
+]
+
+[dependencies]
+actix-http = { version = "3.12.0", optional = true }
+actix-rt = { version = "2.11.0", optional = true }
+actix-service = { version = "2.0.3", optional = true }
+actix-tls = { version = "3.5.0", optional = true }
+actix-utils = { version = "3.0.1", optional = true }
+impl-more = { version = "0.3.1", optional = true }
+pin-project-lite = { version = "0.2.17", optional = true }
+rustls = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tracing = "0.1.44"
+
+[dev-dependencies]
+criterion = "0.5.1"
+rcgen = "0.14.7"
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
+
+[[bench]]
+name = "performance"
+harness = false

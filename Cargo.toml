@@ -14,3 +14,8 @@ manual_let_else = "warn"
 match_same_arms = "warn"
 uninlined_format_args = "warn"
 unused_async = "warn"
+
+[workspace.dependencies]
+rustls = { version = "0.23.37", features = ["brotli"] }
+tokio = { version = "1.50.0", features = ["default"] }
+tokio-rustls = "0.26.4"
