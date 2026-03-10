@@ -236,7 +236,7 @@ impl Pccs {
                         fmspc,
                         ca,
                         error = %e,
-                        "Startup pre-provision failed for FMSPC/CA"
+                        "Startup pre-provision: FMSPC/CA not cached:"
                     );
                 }
                 Ok(Err(e)) => {
