@@ -15,10 +15,10 @@ use actix_http::Uri;
 use actix_rt::net::{ActixStream, Ready, TcpStream};
 use actix_service::Service;
 use actix_tls::connect::{ConnectError, ConnectInfo, Connection, ConnectorService};
-use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, pki_types::ServerName};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::client::NestingTlsConnector;
+use crate::client::{NestingTlsConnector, NestingTlsStream};
 
 // ---------------------------------------------------------------------
 
@@ -29,10 +29,10 @@ mod tests;
 
 // A wrapper around [`crate::client::NestingTlsStream`] that implements
 // `actix_rt::net::ActixStream` trait.
-pub struct ActixNestingTlsStream<IO>(crate::client::NestingTlsStream<IO>);
+pub struct ActixNestingTlsStream<IO>(NestingTlsStream<IO>);
 
-impl_more::impl_from!(<IO> in crate::client::NestingTlsStream<IO> => ActixNestingTlsStream<IO>);
-impl_more::impl_deref_and_mut!(<IO> in ActixNestingTlsStream<IO> => crate::client::NestingTlsStream<IO> );
+impl_more::impl_from!(<IO> in NestingTlsStream<IO> => ActixNestingTlsStream<IO>);
+impl_more::impl_deref_and_mut!(<IO> in ActixNestingTlsStream<IO> => NestingTlsStream<IO> );
 
 impl<IO: fmt::Debug> fmt::Debug for ActixNestingTlsStream<IO> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -95,17 +95,14 @@ impl<IO: ActixStream> ActixStream for ActixNestingTlsStream<IO> {
 /// Connector service for actix clients that establishes nested TLS.
 #[derive(Clone)]
 pub struct ActixNestingTlsConnectorService {
+    connector: NestingTlsConnector,
     tcp: ConnectorService,
-    nesting_tls: NestingTlsConnector,
 }
 
 impl ActixNestingTlsConnectorService {
     /// Builds a connector service from outer and inner client TLS configs.
-    pub fn new(outer: Arc<rustls::ClientConfig>, inner: Arc<rustls::ClientConfig>) -> Self {
-        Self {
-            tcp: ConnectorService::default(),
-            nesting_tls: NestingTlsConnector::new(outer, inner),
-        }
+    pub fn new(outer: Arc<ClientConfig>, inner: Arc<ClientConfig>) -> Self {
+        Self { tcp: ConnectorService::default(), connector: NestingTlsConnector::new(outer, inner) }
     }
 }
 
@@ -122,7 +119,7 @@ impl Service<ConnectInfo<Uri>> for ActixNestingTlsConnectorService {
         let host = req.hostname().to_string();
 
         let tcp = <ConnectorService as Service<ConnectInfo<Uri>>>::call(&self.tcp, req);
-        let nesting_tls = self.nesting_tls.clone();
+        let connector = self.connector.clone();
 
         Box::pin(async move {
             let conn = tcp.await.map_err(|err| ConnectError::Resolver(Box::new(err)))?;
@@ -134,7 +131,7 @@ impl Service<ConnectInfo<Uri>> for ActixNestingTlsConnectorService {
             )?;
 
             let nesting_tls_stream =
-                nesting_tls.connect(domain, tcp_stream).await.map_err(ConnectError::Io)?;
+                connector.connect(domain, tcp_stream).await.map_err(ConnectError::Io)?;
 
             Ok(Connection::new(uri, ActixNestingTlsStream(nesting_tls_stream)))
         })

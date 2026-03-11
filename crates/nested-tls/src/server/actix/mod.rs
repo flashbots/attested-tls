@@ -28,7 +28,7 @@ use pin_project_lite::pin_project;
 use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::server::{NestingTlsAccept, NestingTlsStream};
+use crate::server::{NestingTlsAccept, NestingTlsAcceptor, NestingTlsStream};
 
 // ---------------------------------------------------------------------
 
@@ -39,7 +39,7 @@ mod tests;
 
 static ACTIX_MAX_CONN: AtomicUsize = AtomicUsize::new(256);
 
-const ACTIX_DEFAULT_TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const ACTIX_DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 
 thread_local! {
     static ACTIX_MAX_CONN_COUNTER: Counter = Counter::new(ACTIX_MAX_CONN.load(Ordering::Relaxed));
@@ -180,7 +180,7 @@ impl Default for ActixNestingTlsAcceptorConfig {
 pub struct ActixNestingTlsAcceptorService {
     config: ActixNestingTlsAcceptorConfig,
 
-    acceptor: crate::server::NestingTlsAcceptor,
+    acceptor: NestingTlsAcceptor,
     conns: Counter,
 }
 
