@@ -1,6 +1,7 @@
 # builds
 
 ./debug/
+/crates/*/target
 /target
 
 # ide

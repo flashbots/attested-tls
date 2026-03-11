@@ -4,6 +4,8 @@ on: [push, pull_request]
 
 jobs:
   build_and_test:
+    name: "CI: Build & Test"
+
     runs-on: ubuntu-latest
 
     steps:
@@ -39,4 +41,4 @@ jobs:
       run: cargo clippy --workspace --features azure -- -D warnings
 
     - name: Run cargo test
-      run: cargo test --workspace --features azure --all-targets -- --test-threads=1
+      run: cargo test --workspace --features azure --all-targets

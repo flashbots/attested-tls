@@ -8,12 +8,6 @@ members = [
     "crates/pccs",
 ]
 
-[workspace.dependencies]
-tokio = "1.48.0"
-tokio-rustls = { version = "0.26.4", default-features = false }
-dcap-qvl = { git = "https://github.com/Phala-Network/dcap-qvl.git" }
-pccs = { path = "crates/pccs" }
-
 [workspace.lints.rust]
 unreachable_pub = "deny"
 
@@ -22,3 +16,10 @@ manual_let_else = "warn"
 match_same_arms = "warn"
 uninlined_format_args = "warn"
 unused_async = "warn"
+
+[workspace.dependencies]
+rustls = { version = "0.23.37", default-features = false, features = ["brotli"] }
+tokio = { version = "1.50.0", features = ["default"] }
+tokio-rustls = { version = "0.26.4", default-features = false }
+dcap-qvl = { git = "https://github.com/Phala-Network/dcap-qvl.git" }
+pccs = { path = "crates/pccs" }
