@@ -4,6 +4,7 @@ resolver = "3"
 members = [
     "crates/attested-tls",
     "crates/nested-tls",
+    "crates/attestation",
 ]
 
 [workspace.lints.rust]
