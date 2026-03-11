@@ -6,7 +6,6 @@ use dcap_qvl::{
     collateral::get_collateral_for_fmspc,
     quote::{Quote, Report},
     tcb_info::TcbInfo,
-    verify::VerifiedReport,
 };
 use pccs::{Pccs, PccsError};
 use thiserror::Error;
@@ -85,67 +84,36 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
         |tcb_info: TcbInfo| tcb_info
     };
 
-    match collateral {
-        Some(given_collateral) => {
-            let verified_report = dcap_qvl::verify::dangerous_verify_with_tcb_override(
-                &input,
-                &given_collateral,
-                now,
-                override_outdated_tcb,
-            )?;
-            warn_if_non_uptodate(&verified_report, &fmspc, CollateralSource::Provided);
-        }
-        None => {
-            let (collateral, is_fresh) = if let Some(ref pccs) = pccs_option {
-                pccs.get_collateral(fmspc.clone(), ca, now_i64).await?
-            } else {
-                let collateral = get_collateral_for_fmspc(
-                    PCS_URL,
-                    fmspc.clone(),
-                    ca,
-                    false, // Indicates not SGX
-                )
-                .await?;
-                (collateral, true)
-            };
-
-            let initial_source =
-                if is_fresh { CollateralSource::Fresh } else { CollateralSource::Cached };
-            let initial_verification = dcap_qvl::verify::dangerous_verify_with_tcb_override(
-                &input,
-                &collateral,
-                now,
-                override_outdated_tcb,
-            );
-
-            match initial_verification {
-                Ok(verified_report) => {
-                    warn_if_non_uptodate(&verified_report, &fmspc, initial_source);
-                }
-                Err(e) => {
-                    if is_fresh {
-                        return Err(e.into());
-                    }
-                    tracing::warn!("Verification failed - trying with fresh collateral: {e}");
-                    if let Some(pccs) = pccs_option {
-                        let collateral =
-                            pccs.refresh_collateral(fmspc.clone(), ca, now_i64).await?;
-                        let verified_report = dcap_qvl::verify::dangerous_verify_with_tcb_override(
-                            &input,
-                            &collateral,
-                            now,
-                            override_outdated_tcb,
-                        )?;
-                        warn_if_non_uptodate(
-                            &verified_report,
-                            &fmspc,
-                            CollateralSource::RefreshedAfterFailure,
-                        );
-                    }
-                }
-            }
-        }
+    let collateral = if let Some(given_collateral) = collateral {
+        given_collateral
+    } else if let Some(ref pccs) = pccs_option {
+        let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now_i64).await?;
+        collateral
+    } else {
+        get_collateral_for_fmspc(
+            PCS_URL,
+            fmspc.clone(),
+            ca,
+            false, // Indicates not SGX
+        )
+        .await?
     };
+
+    let verified_report = dcap_qvl::verify::dangerous_verify_with_tcb_override(
+        &input,
+        &collateral,
+        now,
+        override_outdated_tcb,
+    )?;
+
+    if verified_report.status != "UpToDate" {
+        tracing::warn!(
+            status = %verified_report.status,
+            advisory_ids = ?verified_report.advisory_ids,
+            fmspc,
+            "DCAP verification succeeded with non-UpToDate TCB status"
+        );
+    }
 
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
 
@@ -199,39 +167,6 @@ pub fn get_quote_input_data(report: Report) -> [u8; 64] {
     }
 }
 
-/// Origin of collateral used for a verification attempt
-#[derive(Clone, Copy, Debug)]
-enum CollateralSource {
-    Provided,
-    Cached,
-    Fresh,
-    RefreshedAfterFailure,
-}
-
-impl CollateralSource {
-    /// Returns a stable source label for structured logs
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Provided => "provided",
-            Self::Cached => "cached",
-            Self::Fresh => "fresh",
-            Self::RefreshedAfterFailure => "refreshed_after_failure",
-        }
-    }
-}
-
-/// Logs a warning when verification succeeds with a non-UpToDate TCB status
-fn warn_if_non_uptodate(report: &VerifiedReport, fmspc: &str, source: CollateralSource) {
-    if report.status != "UpToDate" {
-        tracing::warn!(
-            status = %report.status,
-            advisory_ids = ?report.advisory_ids,
-            fmspc,
-            collateral_source = source.as_str(),
-            "DCAP verification succeeded with non-UpToDate TCB status"
-        );
-    }
-}
 /// An error when verifying a DCAP attestation
 #[derive(Error, Debug)]
 pub enum DcapVerificationError {
