@@ -95,12 +95,15 @@ impl Pccs {
 
     /// Returns collateral from cache when valid, otherwise fetches and
     /// caches fresh collateral
+    /// Returns collateral together with a flag indicating whether it is
+    /// fresh (true) or from the cache (false)
     pub async fn get_collateral(
         &self,
         fmspc: String,
         ca: &'static str,
-        now: i64,
+        now: u64,
     ) -> Result<(QuoteCollateralV3, bool), PccsError> {
+        let now = i64::try_from(now).map_err(|_| PccsError::TimeStampExceedsI64)?;
         let cache_key = PccsInput::new(fmspc.clone(), ca);
 
         {
@@ -136,7 +139,7 @@ impl Pccs {
 
     /// Fetches fresh collateral, overwrites cache, and ensures proactive
     /// refresh is scheduled
-    pub async fn refresh_collateral(
+    async fn refresh_collateral(
         &self,
         fmspc: String,
         ca: &'static str,
@@ -544,6 +547,8 @@ pub enum PccsError {
     PrewarmFailed(String),
     #[error("PCCS prewarm signal channel closed before completion")]
     PrewarmSignalClosed,
+    #[error("Timestamp exceeds i64 range")]
+    TimeStampExceedsI64,
 }
 
 #[cfg(test)]
@@ -571,7 +576,7 @@ mod tests {
         .await;
 
         let pccs = Pccs::new(Some(mock.base_url.clone()));
-        let now = 1_700_000_000_i64;
+        let now = 1_700_000_000_u64;
         let (_, is_fresh) =
             pccs.get_collateral("00806F050000".to_string(), "processor", now).await.unwrap();
         assert!(is_fresh);
@@ -599,7 +604,7 @@ mod tests {
 
         let pccs = Pccs::new(Some(mock.base_url.clone()));
         let (_, is_fresh) = pccs
-            .get_collateral("00806F050000".to_string(), "processor", initial_now)
+            .get_collateral("00806F050000".to_string(), "processor", initial_now as u64)
             .await
             .unwrap();
         assert!(is_fresh);
@@ -607,7 +612,7 @@ mod tests {
         assert_eq!(mock.qe_call_count(), 1);
 
         let (_, is_fresh_second) = pccs
-            .get_collateral("00806F050000".to_string(), "processor", initial_now)
+            .get_collateral("00806F050000".to_string(), "processor", initial_now as u64)
             .await
             .unwrap();
         assert!(!is_fresh_second);
@@ -627,7 +632,7 @@ mod tests {
         let before_check_calls = mock.tcb_call_count();
         let now_after_background = unix_now().unwrap();
         let (_, is_fresh_again) = pccs
-            .get_collateral("00806F050000".to_string(), "processor", now_after_background)
+            .get_collateral("00806F050000".to_string(), "processor", now_after_background as u64)
             .await
             .unwrap();
         assert!(!is_fresh_again);
@@ -665,7 +670,7 @@ mod tests {
         drop(cache_guard);
         let ca_static = ca_as_static(&ca).expect("unexpected CA value in warmed cache entry");
         let now = unix_now().unwrap();
-        let (_, is_fresh) = pccs.get_collateral(fmspc, ca_static, now).await.unwrap();
+        let (_, is_fresh) = pccs.get_collateral(fmspc, ca_static, now as u64).await.unwrap();
         assert!(!is_fresh);
     }
 

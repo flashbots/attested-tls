@@ -62,8 +62,6 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
     let quote = Quote::parse(&input)?;
     tracing::info!("Verifying DCAP attestation: {quote:?}");
 
-    let now_i64 = i64::try_from(now).map_err(|_| DcapVerificationError::TimeStampExceedsI64)?;
-
     let ca = quote.ca()?;
     let fmspc = hex::encode_upper(quote.fmspc()?);
 
@@ -87,7 +85,7 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
     let collateral = if let Some(given_collateral) = collateral {
         given_collateral
     } else if let Some(ref pccs) = pccs_option {
-        let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now_i64).await?;
+        let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
         collateral
     } else {
         get_collateral_for_fmspc(
