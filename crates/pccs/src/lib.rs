@@ -420,6 +420,7 @@ async fn refresh_loop(
             entry.next_update
         };
 
+        // Sleep until shortly before next update is due
         let now = match unix_now() {
             Ok(now) => now,
             Err(e) => {
@@ -430,6 +431,30 @@ async fn refresh_loop(
         };
         let sleep_secs = refresh_sleep_seconds(next_update, now);
         sleep(Duration::from_secs(sleep_secs)).await;
+
+        // Re-check the entry after waking in case annother task updated it
+        let now = match unix_now() {
+            Ok(now) => now,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to read system time for PCCS refresh");
+                sleep(Duration::from_secs(REFRESH_RETRY_SECS)).await;
+                continue;
+            }
+        };
+        let Some(cache) = weak_cache.upgrade() else {
+            return;
+        };
+        let should_refresh = {
+            let cache_guard = cache.read().await;
+            let Some(entry) = cache_guard.get(&key) else {
+                return;
+            };
+            refresh_sleep_seconds(entry.next_update, now) == 0
+        };
+        if !should_refresh {
+            // The cached schedule moved forward, so skip the redundant fetch.
+            continue;
+        }
 
         match fetch_collateral(&pccs_url, key.fmspc.clone(), ca_static).await {
             Ok(collateral) => {
