@@ -7,6 +7,7 @@ use dcap_qvl::{
     quote::{Quote, Report},
     tcb_info::TcbInfo,
 };
+use pccs::{Pccs, PccsError};
 use thiserror::Error;
 
 use crate::{AttestationError, measurements::MultiMeasurements};
@@ -30,14 +31,14 @@ pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, Attestat
 pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs_url: Option<String>,
+    pccs: Option<Pccs>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let override_azure_outdated_tcb = false;
     verify_dcap_attestation_with_given_timestamp(
         input,
         expected_input_data,
-        pccs_url,
+        pccs,
         None,
         now,
         override_azure_outdated_tcb,
@@ -53,7 +54,7 @@ pub async fn verify_dcap_attestation(
 pub async fn verify_dcap_attestation_with_given_timestamp(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs_url: Option<String>,
+    pccs_option: Option<Pccs>,
     collateral: Option<QuoteCollateralV3>,
     now: u64,
     override_azure_outdated_tcb: bool,
@@ -81,25 +82,36 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
         |tcb_info: TcbInfo| tcb_info
     };
 
-    let collateral = match collateral {
-        Some(c) => c,
-        None => {
-            get_collateral_for_fmspc(
-                &pccs_url.clone().unwrap_or(PCS_URL.to_string()),
-                fmspc,
-                ca,
-                false, // Indicates not SGX
-            )
-            .await?
-        }
+    let collateral = if let Some(given_collateral) = collateral {
+        given_collateral
+    } else if let Some(ref pccs) = pccs_option {
+        let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
+        collateral
+    } else {
+        get_collateral_for_fmspc(
+            PCS_URL,
+            fmspc.clone(),
+            ca,
+            false, // Indicates not SGX
+        )
+        .await?
     };
 
-    let _verified_report = dcap_qvl::verify::dangerous_verify_with_tcb_override(
+    let verified_report = dcap_qvl::verify::dangerous_verify_with_tcb_override(
         &input,
         &collateral,
         now,
         override_outdated_tcb,
     )?;
+
+    if verified_report.status != "UpToDate" {
+        tracing::warn!(
+            status = %verified_report.status,
+            advisory_ids = ?verified_report.advisory_ids,
+            fmspc,
+            "DCAP verification succeeded with non-UpToDate TCB status"
+        );
+    }
 
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
 
@@ -114,7 +126,7 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
 pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    _pccs_url: Option<String>,
+    _pccs: Option<Pccs>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     // In tests we use mock quotes which will fail to verify
     let quote = tdx_quote::Quote::from_bytes(&input)?;
@@ -167,6 +179,10 @@ pub enum DcapVerificationError {
     #[cfg(any(test, feature = "mock"))]
     #[error("Quote parse: {0}")]
     QuoteParse(#[from] tdx_quote::QuoteParseError),
+    #[error("PCCS: {0}")]
+    Pccs(#[from] PccsError),
+    #[error("Timestamp exceeds i64 range")]
+    TimeStampExceedsI64,
 }
 
 #[cfg(test)]
