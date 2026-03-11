@@ -16,6 +16,6 @@ uninlined_format_args = "warn"
 unused_async = "warn"
 
 [workspace.dependencies]
-rustls = { version = "0.23.37", features = ["brotli"] }
+rustls = { version = "0.23.37", default-features = false, features = ["brotli"] }
 tokio = { version = "1.50.0", features = ["default"] }
-tokio-rustls = "0.26.4"
+tokio-rustls = { version = "0.26.4", default-features = false }

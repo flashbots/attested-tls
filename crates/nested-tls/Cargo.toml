@@ -36,6 +36,7 @@ tracing = "0.1.44"
 [dev-dependencies]
 criterion = "0.5.1"
 rcgen = "0.14.7"
+rustls = { workspace = true, features = ["aws_lc_rs"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
 
 [[bench]]
