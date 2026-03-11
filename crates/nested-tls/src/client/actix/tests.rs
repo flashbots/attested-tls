@@ -111,6 +111,25 @@ async fn call_maps_tcp_connect_errors_to_resolver_error() {
 }
 
 #[actix_rt::test]
+async fn poll_ready_matches_underlying_tcp_connector() {
+    let (_, outer_client) = config_pair();
+    let (_, inner_client) = config_pair();
+
+    let service =
+        ActixNestingTlsConnectorService::new(Arc::new(outer_client), Arc::new(inner_client));
+
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+
+    assert!(matches!(
+        <ActixNestingTlsConnectorService as Service<ConnectInfo<Uri>>>::poll_ready(
+            &service, &mut cx
+        ),
+        Poll::Ready(Ok(()))
+    ));
+}
+
+#[actix_rt::test]
 async fn actix_nesting_tls_stream_delegates_readiness_to_underlying_io() {
     let (outer_server, outer_client) = config_pair();
     let (inner_server, inner_client) = config_pair();

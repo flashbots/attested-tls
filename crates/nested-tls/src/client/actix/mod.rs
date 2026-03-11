@@ -116,7 +116,6 @@ impl Service<ConnectInfo<Uri>> for ActixNestingTlsConnectorService {
 
     fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         <ConnectorService as Service<ConnectInfo<Uri>>>::poll_ready(&self.tcp, cx)
-            .map_err(|err| ConnectError::Resolver(Box::new(err)))
     }
 
     fn call(&self, req: ConnectInfo<Uri>) -> Self::Future {
