@@ -21,6 +21,7 @@ use rustls::{
     RootCertStore,
     SignatureScheme,
     client::{
+        ResolvesClientCert,
         VerifierBuilderError,
         WebPkiServerVerifier,
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -34,7 +35,11 @@ use rustls::{
         UnixTime,
         pem::PemObject,
     },
-    server::ResolvesServerCert,
+    server::{
+        ResolvesServerCert,
+        WebPkiClientVerifier,
+        danger::{ClientCertVerified, ClientCertVerifier},
+    },
     sign::{CertifiedKey, SigningKey},
 };
 use sha2::{Digest as _, Sha512};
@@ -131,6 +136,8 @@ impl AttestedCertificateResolver {
         Ok(Self { state })
     }
 
+    /// Create an attested certificate chain - either self-signed or with
+    /// the provided CA
     async fn issue_ra_cert_chain(
         key: &KeyPair,
         ca: Option<&CaCert>,
@@ -151,7 +158,7 @@ impl AttestedCertificateResolver {
             .not_before(now)
             .not_after(not_after)
             .usage_server_auth(true)
-            .usage_client_auth(false)
+            .usage_client_auth(true)
             .attestation(&attestation)
             .build();
 
@@ -248,8 +255,23 @@ impl AttestedCertificateResolver {
 
 impl ResolvesServerCert for AttestedCertificateResolver {
     fn resolve(&self, _: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let certificate = self.state.certificate.read().expect("certificate lock poisoned").clone();
+        self.current_certified_key()
+    }
+}
 
+impl ResolvesClientCert for AttestedCertificateResolver {
+    fn resolve(&self, _: &[&[u8]], _: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
+        self.current_certified_key()
+    }
+
+    fn has_certs(&self) -> bool {
+        !self.state.certificate.read().expect("certificate lock poisoned").is_empty()
+    }
+}
+
+impl AttestedCertificateResolver {
+    fn current_certified_key(&self) -> Option<Arc<CertifiedKey>> {
+        let certificate = self.state.certificate.read().expect("certificate lock poisoned").clone();
         Some(Arc::new(CertifiedKey::new(certificate, self.state.key.clone())))
     }
 }
@@ -286,7 +308,8 @@ fn create_report_data(
 
 #[derive(Debug)]
 pub struct AttestedCertificateVerifier {
-    inner: Arc<WebPkiServerVerifier>,
+    server_inner: Arc<WebPkiServerVerifier>,
+    client_inner: Arc<dyn ClientCertVerifier>,
     attestation_verifier: AttestationVerifier,
 }
 
@@ -303,24 +326,29 @@ impl AttestedCertificateVerifier {
         attestation_verifier: AttestationVerifier,
         provider: Arc<CryptoProvider>,
     ) -> Result<Self, AttestedTlsError> {
-        let inner = WebPkiServerVerifier::builder_with_provider(root_store.into(), provider)
+        let root_store = Arc::new(root_store);
+        let server_inner =
+            WebPkiServerVerifier::builder_with_provider(root_store.clone(), provider.clone())
+                .build()
+                .map_err(AttestedTlsError::VerifierBuilder)?;
+        let client_inner = WebPkiClientVerifier::builder_with_provider(root_store, provider)
             .build()
             .map_err(AttestedTlsError::VerifierBuilder)?;
 
-        Ok(Self { inner, attestation_verifier })
+        Ok(Self { server_inner, client_inner, attestation_verifier })
     }
 
     fn extract_custom_attestation_from_cert(
         cert: &CertificateDer<'_>,
     ) -> Result<AttestationExchangeMessage, rustls::Error> {
         // First try to parse using ra_tls which assumes DCAP
-        if let Ok(Some(attestation)) = ra_tls::attestation::from_der(cert.as_ref()) {
-            if let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote {
-                return Ok(AttestationExchangeMessage {
-                    attestation_type: AttestationType::DcapTdx,
-                    attestation: tdx_quote.quote,
-                });
-            }
+        if let Ok(Some(attestation)) = ra_tls::attestation::from_der(cert.as_ref()) &&
+            let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote
+        {
+            return Ok(AttestationExchangeMessage {
+                attestation_type: AttestationType::DcapTdx,
+                attestation: tdx_quote.quote,
+            });
         }
 
         // If that fails, extract and parse the extension
@@ -396,6 +424,25 @@ impl AttestedCertificateVerifier {
 
         Ok(())
     }
+
+    fn verify_attestation_binding(
+        &self,
+        end_entity: &CertificateDer<'_>,
+    ) -> Result<(), rustls::Error> {
+        let expected_input_data = Self::expected_input_data_from_cert(end_entity)?;
+        let attestation = Self::extract_custom_attestation_from_cert(end_entity)?;
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.attestation_verifier
+                    .verify_attestation(attestation, expected_input_data)
+                    .await
+                    .unwrap();
+            })
+        });
+
+        Ok(())
+    }
 }
 
 impl ServerCertVerifier for AttestedCertificateVerifier {
@@ -407,7 +454,7 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        match self.inner.verify_server_cert(
+        match self.server_inner.verify_server_cert(
             end_entity,
             intermediates,
             server_name,
@@ -421,20 +468,7 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
             Err(err) => return Err(err),
             Ok(_) => {}
         };
-        let expected_input_data =
-            AttestedCertificateVerifier::expected_input_data_from_cert(end_entity)?;
-        let attestation =
-            AttestedCertificateVerifier::extract_custom_attestation_from_cert(end_entity)?;
-
-        // Block when calling the verify function as it is async
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.attestation_verifier
-                    .verify_attestation(attestation, expected_input_data)
-                    .await
-                    .unwrap();
-            })
-        });
+        self.verify_attestation_binding(end_entity)?;
         Ok(ServerCertVerified::assertion())
     }
 
@@ -444,7 +478,7 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner.verify_tls12_signature(message, cert, dss)
+        self.server_inner.verify_tls12_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -453,15 +487,68 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner.verify_tls13_signature(message, cert, dss)
+        self.server_inner.verify_tls13_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.inner.supported_verify_schemes()
+        self.server_inner.supported_verify_schemes()
     }
 
     fn root_hint_subjects(&self) -> Option<&[DistinguishedName]> {
-        self.inner.root_hint_subjects()
+        self.server_inner.root_hint_subjects()
+    }
+}
+
+impl ClientCertVerifier for AttestedCertificateVerifier {
+    fn offer_client_auth(&self) -> bool {
+        self.client_inner.offer_client_auth()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.client_inner.client_auth_mandatory()
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        self.client_inner.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        match self.client_inner.verify_client_cert(end_entity, intermediates, now) {
+            Err(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)) => {
+                Self::verify_cert_time_validity(end_entity, now)?;
+            }
+            Err(err) => return Err(err),
+            Ok(_) => {}
+        };
+        self.verify_attestation_binding(end_entity)?;
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.client_inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.client_inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.client_inner.supported_verify_schemes()
     }
 }
 
@@ -675,6 +762,93 @@ mod tests {
             .clone();
 
         assert_ne!(initial_certificate.as_ref(), renewed_certificate.as_ref());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_and_client_configs_complete_a_mutual_auth_handshake() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+
+        let server_resolver = AttestedCertificateResolver::new_with_provider(
+            AttestationGenerator::new(AttestationType::DcapTdx, None)
+                .expect("mock generator construction should succeed"),
+            None,
+            provider.clone(),
+        )
+        .await
+        .expect("server resolver construction should succeed");
+        let client_resolver = AttestedCertificateResolver::new_with_provider(
+            AttestationGenerator::new(AttestationType::DcapTdx, None)
+                .expect("mock generator construction should succeed"),
+            None,
+            provider.clone(),
+        )
+        .await
+        .expect("client resolver construction should succeed");
+
+        let server_certificate = server_resolver
+            .state
+            .certificate
+            .read()
+            .expect("certificate lock poisoned")
+            .first()
+            .expect("resolver should hold a certificate")
+            .clone();
+        let client_certificate = client_resolver
+            .state
+            .certificate
+            .read()
+            .expect("certificate lock poisoned")
+            .first()
+            .expect("resolver should hold a certificate")
+            .clone();
+
+        let mut client_roots = RootCertStore::empty();
+        client_roots.add(server_certificate).expect("server certificate should be trusted");
+        let mut server_roots = RootCertStore::empty();
+        server_roots.add(client_certificate).expect("client certificate should be trusted");
+
+        let server_verifier = AttestedCertificateVerifier::new_with_provider(
+            server_roots,
+            AttestationVerifier::mock(),
+            provider.clone(),
+        )
+        .expect("server verifier construction should succeed");
+        let client_verifier = AttestedCertificateVerifier::new_with_provider(
+            client_roots,
+            AttestationVerifier::mock(),
+            provider.clone(),
+        )
+        .expect("client verifier construction should succeed");
+
+        let server_config = ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("server config should support default protocol versions")
+            .with_client_cert_verifier(Arc::new(server_verifier))
+            .with_cert_resolver(Arc::new(server_resolver));
+        let client_config = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("client config should support default protocol versions")
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(client_verifier))
+            .with_client_cert_resolver(Arc::new(client_resolver));
+
+        let mut client = ClientConnection::new(
+            Arc::new(client_config),
+            ServerName::try_from("foo").expect("server name should be valid"),
+        )
+        .expect("client connection should be created");
+        let mut server =
+            ServerConnection::new(Arc::new(server_config)).expect("server connection should exist");
+
+        while client.is_handshaking() || server.is_handshaking() {
+            transfer_tls_client_to_server(&mut client, &mut server);
+            transfer_tls_server_to_client(&mut server, &mut client);
+        }
+
+        assert!(!client.is_handshaking());
+        assert!(!server.is_handshaking());
+        assert!(client.peer_certificates().is_some());
+        assert!(server.peer_certificates().is_some());
     }
 
     fn test_ca() -> CaCert {
