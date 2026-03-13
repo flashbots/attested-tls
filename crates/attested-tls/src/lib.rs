@@ -353,8 +353,9 @@ fn create_report_data(
 /// Verifies attested TLS server or client certificates during TLS handshake
 #[derive(Debug)]
 pub struct AttestedCertificateVerifier {
-    server_inner: Arc<WebPkiServerVerifier>,
-    client_inner: Arc<dyn ClientCertVerifier>,
+    server_inner: Option<Arc<WebPkiServerVerifier>>,
+    client_inner: Option<Arc<dyn ClientCertVerifier>>,
+    provider: Arc<CryptoProvider>,
     attestation_verifier: AttestationVerifier,
 }
 
@@ -371,32 +372,25 @@ impl AttestedCertificateVerifier {
         attestation_verifier: AttestationVerifier,
         provider: Arc<CryptoProvider>,
     ) -> Result<Self, AttestedTlsError> {
-        let root_store = Arc::new(match root_store {
-            Some(root_store) => root_store,
-            None => Self::synthetic_root_store()?,
-        });
-        let server_inner =
-            WebPkiServerVerifier::builder_with_provider(root_store.clone(), provider.clone())
+        let (server_inner, client_inner) = match root_store {
+            Some(root_store) => {
+                let root_store = Arc::new(root_store);
+                let server_inner = WebPkiServerVerifier::builder_with_provider(
+                    root_store.clone(),
+                    provider.clone(),
+                )
                 .build()
                 .map_err(AttestedTlsError::VerifierBuilder)?;
-        let client_inner = WebPkiClientVerifier::builder_with_provider(root_store, provider)
-            .build()
-            .map_err(AttestedTlsError::VerifierBuilder)?;
+                let client_inner = WebPkiClientVerifier::builder_with_provider(root_store, provider.clone())
+                    .build()
+                    .map_err(AttestedTlsError::VerifierBuilder)?;
 
-        Ok(Self { server_inner, client_inner, attestation_verifier })
-    }
+                (Some(server_inner), Some(client_inner))
+            }
+            None => (None, None),
+        };
 
-    fn synthetic_root_store() -> Result<RootCertStore, AttestedTlsError> {
-        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
-        let mut params =
-            ra_tls::rcgen::CertificateParams::new(vec!["attested-tls-placeholder-ca".to_string()])?;
-        params.is_ca = ra_tls::rcgen::IsCa::Ca(ra_tls::rcgen::BasicConstraints::Unconstrained);
-        let cert = params.self_signed(&key_pair)?;
-
-        let mut root_store = RootCertStore::empty();
-        root_store.add(cert.der().clone())?;
-
-        Ok(root_store)
+        Ok(Self { server_inner, client_inner, provider, attestation_verifier })
     }
 
     fn extract_custom_attestation_from_cert(
@@ -555,20 +549,24 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        match self.server_inner.verify_server_cert(
-            end_entity,
-            intermediates,
-            server_name,
-            ocsp_response,
-            now,
-        ) {
-            Err(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)) => {
-                // handle self-signed certs differently
-                Self::verify_cert_time_validity(end_entity, now)?;
+        if let Some(server_inner) = &self.server_inner {
+            match server_inner.verify_server_cert(
+                end_entity,
+                intermediates,
+                server_name,
+                ocsp_response,
+                now,
+            ) {
+                Err(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)) => {
+                    // handle self-signed certs differently
+                    Self::verify_cert_time_validity(end_entity, now)?;
+                }
+                Err(err) => return Err(err),
+                Ok(_) => {}
             }
-            Err(err) => return Err(err),
-            Ok(_) => {}
-        };
+        } else {
+            Self::verify_cert_time_validity(end_entity, now)?;
+        }
         self.verify_attestation_binding(end_entity)?;
         Ok(ServerCertVerified::assertion())
     }
@@ -579,7 +577,12 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.server_inner.verify_tls12_signature(message, cert, dss)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -588,29 +591,36 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.server_inner.verify_tls13_signature(message, cert, dss)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.server_inner.supported_verify_schemes()
+        self.provider.signature_verification_algorithms.supported_schemes()
     }
 
     fn root_hint_subjects(&self) -> Option<&[DistinguishedName]> {
-        self.server_inner.root_hint_subjects()
+        self.server_inner.as_ref().and_then(|server_inner| server_inner.root_hint_subjects())
     }
 }
 
 impl ClientCertVerifier for AttestedCertificateVerifier {
     fn offer_client_auth(&self) -> bool {
-        self.client_inner.offer_client_auth()
+        self.client_inner.as_ref().map_or(true, |client_inner| client_inner.offer_client_auth())
     }
 
     fn client_auth_mandatory(&self) -> bool {
-        self.client_inner.client_auth_mandatory()
+        self.client_inner
+            .as_ref()
+            .map_or(true, |client_inner| client_inner.client_auth_mandatory())
     }
 
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        self.client_inner.root_hint_subjects()
+        self.client_inner.as_ref().map_or(&[], |client_inner| client_inner.root_hint_subjects())
     }
 
     fn verify_client_cert(
@@ -619,13 +629,17 @@ impl ClientCertVerifier for AttestedCertificateVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        match self.client_inner.verify_client_cert(end_entity, intermediates, now) {
-            Err(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)) => {
-                Self::verify_cert_time_validity(end_entity, now)?;
+        if let Some(client_inner) = &self.client_inner {
+            match client_inner.verify_client_cert(end_entity, intermediates, now) {
+                Err(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)) => {
+                    Self::verify_cert_time_validity(end_entity, now)?;
+                }
+                Err(err) => return Err(err),
+                Ok(_) => {}
             }
-            Err(err) => return Err(err),
-            Ok(_) => {}
-        };
+        } else {
+            Self::verify_cert_time_validity(end_entity, now)?;
+        }
         self.verify_attestation_binding(end_entity)?;
         Ok(ClientCertVerified::assertion())
     }
@@ -636,7 +650,12 @@ impl ClientCertVerifier for AttestedCertificateVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.client_inner.verify_tls12_signature(message, cert, dss)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -645,11 +664,16 @@ impl ClientCertVerifier for AttestedCertificateVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.client_inner.verify_tls13_signature(message, cert, dss)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.client_inner.supported_verify_schemes()
+        self.provider.signature_verification_algorithms.supported_schemes()
     }
 }
 
