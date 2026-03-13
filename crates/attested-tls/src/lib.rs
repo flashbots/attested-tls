@@ -381,9 +381,10 @@ impl AttestedCertificateVerifier {
                 )
                 .build()
                 .map_err(AttestedTlsError::VerifierBuilder)?;
-                let client_inner = WebPkiClientVerifier::builder_with_provider(root_store, provider.clone())
-                    .build()
-                    .map_err(AttestedTlsError::VerifierBuilder)?;
+                let client_inner =
+                    WebPkiClientVerifier::builder_with_provider(root_store, provider.clone())
+                        .build()
+                        .map_err(AttestedTlsError::VerifierBuilder)?;
 
                 (Some(server_inner), Some(client_inner))
             }
@@ -614,9 +615,7 @@ impl ClientCertVerifier for AttestedCertificateVerifier {
     }
 
     fn client_auth_mandatory(&self) -> bool {
-        self.client_inner
-            .as_ref()
-            .map_or(true, |client_inner| client_inner.client_auth_mandatory())
+        self.client_inner.as_ref().map_or(true, |client_inner| client_inner.client_auth_mandatory())
     }
 
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
