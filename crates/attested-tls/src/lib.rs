@@ -44,7 +44,7 @@ use rustls::{
 };
 use sha2::{Digest as _, Sha512};
 use thiserror::Error;
-use x509_parser::oid_registry::Oid;
+use x509_parser::{certificate::X509Certificate, oid_registry::Oid};
 
 /// The length of time a certificate is valid for
 #[cfg(not(test))]
@@ -393,17 +393,23 @@ impl AttestedCertificateVerifier {
         }
 
         // If that fails, extract and parse the extension
-        let (_, cert) = x509_parser::parse_x509_certificate(cert.as_ref()).unwrap();
-        let oid = Oid::from(ra_tls::oids::PHALA_RATLS_TDX_QUOTE).unwrap();
-        let ext = cert.get_extension_unique(&oid).unwrap().unwrap();
-        let payload = yasna::parse_der(ext.value, |reader| reader.read_bytes()).unwrap();
-        Ok(serde_json::from_slice(&payload).unwrap())
+        let cert = Self::parse_x509_certificate(cert)?;
+        let oid = Oid::from(ra_tls::oids::PHALA_RATLS_TDX_QUOTE)
+            .map_err(|err| rustls::Error::General(format!("invalid attestation OID: {err}")))?;
+        let ext = cert
+            .get_extension_unique(&oid)
+            .map_err(|err| Self::bad_encoding(format!("invalid attestation extension: {err}")))?
+            .ok_or_else(|| Self::bad_encoding("missing attestation extension"))?;
+        let payload = yasna::parse_der(ext.value, |reader| reader.read_bytes())
+            .map_err(|err| Self::bad_encoding(format!("invalid attestation DER payload: {err}")))?;
+        serde_json::from_slice(&payload)
+            .map_err(|err| Self::bad_encoding(format!("invalid attestation JSON payload: {err}")))
     }
 
     /// Given a certifcate, get the public key and validity period to check
     /// against attestation input
     fn expected_input_data_from_cert(cert: &CertificateDer<'_>) -> Result<[u8; 64], rustls::Error> {
-        let (_, cert) = x509_parser::parse_x509_certificate(cert.as_ref()).unwrap();
+        let cert = Self::parse_x509_certificate(cert)?;
         let not_before: u64 = cert
             .validity()
             .not_before
@@ -430,7 +436,7 @@ impl AttestedCertificateVerifier {
         cert: &CertificateDer<'_>,
         now: UnixTime,
     ) -> Result<(), rustls::Error> {
-        let (_, cert) = x509_parser::parse_x509_certificate(cert.as_ref()).unwrap();
+        let cert = Self::parse_x509_certificate(cert)?;
         let now = now.as_secs();
         let not_before: u64 = cert
             .validity()
@@ -478,11 +484,45 @@ impl AttestedCertificateVerifier {
                 self.attestation_verifier
                     .verify_attestation(attestation, expected_input_data)
                     .await
-                    .unwrap();
+                    .map(|_| ())
+                    .map_err(|err| {
+                        tracing::warn!(
+                            "Rejecting certificate after attestation verification failure: {err}"
+                        );
+                        rustls::Error::InvalidCertificate(
+                            rustls::CertificateError::ApplicationVerificationFailure,
+                        )
+                    })
             })
-        });
+        })
+    }
 
-        Ok(())
+    /// Helper for creating encoding related verification errors
+    fn bad_encoding(message: impl Into<String>) -> rustls::Error {
+        let message = message.into();
+        tracing::debug!("Rejecting malformed certificate or attestation payload: {message}");
+        rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+    }
+
+    /// Helper to parse a certificate and map the error for rustls
+    fn parse_x509_certificate<'a>(
+        cert: &'a CertificateDer<'_>,
+    ) -> Result<X509Certificate<'a>, rustls::Error> {
+        x509_parser::parse_x509_certificate(cert.as_ref())
+            .map(|(_, parsed)| parsed)
+            .map_err(|err| Self::bad_encoding(format!("Invalid X.509 DER: {err}")))
+    }
+}
+
+impl AttestedCertificateVerifier {
+    #[cfg(test)]
+    fn verify_server_cert_direct(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        server_name: &ServerName<'_>,
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        self.verify_server_cert(end_entity, &[], server_name, &[], now)
     }
 }
 
@@ -625,8 +665,10 @@ mod tests {
 
     use ra_tls::rcgen::{BasicConstraints, CertificateParams, IsCa};
     use rustls::{
+        CertificateError,
         ClientConfig,
         ClientConnection,
+        Error,
         RootCertStore,
         ServerConfig,
         ServerConnection,
@@ -971,6 +1013,88 @@ mod tests {
         assert!(!server.is_handshaking());
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn malformed_certificate_returns_bad_encoding() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let verifier = AttestedCertificateVerifier::new_with_provider(
+            non_empty_root_store(),
+            AttestationVerifier::mock(),
+            provider,
+        )
+        .expect("verifier construction should succeed");
+        let cert = CertificateDer::from(vec![1_u8, 2, 3, 4]);
+
+        let result = verifier.verify_server_cert_direct(
+            &cert,
+            &ServerName::try_from("foo").expect("server name should be valid"),
+            UnixTime::now(),
+        );
+
+        assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::BadEncoding));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn certificate_without_attestation_extension_returns_bad_encoding() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let cert = plain_self_signed_certificate("foo");
+        let mut roots = RootCertStore::empty();
+        roots.add(cert.clone()).expect("plain certificate should be trusted");
+        let verifier = AttestedCertificateVerifier::new_with_provider(
+            roots,
+            AttestationVerifier::mock(),
+            provider,
+        )
+        .expect("verifier construction should succeed");
+
+        let result = verifier.verify_server_cert_direct(
+            &cert,
+            &ServerName::try_from("foo").expect("server name should be valid"),
+            UnixTime::now(),
+        );
+
+        assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::BadEncoding));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attestation_rejection_returns_application_verification_failure() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let resolver = AttestedCertificateResolver::new_with_provider(
+            AttestationGenerator::new(AttestationType::DcapTdx, None)
+                .expect("mock generator construction should succeed"),
+            None,
+            "foo".to_string(),
+            vec![],
+            provider.clone(),
+        )
+        .await
+        .expect("resolver construction should succeed");
+        let verifier = AttestedCertificateVerifier::new_with_provider(
+            non_empty_root_store(),
+            AttestationVerifier::expect_none(),
+            provider,
+        )
+        .expect("verifier construction should succeed");
+        let cert = resolver
+            .state
+            .certificate
+            .read()
+            .expect("certificate lock poisoned")
+            .first()
+            .expect("resolver should hold a certificate")
+            .clone();
+
+        let result = verifier.verify_server_cert_direct(
+            &cert,
+            &ServerName::try_from("foo").expect("server name should be valid"),
+            UnixTime::now(),
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure)
+        );
+    }
+
     fn test_ca() -> CaCert {
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
             .expect("test CA key generation should succeed");
@@ -980,6 +1104,28 @@ mod tests {
         let cert = params.self_signed(&key).expect("test CA certificate should be self-signed");
 
         CaCert::from_parts(key, cert)
+    }
+
+    fn plain_self_signed_certificate(subject_name: &str) -> CertificateDer<'static> {
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
+            .expect("test key generation should succeed");
+        let params = CertificateParams::new(vec![subject_name.to_string()])
+            .expect("test certificate params should be created");
+        params
+            .self_signed(&key)
+            .expect("test certificate should be self-signed")
+            .der()
+            .to_vec()
+            .into()
+    }
+
+    fn non_empty_root_store() -> RootCertStore {
+        let mut roots = RootCertStore::empty();
+        let ca = test_ca();
+        let ca_cert = CertificateDer::from_pem_slice(ca.pem_cert.as_bytes())
+            .expect("test CA PEM should parse");
+        roots.add(ca_cert).expect("test CA certificate should be trusted");
+        roots
     }
 
     fn transfer_tls_client_to_server(client: &mut ClientConnection, server: &mut ServerConnection) {
