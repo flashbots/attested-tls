@@ -360,18 +360,21 @@ pub struct AttestedCertificateVerifier {
 
 impl AttestedCertificateVerifier {
     pub fn new(
-        root_store: RootCertStore,
+        root_store: Option<RootCertStore>,
         attestation_verifier: AttestationVerifier,
     ) -> Result<Self, AttestedTlsError> {
         Self::new_with_provider(root_store, attestation_verifier, default_crypto_provider()?)
     }
 
     pub fn new_with_provider(
-        root_store: RootCertStore,
+        root_store: Option<RootCertStore>,
         attestation_verifier: AttestationVerifier,
         provider: Arc<CryptoProvider>,
     ) -> Result<Self, AttestedTlsError> {
-        let root_store = Arc::new(root_store);
+        let root_store = Arc::new(match root_store {
+            Some(root_store) => root_store,
+            None => Self::synthetic_root_store()?,
+        });
         let server_inner =
             WebPkiServerVerifier::builder_with_provider(root_store.clone(), provider.clone())
                 .build()
@@ -381,6 +384,19 @@ impl AttestedCertificateVerifier {
             .map_err(AttestedTlsError::VerifierBuilder)?;
 
         Ok(Self { server_inner, client_inner, attestation_verifier })
+    }
+
+    fn synthetic_root_store() -> Result<RootCertStore, AttestedTlsError> {
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+        let mut params =
+            ra_tls::rcgen::CertificateParams::new(vec!["attested-tls-placeholder-ca".to_string()])?;
+        params.is_ca = ra_tls::rcgen::IsCa::Ca(ra_tls::rcgen::BasicConstraints::Unconstrained);
+        let cert = params.self_signed(&key_pair)?;
+
+        let mut root_store = RootCertStore::empty();
+        root_store.add(cert.der().clone())?;
+
+        Ok(root_store)
     }
 
     fn extract_custom_attestation_from_cert(
@@ -713,14 +729,8 @@ mod tests {
         .await
         .unwrap();
 
-        let server_certificate =
-            resolver.state.certificate.read().unwrap().first().unwrap().clone();
-
-        let mut roots = RootCertStore::empty();
-        roots.add(server_certificate).unwrap();
-
         let verifier = AttestedCertificateVerifier::new_with_provider(
-            roots,
+            None,
             AttestationVerifier::mock(),
             provider.clone(),
         )
@@ -780,7 +790,7 @@ mod tests {
         roots.add(ca_cert).unwrap();
 
         let verifier = AttestedCertificateVerifier::new_with_provider(
-            roots,
+            Some(roots),
             AttestationVerifier::mock(),
             provider.clone(),
         )
@@ -882,36 +892,14 @@ mod tests {
         .await
         .expect("client resolver construction should succeed");
 
-        let server_certificate = server_resolver
-            .state
-            .certificate
-            .read()
-            .expect("certificate lock poisoned")
-            .first()
-            .expect("resolver should hold a certificate")
-            .clone();
-        let client_certificate = client_resolver
-            .state
-            .certificate
-            .read()
-            .expect("certificate lock poisoned")
-            .first()
-            .expect("resolver should hold a certificate")
-            .clone();
-
-        let mut client_roots = RootCertStore::empty();
-        client_roots.add(server_certificate).expect("server certificate should be trusted");
-        let mut server_roots = RootCertStore::empty();
-        server_roots.add(client_certificate).expect("client certificate should be trusted");
-
         let server_verifier = AttestedCertificateVerifier::new_with_provider(
-            server_roots,
+            None,
             AttestationVerifier::mock(),
             provider.clone(),
         )
         .expect("server verifier construction should succeed");
         let client_verifier = AttestedCertificateVerifier::new_with_provider(
-            client_roots,
+            None,
             AttestationVerifier::mock(),
             provider.clone(),
         )
@@ -963,20 +951,8 @@ mod tests {
         )
         .await
         .expect("resolver construction should succeed");
-        let server_certificate = resolver
-            .state
-            .certificate
-            .read()
-            .expect("certificate lock poisoned")
-            .first()
-            .expect("resolver should hold a certificate")
-            .clone();
-
-        let mut roots = RootCertStore::empty();
-        roots.add(server_certificate).expect("resolver certificate should be trusted");
-
         let verifier = AttestedCertificateVerifier::new_with_provider(
-            roots,
+            None,
             AttestationVerifier::mock(),
             provider.clone(),
         )
@@ -1015,7 +991,7 @@ mod tests {
     async fn malformed_certificate_returns_bad_encoding() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let verifier = AttestedCertificateVerifier::new_with_provider(
-            non_empty_root_store(),
+            None,
             AttestationVerifier::mock(),
             provider,
         )
@@ -1038,7 +1014,7 @@ mod tests {
         let mut roots = RootCertStore::empty();
         roots.add(cert.clone()).expect("plain certificate should be trusted");
         let verifier = AttestedCertificateVerifier::new_with_provider(
-            roots,
+            Some(roots),
             AttestationVerifier::mock(),
             provider,
         )
@@ -1067,7 +1043,7 @@ mod tests {
         .await
         .expect("resolver construction should succeed");
         let verifier = AttestedCertificateVerifier::new_with_provider(
-            non_empty_root_store(),
+            None,
             AttestationVerifier::expect_none(),
             provider,
         )
@@ -1115,15 +1091,6 @@ mod tests {
             .der()
             .to_vec()
             .into()
-    }
-
-    fn non_empty_root_store() -> RootCertStore {
-        let mut roots = RootCertStore::empty();
-        let ca = test_ca();
-        let ca_cert = CertificateDer::from_pem_slice(ca.pem_cert.as_bytes())
-            .expect("test CA PEM should parse");
-        roots.add(ca_cert).expect("test CA certificate should be trusted");
-        roots
     }
 
     fn transfer_tls_client_to_server(client: &mut ClientConnection, server: &mut ServerConnection) {

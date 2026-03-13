@@ -9,7 +9,7 @@ use rustls::{
     RootCertStore,
     ServerConfig,
     crypto::{CryptoProvider, aws_lc_rs},
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, pem::PemObject},
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
@@ -103,7 +103,7 @@ async fn attested_server_config(server_name: &str, provider: Arc<CryptoProvider>
 
 fn attested_client_config(provider: Arc<CryptoProvider>) -> ClientConfig {
     let verifier = AttestedCertificateVerifier::new_with_provider(
-        non_empty_root_store(),
+        None,
         AttestationVerifier::mock(),
         provider.clone(),
     )
@@ -115,24 +115,4 @@ fn attested_client_config(provider: Arc<CryptoProvider>) -> ClientConfig {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth()
-}
-
-fn non_empty_root_store() -> RootCertStore {
-    let mut roots = RootCertStore::empty();
-    let ca = test_ca();
-    let ca_cert =
-        CertificateDer::from_pem_slice(ca.pem_cert.as_bytes()).expect("test CA PEM should parse");
-    roots.add(ca_cert).expect("test CA certificate should be trusted");
-    roots
-}
-
-fn test_ca() -> ra_tls::cert::CaCert {
-    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
-        .expect("test CA key generation should succeed");
-    let mut params = ra_tls::rcgen::CertificateParams::new(vec!["test-ca".to_string()])
-        .expect("test CA params should be created");
-    params.is_ca = ra_tls::rcgen::IsCa::Ca(ra_tls::rcgen::BasicConstraints::Unconstrained);
-    let cert = params.self_signed(&key).expect("test CA certificate should be self-signed");
-
-    ra_tls::cert::CaCert::from_parts(key, cert)
 }
