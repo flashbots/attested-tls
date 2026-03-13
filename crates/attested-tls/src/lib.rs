@@ -127,7 +127,8 @@ impl AttestedCertificateResolver {
         provider: Arc<CryptoProvider>,
     ) -> Result<Self, AttestedTlsError> {
         debug_assert!(CERTIFICATE_RENEWAL_LEAD_TIME < CERTIFICATE_VALIDITY);
-        let subject_alt_names = normalized_subject_alt_names(primary_name.as_str(), subject_alt_names);
+        let subject_alt_names =
+            normalized_subject_alt_names(primary_name.as_str(), subject_alt_names);
 
         // Generate keypair
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
@@ -829,6 +830,7 @@ mod tests {
         )
         .await
         .expect("server resolver construction should succeed");
+
         let client_resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None)
                 .expect("mock generator construction should succeed"),
