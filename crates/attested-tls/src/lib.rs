@@ -241,9 +241,10 @@ impl AttestedCertificateResolver {
     fn spawn_renewal_task(state: std::sync::Weak<ResolverState>) {
         tokio::spawn(async move {
             let renewal_delay = CERTIFICATE_VALIDITY - CERTIFICATE_RENEWAL_LEAD_TIME;
+            let mut next_delay = renewal_delay;
 
             loop {
-                tokio::time::sleep(renewal_delay).await;
+                tokio::time::sleep(next_delay).await;
                 let Some(current) = state.upgrade() else {
                     tracing::warn!("Resolver has been dropped - stopping renewal loop");
                     break;
@@ -253,12 +254,12 @@ impl AttestedCertificateResolver {
                     Ok(key_pair) => key_pair,
                     Err(e) => {
                         tracing::error!("Failed to load keypair: {e}");
-                        tokio::time::sleep(CERTIFICATE_RENEWAL_RETRY_DELAY).await;
+                        next_delay = CERTIFICATE_RENEWAL_RETRY_DELAY;
                         continue;
                     }
                 };
 
-                match Self::issue_ra_cert_chain(
+                next_delay = match Self::issue_ra_cert_chain(
                     &key_pair,
                     current.ca.as_deref(),
                     current.primary_name.as_str(),
@@ -270,12 +271,13 @@ impl AttestedCertificateResolver {
                     Ok(certificate) => {
                         *current.certificate.write().expect("Certificate lock poisoned") =
                             certificate;
+                        renewal_delay
                     }
                     Err(e) => {
                         tracing::error!("Failed to renew attested certificate: {e}");
-                        tokio::time::sleep(CERTIFICATE_RENEWAL_RETRY_DELAY).await;
+                        CERTIFICATE_RENEWAL_RETRY_DELAY
                     }
-                }
+                };
             }
         });
     }
@@ -293,13 +295,13 @@ impl ResolvesClientCert for AttestedCertificateResolver {
     }
 
     fn has_certs(&self) -> bool {
-        !self.state.certificate.read().expect("certificate lock poisoned").is_empty()
+        !self.state.certificate.read().expect("Certificate lock poisoned").is_empty()
     }
 }
 
 impl AttestedCertificateResolver {
     fn current_certified_key(&self) -> Option<Arc<CertifiedKey>> {
-        let certificate = self.state.certificate.read().expect("certificate lock poisoned").clone();
+        let certificate = self.state.certificate.read().expect("Certificate lock poisoned").clone();
         Some(Arc::new(CertifiedKey::new(certificate, self.state.key.clone())))
     }
 }
@@ -308,6 +310,7 @@ fn default_crypto_provider() -> Result<Arc<CryptoProvider>, AttestedTlsError> {
     CryptoProvider::get_default().cloned().ok_or(AttestedTlsError::CryptoProviderUnavailable)
 }
 
+/// Ensures that SAN contains the primary hostname
 fn normalized_subject_alt_names(primary_name: &str, subject_alt_names: Vec<String>) -> Vec<String> {
     let mut normalized = Vec::with_capacity(subject_alt_names.len() + 1);
     normalized.push(primary_name.to_string());
