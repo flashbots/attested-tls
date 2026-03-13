@@ -37,10 +37,8 @@ async fn nested_tls_uses_attested_tls_for_inner_session() {
     });
 
     let domain = ServerName::try_from("localhost").expect("domain should be valid");
-    let mut stream = connector
-        .connect(domain, client_io)
-        .await
-        .expect("nested connect should succeed");
+    let mut stream =
+        connector.connect(domain, client_io).await.expect("nested connect should succeed");
 
     stream.write_all(b"hello").await.expect("client write should succeed");
     stream.flush().await.expect("client flush should succeed");
@@ -54,8 +52,8 @@ async fn nested_tls_uses_attested_tls_for_inner_session() {
 
 fn plain_tls_config_pair(provider: Arc<CryptoProvider>) -> (ServerConfig, ClientConfig) {
     let subject_name = "localhost";
-    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
-        .expect("test key generation should succeed");
+    let key =
+        KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("test key generation should succeed");
     let mut params = ra_tls::rcgen::CertificateParams::new(vec![subject_name.to_string()])
         .expect("test certificate params should be created");
     params
@@ -122,8 +120,8 @@ fn attested_client_config(provider: Arc<CryptoProvider>) -> ClientConfig {
 fn non_empty_root_store() -> RootCertStore {
     let mut roots = RootCertStore::empty();
     let ca = test_ca();
-    let ca_cert = CertificateDer::from_pem_slice(ca.pem_cert.as_bytes())
-        .expect("test CA PEM should parse");
+    let ca_cert =
+        CertificateDer::from_pem_slice(ca.pem_cert.as_bytes()).expect("test CA PEM should parse");
     roots.add(ca_cert).expect("test CA certificate should be trusted");
     roots
 }
