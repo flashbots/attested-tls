@@ -19,6 +19,7 @@ tracing = "0.1.41"
 
 [dev-dependencies]
 attestation = { workspace = true, features = ["mock"] }
+nested-tls = { path = "../nested-tls" }
 
 [lints]
 workspace = true
