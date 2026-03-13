@@ -92,6 +92,10 @@ struct ResolverState {
     certificate: RwLock<Vec<CertificateDer<'static>>>,
     /// Attestation generator used when renewing ceritifcate
     attestation_generator: AttestationGenerator,
+    /// Primary DNS name used as certificate subject / common name.
+    primary_name: String,
+    /// DNS subject alternative names, including the primary name.
+    subject_alt_names: Vec<String>,
 }
 
 impl AttestedCertificateResolver {
@@ -101,17 +105,29 @@ impl AttestedCertificateResolver {
     pub async fn new(
         attestation_generator: AttestationGenerator,
         ca: Option<CaCert>,
+        primary_name: String,
+        subject_alt_names: Vec<String>,
     ) -> Result<Self, AttestedTlsError> {
-        Self::new_with_provider(attestation_generator, ca, default_crypto_provider()?).await
+        Self::new_with_provider(
+            attestation_generator,
+            ca,
+            primary_name,
+            subject_alt_names,
+            default_crypto_provider()?,
+        )
+        .await
     }
 
     /// Also provide a crypto provider
     pub async fn new_with_provider(
         attestation_generator: AttestationGenerator,
         ca: Option<CaCert>,
+        primary_name: String,
+        subject_alt_names: Vec<String>,
         provider: Arc<CryptoProvider>,
     ) -> Result<Self, AttestedTlsError> {
         debug_assert!(CERTIFICATE_RENEWAL_LEAD_TIME < CERTIFICATE_VALIDITY);
+        let subject_alt_names = normalized_subject_alt_names(primary_name.as_str(), subject_alt_names);
 
         // Generate keypair
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
@@ -119,8 +135,14 @@ impl AttestedCertificateResolver {
         let key = Self::load_signing_key(&key_pair, provider)?;
 
         // Generate initial attested certificate
-        let certificate =
-            Self::issue_ra_cert_chain(&key_pair, ca.as_ref(), &attestation_generator).await?;
+        let certificate = Self::issue_ra_cert_chain(
+            &key_pair,
+            ca.as_ref(),
+            primary_name.as_str(),
+            &subject_alt_names,
+            &attestation_generator,
+        )
+        .await?;
 
         let state = Arc::new(ResolverState {
             key,
@@ -128,6 +150,8 @@ impl AttestedCertificateResolver {
             ca: ca.map(Arc::new),
             key_pair_der,
             attestation_generator,
+            primary_name,
+            subject_alt_names,
         });
 
         // Start a loop which will periodically renew the certificate
@@ -141,10 +165,11 @@ impl AttestedCertificateResolver {
     async fn issue_ra_cert_chain(
         key: &KeyPair,
         ca: Option<&CaCert>,
+        primary_name: &str,
+        subject_alt_names: &[String],
         attestation_generator: &AttestationGenerator,
     ) -> Result<Vec<CertificateDer<'static>>, AttestedTlsError> {
         let pubkey = key.public_key_der();
-        let alt_names = vec!["foo".to_string()];
         let now = SystemTime::now();
         let not_after = now + CERTIFICATE_VALIDITY;
 
@@ -153,8 +178,8 @@ impl AttestedCertificateResolver {
 
         let cert_request = CertRequest::builder()
             .key(key)
-            .subject("foo")
-            .alt_names(&alt_names)
+            .subject(primary_name)
+            .alt_names(subject_alt_names)
             .not_before(now)
             .not_after(not_after)
             .usage_server_auth(true)
@@ -235,6 +260,8 @@ impl AttestedCertificateResolver {
                 match Self::issue_ra_cert_chain(
                     &key_pair,
                     current.ca.as_deref(),
+                    current.primary_name.as_str(),
+                    &current.subject_alt_names,
                     &current.attestation_generator,
                 )
                 .await
@@ -278,6 +305,19 @@ impl AttestedCertificateResolver {
 
 fn default_crypto_provider() -> Result<Arc<CryptoProvider>, AttestedTlsError> {
     CryptoProvider::get_default().cloned().ok_or(AttestedTlsError::CryptoProviderUnavailable)
+}
+
+fn normalized_subject_alt_names(primary_name: &str, subject_alt_names: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::with_capacity(subject_alt_names.len() + 1);
+    normalized.push(primary_name.to_string());
+
+    for name in subject_alt_names {
+        if !normalized.iter().any(|existing| existing == &name) {
+            normalized.push(name);
+        }
+    }
+
+    normalized
 }
 
 /// Make input data for the attestation by hashing together public key and
@@ -601,6 +641,8 @@ mod tests {
             AttestationGenerator::new(AttestationType::DcapTdx, None)
                 .expect("mock generator construction should succeed"),
             None,
+            "foo".to_string(),
+            vec![],
             provider,
         )
         .await
@@ -613,10 +655,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn server_and_client_configs_complete_a_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let server_name = "foo";
         let resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None)
                 .expect("mock generator construction should succeed"),
             None,
+            server_name.to_string(),
+            vec![],
             provider.clone(),
         )
         .await
@@ -654,7 +699,7 @@ mod tests {
 
         let mut client = ClientConnection::new(
             Arc::new(client_config),
-            ServerName::try_from("foo").expect("server name should be valid"),
+            ServerName::try_from(server_name).expect("server name should be valid"),
         )
         .expect("client connection should be created");
         let mut server =
@@ -672,6 +717,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn ca_signed_server_and_client_configs_complete_a_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let server_name = "foo";
         let ca = test_ca();
         let ca_cert = CertificateDer::from_pem_slice(ca.pem_cert.as_bytes())
             .expect("test CA PEM should parse");
@@ -679,6 +725,8 @@ mod tests {
             AttestationGenerator::new(AttestationType::DcapTdx, None)
                 .expect("mock generator construction should succeed"),
             Some(ca),
+            server_name.to_string(),
+            vec![],
             provider.clone(),
         )
         .await
@@ -712,7 +760,7 @@ mod tests {
 
         let mut client = ClientConnection::new(
             Arc::new(client_config),
-            ServerName::try_from("foo").expect("server name should be valid"),
+            ServerName::try_from(server_name).expect("server name should be valid"),
         )
         .expect("client connection should be created");
         let mut server =
@@ -734,6 +782,8 @@ mod tests {
             AttestationGenerator::new(AttestationType::DcapTdx, None)
                 .expect("mock generator construction should succeed"),
             None,
+            "foo".to_string(),
+            vec![],
             provider,
         )
         .await
@@ -767,11 +817,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn server_and_client_configs_complete_a_mutual_auth_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let server_name = "foo";
 
         let server_resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None)
                 .expect("mock generator construction should succeed"),
             None,
+            server_name.to_string(),
+            vec![],
             provider.clone(),
         )
         .await
@@ -780,6 +833,8 @@ mod tests {
             AttestationGenerator::new(AttestationType::DcapTdx, None)
                 .expect("mock generator construction should succeed"),
             None,
+            "client".to_string(),
+            vec![],
             provider.clone(),
         )
         .await
@@ -834,7 +889,7 @@ mod tests {
 
         let mut client = ClientConnection::new(
             Arc::new(client_config),
-            ServerName::try_from("foo").expect("server name should be valid"),
+            ServerName::try_from(server_name).expect("server name should be valid"),
         )
         .expect("client connection should be created");
         let mut server =
@@ -849,6 +904,69 @@ mod tests {
         assert!(!server.is_handshaking());
         assert!(client.peer_certificates().is_some());
         assert!(server.peer_certificates().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn alternate_san_completes_a_handshake() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let primary_name = "foo";
+        let alternate_name = "bar";
+        let resolver = AttestedCertificateResolver::new_with_provider(
+            AttestationGenerator::new(AttestationType::DcapTdx, None)
+                .expect("mock generator construction should succeed"),
+            None,
+            primary_name.to_string(),
+            vec![alternate_name.to_string(), primary_name.to_string()],
+            provider.clone(),
+        )
+        .await
+        .expect("resolver construction should succeed");
+        let server_certificate = resolver
+            .state
+            .certificate
+            .read()
+            .expect("certificate lock poisoned")
+            .first()
+            .expect("resolver should hold a certificate")
+            .clone();
+
+        let mut roots = RootCertStore::empty();
+        roots.add(server_certificate).expect("resolver certificate should be trusted");
+
+        let verifier = AttestedCertificateVerifier::new_with_provider(
+            roots,
+            AttestationVerifier::mock(),
+            provider.clone(),
+        )
+        .expect("verifier construction should succeed");
+
+        let server_config = ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("server config should support default protocol versions")
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(resolver));
+        let client_config = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("client config should support default protocol versions")
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_no_client_auth();
+
+        let mut client = ClientConnection::new(
+            Arc::new(client_config),
+            ServerName::try_from(alternate_name).expect("alternate server name should be valid"),
+        )
+        .expect("client connection should be created");
+        let mut server =
+            ServerConnection::new(Arc::new(server_config)).expect("server connection should exist");
+
+        while client.is_handshaking() || server.is_handshaking() {
+            transfer_tls_client_to_server(&mut client, &mut server);
+            transfer_tls_server_to_client(&mut server, &mut client);
+        }
+
+        assert!(!client.is_handshaking());
+        assert!(!server.is_handshaking());
     }
 
     fn test_ca() -> CaCert {
