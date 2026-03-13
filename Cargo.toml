@@ -4,6 +4,7 @@ resolver = "3"
 members = [
     "crates/attested-tls",
     "crates/nested-tls",
+    "crates/attestation",
 ]
 
 [workspace.lints.rust]
@@ -19,3 +20,4 @@ unused_async = "warn"
 rustls = { version = "0.23.37", default-features = false, features = ["brotli"] }
 tokio = { version = "1.50.0", features = ["default"] }
 tokio-rustls = { version = "0.26.4", default-features = false }
+attestation = { path = "crates/attestation" }
