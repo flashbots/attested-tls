@@ -347,6 +347,7 @@ fn create_report_data(
     Ok(hasher.finalize().into())
 }
 
+/// Verifies attested TLS server or client certificates during TLS handshake
 #[derive(Debug)]
 pub struct AttestedCertificateVerifier {
     server_inner: Arc<WebPkiServerVerifier>,
@@ -681,16 +682,16 @@ mod tests {
     async fn certificate_resolver_creates_initial_certificate() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let resolver = AttestedCertificateResolver::new_with_provider(
-            AttestationGenerator::new(AttestationType::DcapTdx, None)
-                .expect("mock generator construction should succeed"),
+            AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
             None,
             "foo".to_string(),
             vec![],
             provider,
         )
         .await
-        .expect("resolver construction should succeed");
-        let certificate = resolver.state.certificate.read().expect("certificate lock poisoned");
+        .unwrap();
+
+        let certificate = resolver.state.certificate.read().unwrap();
 
         assert_eq!(certificate.len(), 1);
     }
@@ -700,53 +701,47 @@ mod tests {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let server_name = "foo";
         let resolver = AttestedCertificateResolver::new_with_provider(
-            AttestationGenerator::new(AttestationType::DcapTdx, None)
-                .expect("mock generator construction should succeed"),
+            AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
             None,
             server_name.to_string(),
             vec![],
             provider.clone(),
         )
         .await
-        .expect("resolver construction should succeed");
-        let server_certificate = resolver
-            .state
-            .certificate
-            .read()
-            .expect("certificate lock poisoned")
-            .first()
-            .expect("resolver should hold a certificate")
-            .clone();
+        .unwrap();
+
+        let server_certificate =
+            resolver.state.certificate.read().unwrap().first().unwrap().clone();
 
         let mut roots = RootCertStore::empty();
-        roots.add(server_certificate).expect("resolver certificate should be trusted");
+        roots.add(server_certificate).unwrap();
 
         let verifier = AttestedCertificateVerifier::new_with_provider(
             roots,
             AttestationVerifier::mock(),
             provider.clone(),
         )
-        .expect("verifier construction should succeed");
+        .unwrap();
 
         let server_config = ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
-            .expect("server config should support default protocol versions")
+            .unwrap()
             .with_no_client_auth()
             .with_cert_resolver(Arc::new(resolver));
         let client_config = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .expect("client config should support default protocol versions")
+            .unwrap()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(verifier))
             .with_no_client_auth();
 
         let mut client = ClientConnection::new(
             Arc::new(client_config),
-            ServerName::try_from(server_name).expect("server name should be valid"),
+            ServerName::try_from(server_name).unwrap(),
         )
-        .expect("client connection should be created");
-        let mut server =
-            ServerConnection::new(Arc::new(server_config)).expect("server connection should exist");
+        .unwrap();
+
+        let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
 
         while client.is_handshaking() || server.is_handshaking() {
             transfer_tls_client_to_server(&mut client, &mut server);
@@ -762,52 +757,52 @@ mod tests {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let server_name = "foo";
         let ca = test_ca();
-        let ca_cert = CertificateDer::from_pem_slice(ca.pem_cert.as_bytes())
-            .expect("test CA PEM should parse");
+        let ca_cert = CertificateDer::from_pem_slice(ca.pem_cert.as_bytes()).unwrap();
+
         let resolver = AttestedCertificateResolver::new_with_provider(
-            AttestationGenerator::new(AttestationType::DcapTdx, None)
-                .expect("mock generator construction should succeed"),
+            AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
             Some(ca),
             server_name.to_string(),
             vec![],
             provider.clone(),
         )
         .await
-        .expect("resolver construction should succeed");
-        let certificate_chain =
-            resolver.state.certificate.read().expect("certificate lock poisoned").clone();
+        .unwrap();
+
+        let certificate_chain = resolver.state.certificate.read().unwrap().clone();
 
         assert_eq!(certificate_chain.len(), 2);
 
         let mut roots = RootCertStore::empty();
-        roots.add(ca_cert).expect("CA certificate should be trusted");
+        roots.add(ca_cert).unwrap();
 
         let verifier = AttestedCertificateVerifier::new_with_provider(
             roots,
             AttestationVerifier::mock(),
             provider.clone(),
         )
-        .expect("verifier construction should succeed");
+        .unwrap();
 
         let server_config = ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
-            .expect("server config should support default protocol versions")
+            .unwrap()
             .with_no_client_auth()
             .with_cert_resolver(Arc::new(resolver));
+
         let client_config = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .expect("client config should support default protocol versions")
+            .unwrap()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(verifier))
             .with_no_client_auth();
 
         let mut client = ClientConnection::new(
             Arc::new(client_config),
-            ServerName::try_from(server_name).expect("server name should be valid"),
+            ServerName::try_from(server_name).unwrap(),
         )
-        .expect("client connection should be created");
-        let mut server =
-            ServerConnection::new(Arc::new(server_config)).expect("server connection should exist");
+        .unwrap();
+
+        let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
 
         while client.is_handshaking() || server.is_handshaking() {
             transfer_tls_client_to_server(&mut client, &mut server);
