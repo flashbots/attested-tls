@@ -39,7 +39,7 @@ pub struct Pccs {
     /// The state of the initial pre-warm fetch
     prewarm_stats: Arc<PrewarmStats>,
     /// Completion signal for startup pre-warm, shared across all clones
-    prewarm_outcome_tx: watch::Sender<Option<PrewarmOutcome>>,
+    prewarm_outcome_tx: Option<watch::Sender<Option<PrewarmOutcome>>>,
 }
 
 impl std::fmt::Debug for Pccs {
@@ -53,20 +53,10 @@ impl std::fmt::Debug for Pccs {
 impl Pccs {
     /// Creates a new PCCS cache using the provided URL or Intel PCS default
     pub fn new(pccs_url: Option<String>) -> Self {
-        let pccs_url = pccs_url
-            .unwrap_or(PCS_URL.to_string())
-            .trim_end_matches('/')
-            .trim_end_matches("/sgx/certification/v4")
-            .trim_end_matches("/tdx/certification/v4")
-            .to_string();
+        let mut pccs = Self::new_without_prewarm(pccs_url);
 
         let (prewarm_outcome_tx, _) = watch::channel(None);
-        let pccs = Self {
-            pccs_url,
-            cache: RwLock::new(HashMap::new()).into(),
-            prewarm_stats: Arc::new(PrewarmStats::default()),
-            prewarm_outcome_tx,
-        };
+        pccs.prewarm_outcome_tx = Some(prewarm_outcome_tx);
 
         // Start filling the cache right away
         let pccs_for_prewarm = pccs.clone();
@@ -78,19 +68,41 @@ impl Pccs {
         pccs
     }
 
+    /// Creates a new PCCS cache using the provided URL or Intel PCS default
+    /// and does not pre-warm by proactively fetching collateral
+    pub fn new_without_prewarm(pccs_url: Option<String>) -> Self {
+        let pccs_url = pccs_url
+            .unwrap_or(PCS_URL.to_string())
+            .trim_end_matches('/')
+            .trim_end_matches("/sgx/certification/v4")
+            .trim_end_matches("/tdx/certification/v4")
+            .to_string();
+
+        Self {
+            pccs_url,
+            cache: RwLock::new(HashMap::new()).into(),
+            prewarm_stats: Arc::new(PrewarmStats::default()),
+            prewarm_outcome_tx: None,
+        }
+    }
+
     /// Resolves when cache is pre-warmed with all available collateral
     pub async fn ready(&self) -> Result<PrewarmSummary, PccsError> {
-        let mut outcome_rx = self.prewarm_outcome_tx.subscribe();
-        loop {
-            if let Some(outcome) = outcome_rx.borrow_and_update().clone() {
-                return match outcome {
-                    PrewarmOutcome::Ready(summary) => Ok(summary),
-                    PrewarmOutcome::Failed(message) => Err(PccsError::PrewarmFailed(message)),
-                };
+        if let Some(prewarm_outcome_tx) = &self.prewarm_outcome_tx {
+            let mut outcome_rx = prewarm_outcome_tx.subscribe();
+            loop {
+                if let Some(outcome) = outcome_rx.borrow_and_update().clone() {
+                    return match outcome {
+                        PrewarmOutcome::Ready(summary) => Ok(summary),
+                        PrewarmOutcome::Failed(message) => Err(PccsError::PrewarmFailed(message)),
+                    };
+                }
+                if outcome_rx.changed().await.is_err() {
+                    return Err(PccsError::PrewarmSignalClosed);
+                }
             }
-            if outcome_rx.changed().await.is_err() {
-                return Err(PccsError::PrewarmSignalClosed);
-            }
+        } else {
+            Err(PccsError::PrewarmDisabled)
         }
     }
 
@@ -293,8 +305,10 @@ impl Pccs {
     }
 
     fn finish_prewarm(&self, outcome: PrewarmOutcome) {
-        self.prewarm_stats.completed.store(true, Ordering::SeqCst);
-        let _ = self.prewarm_outcome_tx.send(Some(outcome));
+        if let Some(prewarm_outcome_tx) = &self.prewarm_outcome_tx {
+            self.prewarm_stats.completed.store(true, Ordering::SeqCst);
+            let _ = prewarm_outcome_tx.send(Some(outcome));
+        }
     }
 
     /// Fetches available FMSPC entries from configured PCCS/PCS endpoint
@@ -609,6 +623,8 @@ pub enum PccsError {
     PrewarmFailed(String),
     #[error("PCCS prewarm signal channel closed before completion")]
     PrewarmSignalClosed,
+    #[error("PCCS prewarm is disabled for this instance")]
+    PrewarmDisabled,
     #[error("Timestamp exceeds i64 range")]
     TimeStampExceedsI64,
     #[error("PCCS cache lock poisoned")]
@@ -767,5 +783,12 @@ mod tests {
         let ready_result =
             tokio::time::timeout(Duration::from_secs(2), pccs.ready()).await.unwrap();
         assert!(matches!(ready_result, Err(PccsError::PrewarmFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn test_ready_returns_error_when_prewarm_disabled() {
+        let pccs = Pccs::new_without_prewarm(None);
+        let ready_result = pccs.ready().await;
+        assert!(matches!(ready_result, Err(PccsError::PrewarmDisabled)));
     }
 }

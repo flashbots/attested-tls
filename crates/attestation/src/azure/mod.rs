@@ -519,7 +519,7 @@ mod tests {
         let sync_measurements = verify_azure_attestation_with_given_timestamp_sync(
             attestation_bytes.to_vec(),
             [0; 64], // Input data
-            Pccs::new(None),
+            Pccs::new_without_prewarm(None),
             sync_collateral,
             now,
             false,

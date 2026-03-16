@@ -301,9 +301,10 @@ mod tests {
         let collateral_bytes: &'static [u8] =
             include_bytes!("../test-assets/dcap-quote-collateral-00.json");
 
-        let collateral = serde_json::from_slice(collateral_bytes).unwrap();
+        let async_collateral = serde_json::from_slice(collateral_bytes).unwrap();
+        let sync_collateral = serde_json::from_slice(collateral_bytes).unwrap();
 
-        let measurements = verify_dcap_attestation_with_given_timestamp(
+        let async_measurements = verify_dcap_attestation_with_given_timestamp(
             attestation_bytes.to_vec(),
             [
                 116, 39, 106, 100, 143, 31, 212, 145, 244, 116, 162, 213, 44, 114, 216, 80, 227,
@@ -312,14 +313,30 @@ mod tests {
                 173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
             ],
             None,
-            Some(collateral),
+            Some(async_collateral),
             now,
             false,
         )
         .await
         .unwrap();
 
-        measurement_policy.check_measurement(&measurements).unwrap();
+        let sync_measurements = verify_dcap_attestation_with_timestamp_sync(
+            attestation_bytes.to_vec(),
+            [
+                116, 39, 106, 100, 143, 31, 212, 145, 244, 116, 162, 213, 44, 114, 216, 80, 227,
+                118, 129, 87, 180, 62, 194, 151, 169, 145, 116, 130, 189, 119, 39, 139, 161, 136,
+                37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85, 245, 114, 33,
+                173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
+            ],
+            Pccs::new_without_prewarm(None),
+            Some(sync_collateral),
+            now,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(async_measurements, sync_measurements);
+        measurement_policy.check_measurement(&async_measurements).unwrap();
     }
 
     // This specifically tests a quote which has outdated TCB level from Azure
