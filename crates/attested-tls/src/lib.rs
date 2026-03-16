@@ -1,5 +1,6 @@
 //! An attested TLS certificate resolver and verifier
 use std::{
+    collections::HashSet,
     fmt,
     sync::{Arc, RwLock},
     time::{Duration, SystemTime},
@@ -376,6 +377,8 @@ pub struct AttestedCertificateVerifier {
     provider: Arc<CryptoProvider>,
     /// Configured for verifying attestations
     attestation_verifier: AttestationVerifier,
+    /// Report data of pre-trusted certificates
+    trusted_certificates: Arc<RwLock<HashSet<[u8; 64]>>>,
 }
 
 impl AttestedCertificateVerifier {
@@ -413,7 +416,13 @@ impl AttestedCertificateVerifier {
             None => (None, None),
         };
 
-        Ok(Self { server_inner, client_inner, provider, attestation_verifier })
+        Ok(Self {
+            server_inner,
+            client_inner,
+            provider,
+            attestation_verifier,
+            trusted_certificates: Default::default(),
+        })
     }
 
     /// Given a TLS certificate, return the embedded attestation
@@ -515,6 +524,19 @@ impl AttestedCertificateVerifier {
         end_entity: &CertificateDer<'_>,
     ) -> Result<(), rustls::Error> {
         let expected_input_data = Self::expected_input_data_from_cert(end_entity)?;
+
+        // First check if we have already successfully verified the attestation
+        // associated with this certificate
+        {
+            let trusted_certificates = self.trusted_certificates.read().map_err(|_| {
+                rustls::Error::General("Trusted certificate cache lock poisoned".into())
+            })?;
+            if trusted_certificates.contains(&expected_input_data) {
+                tracing::debug!("Skipping attestation verification for trusted certificate");
+                return Ok(());
+            }
+        }
+
         let attestation = Self::extract_custom_attestation_from_cert(end_entity)?;
 
         tokio::task::block_in_place(|| {
@@ -522,7 +544,6 @@ impl AttestedCertificateVerifier {
                 self.attestation_verifier
                     .verify_attestation(attestation, expected_input_data)
                     .await
-                    .map(|_| ())
                     .map_err(|err| {
                         tracing::warn!(
                             "Rejecting certificate after attestation verification failure: {err}"
@@ -532,7 +553,15 @@ impl AttestedCertificateVerifier {
                         )
                     })
             })
-        })
+        })?;
+
+        // Write trusted certificate details to cache
+        self.trusted_certificates
+            .write()
+            .map_err(|_| rustls::Error::General("Trusted certificate cache lock poisoned".into()))?
+            .insert(expected_input_data);
+
+        Ok(())
     }
 
     /// Helper for creating encoding related verification errors
@@ -1111,6 +1140,62 @@ mod tests {
             result.unwrap_err(),
             Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn verifier_reuses_trusted_certificate_cache() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let resolver = AttestedCertificateResolver::new_with_provider(
+            AttestationGenerator::new(AttestationType::DcapTdx, None)
+                .expect("mock generator construction should succeed"),
+            None,
+            "foo".to_string(),
+            vec![],
+            provider.clone(),
+        )
+        .await
+        .expect("resolver construction should succeed");
+        let mut verifier = AttestedCertificateVerifier::new_with_provider(
+            None,
+            AttestationVerifier::mock(),
+            provider,
+        )
+        .expect("verifier construction should succeed");
+        let cert = resolver
+            .state
+            .certificate
+            .read()
+            .expect("certificate lock poisoned")
+            .first()
+            .expect("resolver should hold a certificate")
+            .clone();
+        let expected_input_data = AttestedCertificateVerifier::expected_input_data_from_cert(&cert)
+            .expect("certificate report data should be computed");
+
+        verifier
+            .verify_server_cert_direct(
+                &cert,
+                &ServerName::try_from("foo").expect("server name should be valid"),
+                UnixTime::now(),
+            )
+            .expect("initial verification should succeed");
+        assert!(
+            verifier
+                .trusted_certificates
+                .read()
+                .expect("trusted certificate lock poisoned")
+                .contains(&expected_input_data)
+        );
+
+        verifier.attestation_verifier = AttestationVerifier::expect_none();
+
+        verifier
+            .verify_server_cert_direct(
+                &cert,
+                &ServerName::try_from("foo").expect("server name should be valid"),
+                UnixTime::now(),
+            )
+            .expect("cached verification should skip attestation verification");
     }
 
     fn test_ca() -> CaCert {
