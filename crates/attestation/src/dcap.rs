@@ -192,6 +192,7 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
 }
 
 #[cfg(any(test, feature = "mock"))]
+#[allow(clippy::unused_async)]
 pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],

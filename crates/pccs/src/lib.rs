@@ -137,15 +137,16 @@ impl Pccs {
         let collateral = fetch_collateral(&self.pccs_url, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
 
-        let mut cache = self.cache.write().map_err(|_| PccsError::CachePoisoned)?;
-        if let Some(existing) = cache.get(&cache_key) &&
-            now < existing.next_update
         {
-            return Ok((existing.collateral.clone(), false));
-        }
+            let mut cache = self.cache.write().map_err(|_| PccsError::CachePoisoned)?;
+            if let Some(existing) = cache.get(&cache_key) &&
+                now < existing.next_update
+            {
+                return Ok((existing.collateral.clone(), false));
+            }
 
-        upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
-        drop(cache);
+            upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
+        }
         self.ensure_refresh_task(&cache_key).await;
         Ok((collateral, true))
     }
@@ -160,7 +161,7 @@ impl Pccs {
         let cache_key = PccsInput::new(fmspc.clone(), ca);
         let cache = self.cache.read().map_err(|_| PccsError::CachePoisoned)?;
         if let Some(entry) = cache.get(&cache_key) {
-            if now < entry.next_update {
+            if now >= entry.next_update {
                 tracing::warn!(
                     fmspc,
                     next_update = entry.next_update,
@@ -740,16 +741,17 @@ mod tests {
         assert_eq!(summary.successes, 2);
         assert_eq!(summary.failures, 0);
 
-        let cache_guard = pccs.cache.read().unwrap();
-        let total_entries = cache_guard.len();
+        let (total_entries, fmspc, ca) = {
+            let cache_guard = pccs.cache.read().unwrap();
+            let total_entries = cache_guard.len();
+            let (fmspc, ca) = cache_guard
+                .keys()
+                .next()
+                .map(|k| (k.fmspc.clone(), k.ca.clone()))
+                .expect("expected startup pre-provision to populate PCCS cache");
+            (total_entries, fmspc, ca)
+        };
         assert_eq!(total_entries, 2, "expected startup pre-provision to cache processor+platform");
-
-        let (fmspc, ca) = cache_guard
-            .keys()
-            .next()
-            .map(|k| (k.fmspc.clone(), k.ca.clone()))
-            .expect("expected startup pre-provision to populate PCCS cache");
-        drop(cache_guard);
         let ca_static = ca_as_static(&ca).expect("unexpected CA value in warmed cache entry");
         let now = unix_now().unwrap();
         let (_, is_fresh) = pccs.get_collateral(fmspc, ca_static, now as u64).await.unwrap();
