@@ -301,7 +301,7 @@ impl AttestationVerifier {
         tracing::debug!("Verifing {attestation_type} attestation");
 
         if self.log_dcap_quote {
-            log_attestation(&attestation_exchange_message).await;
+            log_attestation(&attestation_exchange_message);
         }
 
         let measurements = match attestation_type {
@@ -356,10 +356,9 @@ impl AttestationVerifier {
         let attestation_type = attestation_exchange_message.attestation_type;
         tracing::debug!("Verifing {attestation_type} attestation");
 
-        // TODO do fire-and-forget logging
-        // if self.log_dcap_quote {
-        //     log_attestation(&attestation_exchange_message).await;
-        // }
+        if self.log_dcap_quote {
+            log_attestation(&attestation_exchange_message);
+        }
 
         let measurements = match attestation_type {
             AttestationType::None => {
@@ -412,14 +411,25 @@ impl AttestationVerifier {
 }
 
 /// Write attestation data to a log file
-async fn log_attestation(attestation: &AttestationExchangeMessage) {
+fn log_attestation(attestation: &AttestationExchangeMessage) {
     if attestation.attestation_type != AttestationType::None {
         let timestamp =
             SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_nanos();
 
         let filename = format!("quotes/{}-{}", attestation.attestation_type, timestamp);
-        if let Err(err) = tokio::fs::write(&filename, attestation.attestation.clone()).await {
-            tracing::warn!("Failed to write {filename}: {err}");
+        let attestation_bytes = attestation.attestation.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(err) = tokio::fs::write(&filename, attestation_bytes).await {
+                    tracing::warn!("Failed to write {filename}: {err}");
+                }
+            });
+        } else {
+            std::thread::spawn(move || {
+                if let Err(err) = std::fs::write(&filename, attestation_bytes) {
+                    tracing::warn!("Failed to write {filename}: {err}");
+                }
+            });
         }
     }
 }
