@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
+        RwLock,
         Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
@@ -12,7 +13,7 @@ use dcap_qvl::{QuoteCollateralV3, collateral::get_collateral_for_fmspc, tcb_info
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
-    sync::{RwLock, Semaphore, watch},
+    sync::{Semaphore, watch},
     task::{JoinHandle, JoinSet},
     time::{Duration, sleep},
 };
@@ -107,7 +108,7 @@ impl Pccs {
         let cache_key = PccsInput::new(fmspc.clone(), ca);
 
         {
-            let cache = self.cache.read().await;
+            let cache = self.cache.read().map_err(|_| PccsError::CachePoisoned)?;
             if let Some(entry) = cache.get(&cache_key) {
                 if now < entry.next_update {
                     return Ok((entry.collateral.clone(), false));
@@ -124,7 +125,7 @@ impl Pccs {
         let collateral = fetch_collateral(&self.pccs_url, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
 
-        let mut cache = self.cache.write().await;
+        let mut cache = self.cache.write().map_err(|_| PccsError::CachePoisoned)?;
         if let Some(existing) = cache.get(&cache_key) &&
             now < existing.next_update
         {
@@ -135,6 +136,30 @@ impl Pccs {
         drop(cache);
         self.ensure_refresh_task(&cache_key).await;
         Ok((collateral, true))
+    }
+
+    pub fn get_collateral_sync(
+        &self,
+        fmspc: String,
+        ca: &'static str,
+        now: u64,
+    ) -> Result<QuoteCollateralV3, PccsError> {
+        let now = i64::try_from(now).map_err(|_| PccsError::TimeStampExceedsI64)?;
+        let cache_key = PccsInput::new(fmspc.clone(), ca);
+        let cache = self.cache.read().map_err(|_| PccsError::CachePoisoned)?;
+        if let Some(entry) = cache.get(&cache_key) {
+            if now < entry.next_update {
+                tracing::warn!(
+                    fmspc,
+                    next_update = entry.next_update,
+                    now,
+                    "Cached collateral expired"
+                );
+            }
+            Ok(entry.collateral.clone())
+        } else {
+            Err(PccsError::NoCollateralForFmspc(format!("{cache_key:?}")))
+        }
     }
 
     /// Fetches fresh collateral, overwrites cache, and ensures proactive
@@ -150,7 +175,7 @@ impl Pccs {
         let cache_key = PccsInput::new(fmspc, ca);
 
         {
-            let mut cache = self.cache.write().await;
+            let mut cache = self.cache.write().map_err(|_| PccsError::CachePoisoned)?;
             upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
         }
         self.ensure_refresh_task(&cache_key).await;
@@ -160,7 +185,10 @@ impl Pccs {
     /// Starts a background refresh loop for a cache key when no task is
     /// active
     async fn ensure_refresh_task(&self, cache_key: &PccsInput) {
-        let mut cache = self.cache.write().await;
+        let Ok(mut cache) = self.cache.write() else {
+            tracing::warn!("PCCS cache lock poisoned, cannot ensure refresh task");
+            return;
+        };
         let Some(entry) = cache.get_mut(cache_key) else {
             return;
         };
@@ -413,7 +441,10 @@ async fn refresh_loop(
             return;
         };
         let next_update = {
-            let cache_guard = cache.read().await;
+            let Ok(cache_guard) = cache.read() else {
+                tracing::warn!("PCCS cache lock poisoned, refresh loop stopping");
+                return;
+            };
             let Some(entry) = cache_guard.get(&key) else {
                 return;
             };
@@ -445,7 +476,10 @@ async fn refresh_loop(
             return;
         };
         let should_refresh = {
-            let cache_guard = cache.read().await;
+            let Ok(cache_guard) = cache.read() else {
+                tracing::warn!("PCCS cache lock poisoned, refresh loop stopping");
+                return;
+            };
             let Some(entry) = cache_guard.get(&key) else {
                 return;
             };
@@ -474,7 +508,10 @@ async fn refresh_loop(
                         let Some(cache) = weak_cache.upgrade() else {
                             return;
                         };
-                        let mut cache_guard = cache.write().await;
+                        let Ok(mut cache_guard) = cache.write() else {
+                            tracing::warn!("PCCS cache lock poisoned, refresh loop stopping");
+                            return;
+                        };
                         let Some(entry) = cache_guard.get_mut(&key) else {
                             return;
                         };
@@ -574,6 +611,10 @@ pub enum PccsError {
     PrewarmSignalClosed,
     #[error("Timestamp exceeds i64 range")]
     TimeStampExceedsI64,
+    #[error("PCCS cache lock poisoned")]
+    CachePoisoned,
+    #[error("No collateral in cache for FMSPC {0}")]
+    NoCollateralForFmspc(String),
 }
 
 #[cfg(test)]
@@ -683,7 +724,7 @@ mod tests {
         assert_eq!(summary.successes, 2);
         assert_eq!(summary.failures, 0);
 
-        let cache_guard = pccs.cache.read().await;
+        let cache_guard = pccs.cache.read().unwrap();
         let total_entries = cache_guard.len();
         assert_eq!(total_entries, 2, "expected startup pre-provision to cache processor+platform");
 
