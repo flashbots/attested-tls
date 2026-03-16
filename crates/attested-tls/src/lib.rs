@@ -1,6 +1,6 @@
 //! An attested TLS certificate resolver and verifier
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fmt,
     sync::{Arc, RwLock},
     time::{Duration, SystemTime},
@@ -27,8 +27,8 @@ use rustls::{
         ResolvesClientCert,
         VerifierBuilderError,
         WebPkiServerVerifier,
-        verify_server_name,
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        verify_server_name,
     },
     crypto::CryptoProvider,
     pki_types::{
@@ -379,8 +379,8 @@ pub struct AttestedCertificateVerifier {
     provider: Arc<CryptoProvider>,
     /// Configured for verifying attestations
     attestation_verifier: AttestationVerifier,
-    /// Report data of pre-trusted certificates
-    trusted_certificates: Arc<RwLock<HashSet<[u8; 64]>>>,
+    /// Report data of pre-trusted certificates with cache expiry time
+    trusted_certificates: Arc<RwLock<HashMap<[u8; 64], UnixTime>>>,
 }
 
 impl AttestedCertificateVerifier {
@@ -455,9 +455,9 @@ impl AttestedCertificateVerifier {
             .map_err(|err| Self::bad_encoding(format!("invalid attestation JSON payload: {err}")))
     }
 
-    /// Given a certifcate, get the public key and validity period to check
-    /// against attestation input
-    fn expected_input_data_from_cert(cert: &CertificateDer<'_>) -> Result<[u8; 64], rustls::Error> {
+    /// Given a certificate, return the attestation report input data based
+    /// on public key and expriy, as well as the expiry time
+    fn cert_binding_data(cert: &CertificateDer<'_>) -> Result<([u8; 64], UnixTime), rustls::Error> {
         let cert = Self::parse_x509_certificate(cert)?;
         let not_before: u64 = cert
             .validity()
@@ -471,12 +471,15 @@ impl AttestedCertificateVerifier {
             .timestamp()
             .try_into()
             .map_err(|_| rustls::Error::General("invalid certificate not_after".into()))?;
-        create_report_data(
+        let expected_input_data = create_report_data(
             cert.public_key().raw.to_vec(),
             SystemTime::UNIX_EPOCH + Duration::from_secs(not_before),
             SystemTime::UNIX_EPOCH + Duration::from_secs(not_after),
         )
-        .map_err(|err| rustls::Error::General(err.to_string()))
+        .map_err(|err| rustls::Error::General(err.to_string()))?;
+        let not_after = UnixTime::since_unix_epoch(Duration::from_secs(not_after));
+
+        Ok((expected_input_data, not_after))
     }
 
     /// Given a cerificate and the current time, check if it is currently
@@ -547,8 +550,9 @@ impl AttestedCertificateVerifier {
     fn verify_attestation_binding(
         &self,
         end_entity: &CertificateDer<'_>,
+        now: UnixTime,
     ) -> Result<(), rustls::Error> {
-        let expected_input_data = Self::expected_input_data_from_cert(end_entity)?;
+        let (expected_input_data, expiry) = Self::cert_binding_data(end_entity)?;
 
         // First check if we have already successfully verified the attestation
         // associated with this certificate
@@ -556,7 +560,7 @@ impl AttestedCertificateVerifier {
             let trusted_certificates = self.trusted_certificates.read().map_err(|_| {
                 rustls::Error::General("Trusted certificate cache lock poisoned".into())
             })?;
-            if trusted_certificates.contains(&expected_input_data) {
+            if trusted_certificates.get(&expected_input_data).is_some_and(|expiry| *expiry >= now) {
                 tracing::debug!("Skipping attestation verification for trusted certificate");
                 return Ok(());
             }
@@ -580,11 +584,14 @@ impl AttestedCertificateVerifier {
             })
         })?;
 
+        let mut trusted_certificates = self.trusted_certificates.write().map_err(|_| {
+            rustls::Error::General("Trusted certificate cache lock poisoned".into())
+        })?;
+
+        // Remove any expired entries
+        trusted_certificates.retain(|_, cached_expiry| *cached_expiry >= now);
         // Write trusted certificate details to cache
-        self.trusted_certificates
-            .write()
-            .map_err(|_| rustls::Error::General("Trusted certificate cache lock poisoned".into()))?
-            .insert(expected_input_data);
+        trusted_certificates.insert(expected_input_data, expiry);
 
         Ok(())
     }
@@ -633,7 +640,7 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
         } else {
             Self::verify_server_cert_constraints(end_entity, server_name, now)?;
         }
-        self.verify_attestation_binding(end_entity)?;
+        self.verify_attestation_binding(end_entity, now)?;
         Ok(ServerCertVerified::assertion())
     }
 
@@ -704,7 +711,7 @@ impl ClientCertVerifier for AttestedCertificateVerifier {
         } else {
             Self::verify_cert_time_validity(end_entity, now)?;
         }
-        self.verify_attestation_binding(end_entity)?;
+        self.verify_attestation_binding(end_entity, now)?;
         Ok(ClientCertVerified::assertion())
     }
 
@@ -1205,8 +1212,8 @@ mod tests {
         )
         .unwrap();
         let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
-        let expected_input_data =
-            AttestedCertificateVerifier::expected_input_data_from_cert(&cert).unwrap();
+        let (expected_input_data, not_after) =
+            AttestedCertificateVerifier::cert_binding_data(&cert).unwrap();
 
         verify_server_cert_direct(
             &verifier,
@@ -1215,7 +1222,10 @@ mod tests {
             UnixTime::now(),
         )
         .unwrap();
-        assert!(verifier.trusted_certificates.read().unwrap().contains(&expected_input_data));
+        assert_eq!(
+            verifier.trusted_certificates.read().unwrap().get(&expected_input_data),
+            Some(&not_after)
+        );
 
         verifier.attestation_verifier = AttestationVerifier::expect_none();
 
