@@ -348,6 +348,63 @@ impl AttestationVerifier {
         Ok(Some(measurements))
     }
 
+    pub fn verify_attestation_sync(
+        &self,
+        attestation_exchange_message: AttestationExchangeMessage,
+        expected_input_data: [u8; 64],
+    ) -> Result<Option<MultiMeasurements>, AttestationError> {
+        let attestation_type = attestation_exchange_message.attestation_type;
+        tracing::debug!("Verifing {attestation_type} attestation");
+
+        // TODO do fire-and-forget logging
+        // if self.log_dcap_quote {
+        //     log_attestation(&attestation_exchange_message).await;
+        // }
+
+        let measurements = match attestation_type {
+            AttestationType::None => {
+                if self.has_remote_attestion() {
+                    return Err(AttestationError::AttestationTypeNotAccepted);
+                }
+                if attestation_exchange_message.attestation.is_empty() {
+                    return Ok(None);
+                } else {
+                    return Err(AttestationError::AttestationGivenWhenNoneExpected);
+                }
+            }
+            AttestationType::AzureTdx => {
+                #[cfg(feature = "azure")]
+                {
+                    let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
+                    azure::verify_azure_attestation_sync(
+                        attestation_exchange_message.attestation,
+                        expected_input_data,
+                        pccs,
+                        self.override_azure_outdated_tcb,
+                    )?
+                }
+                #[cfg(not(feature = "azure"))]
+                {
+                    return Err(AttestationError::AttestationTypeNotSupported);
+                }
+            }
+            _ => {
+                let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
+                dcap::verify_dcap_attestation_sync(
+                    attestation_exchange_message.attestation,
+                    expected_input_data,
+                    pccs,
+                )?
+            }
+        };
+
+        // Do a measurement / attestation type policy check
+        self.measurement_policy.check_measurement(&measurements)?;
+
+        tracing::debug!("Verification successful");
+        Ok(Some(measurements))
+    }
+
     /// Whether we allow no remote attestation
     pub fn has_remote_attestion(&self) -> bool {
         self.measurement_policy.has_remote_attestion()
@@ -472,6 +529,8 @@ pub enum AttestationError {
     SerdeJson(#[from] serde_json::Error),
     #[error("HTTP client: {0}")]
     Reqwest(#[from] reqwest::Error),
+    #[error("Sync verification requested but no PCCS configured")]
+    NoPccs,
 }
 
 #[cfg(test)]

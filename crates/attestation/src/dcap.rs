@@ -46,6 +46,54 @@ pub async fn verify_dcap_attestation(
     .await
 }
 
+/// Verify a DCAP TDX quote, and return the measurement values
+#[cfg(not(any(test, feature = "mock")))]
+pub fn verify_dcap_attestation_sync(
+    input: Vec<u8>,
+    expected_input_data: [u8; 64],
+    pccs: Pccs,
+) -> Result<MultiMeasurements, DcapVerificationError> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let override_azure_outdated_tcb = false;
+    verify_dcap_attestation_with_timestamp_sync(
+        input,
+        expected_input_data,
+        pccs,
+        None,
+        now,
+        override_azure_outdated_tcb,
+    )
+}
+
+pub fn verify_dcap_attestation_with_timestamp_sync(
+    input: Vec<u8>,
+    expected_input_data: [u8; 64],
+    pccs: Pccs,
+    collateral: Option<QuoteCollateralV3>,
+    now: u64,
+    override_azure_outdated_tcb: bool,
+) -> Result<MultiMeasurements, DcapVerificationError> {
+    let quote = Quote::parse(&input)?;
+
+    let ca = quote.ca()?;
+    let fmspc = hex::encode_upper(quote.fmspc()?);
+
+    let collateral = if let Some(given_collateral) = collateral {
+        given_collateral
+    } else {
+        pccs.get_collateral_sync(fmspc.clone(), ca, now)?
+    };
+
+    verify_dcap_attestation_with_collateral_and_timestamp(
+        input,
+        quote,
+        expected_input_data,
+        collateral,
+        now,
+        override_azure_outdated_tcb,
+    )
+}
+
 /// Allows the timestamp to be given, making it possible to test with
 /// existing attestations
 ///
@@ -60,9 +108,45 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
     override_azure_outdated_tcb: bool,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let quote = Quote::parse(&input)?;
-    tracing::info!("Verifying DCAP attestation: {quote:?}");
 
     let ca = quote.ca()?;
+    let fmspc = hex::encode_upper(quote.fmspc()?);
+
+    let collateral = if let Some(given_collateral) = collateral {
+        given_collateral
+    } else if let Some(ref pccs) = pccs_option {
+        let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
+        collateral
+    } else {
+        get_collateral_for_fmspc(
+            PCS_URL,
+            fmspc.clone(),
+            ca,
+            false, // Indicates not SGX
+        )
+        .await?
+    };
+
+    verify_dcap_attestation_with_collateral_and_timestamp(
+        input,
+        quote,
+        expected_input_data,
+        collateral,
+        now,
+        override_azure_outdated_tcb,
+    )
+}
+
+fn verify_dcap_attestation_with_collateral_and_timestamp(
+    raw_quote: Vec<u8>,
+    quote: Quote,
+    expected_input_data: [u8; 64],
+    collateral: QuoteCollateralV3,
+    now: u64,
+    override_azure_outdated_tcb: bool,
+) -> Result<MultiMeasurements, DcapVerificationError> {
+    tracing::info!("Verifying DCAP attestation: {quote:?}");
+
     let fmspc = hex::encode_upper(quote.fmspc()?);
 
     // Override outdated TCB only if we are on Azure and the FMSPC is known to
@@ -82,23 +166,8 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
         |tcb_info: TcbInfo| tcb_info
     };
 
-    let collateral = if let Some(given_collateral) = collateral {
-        given_collateral
-    } else if let Some(ref pccs) = pccs_option {
-        let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
-        collateral
-    } else {
-        get_collateral_for_fmspc(
-            PCS_URL,
-            fmspc.clone(),
-            ca,
-            false, // Indicates not SGX
-        )
-        .await?
-    };
-
     let verified_report = dcap_qvl::verify::dangerous_verify_with_tcb_override(
-        &input,
+        &raw_quote,
         &collateral,
         now,
         override_outdated_tcb,
@@ -127,6 +196,20 @@ pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
     _pccs: Option<Pccs>,
+) -> Result<MultiMeasurements, DcapVerificationError> {
+    // In tests we use mock quotes which will fail to verify
+    let quote = tdx_quote::Quote::from_bytes(&input)?;
+    if quote.report_input_data() != expected_input_data {
+        return Err(DcapVerificationError::InputMismatch);
+    }
+    Ok(MultiMeasurements::from_tdx_quote(&quote))
+}
+
+#[cfg(any(test, feature = "mock"))]
+pub fn verify_dcap_attestation_sync(
+    input: Vec<u8>,
+    expected_input_data: [u8; 64],
+    _pccs: Pccs,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     // In tests we use mock quotes which will fail to verify
     let quote = tdx_quote::Quote::from_bytes(&input)?;
