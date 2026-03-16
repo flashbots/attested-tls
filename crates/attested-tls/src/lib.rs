@@ -11,9 +11,10 @@ pub use attestation::{
     AttestationType,
     AttestationVerifier,
 };
+pub use ra_tls::cert::CaCert;
 use ra_tls::{
     attestation::{Attestation, AttestationQuote, VersionedAttestation},
-    cert::{CaCert, CertRequest},
+    cert::CertRequest,
     rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256},
 };
 use rustls::{
@@ -181,6 +182,7 @@ impl AttestedCertificateResolver {
         subject_alt_names: &[String],
         attestation_generator: &AttestationGenerator,
     ) -> Result<Vec<CertificateDer<'static>>, AttestedTlsError> {
+        tracing::debug!("Generating new remote-attested ceritifcate for {primary_name}");
         let pubkey = key.public_key_der();
         let now = SystemTime::now();
         let not_after = now + CERTIFICATE_VALIDITY;
@@ -219,7 +221,7 @@ impl AttestedCertificateResolver {
     ) -> Result<Arc<dyn SigningKey>, AttestedTlsError> {
         let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
 
-        provider.key_provider.load_private_key(private_key).map_err(AttestedTlsError::SigningKey)
+        Ok(provider.key_provider.load_private_key(private_key)?)
     }
 
     /// Create an attestation, and format it to be used in certificate
@@ -364,13 +366,21 @@ fn create_report_data(
 /// Verifies attested TLS server or client certificates during TLS handshake
 #[derive(Debug)]
 pub struct AttestedCertificateVerifier {
+    /// Underlying verifier when used with a private CA rather than
+    /// self-signed
     server_inner: Option<Arc<WebPkiServerVerifier>>,
+    /// Underlying client verifier when used with a private CA rather than
+    /// self-signed
     client_inner: Option<Arc<dyn ClientCertVerifier>>,
+    /// Underlying cryptography provider
     provider: Arc<CryptoProvider>,
+    /// Configured for verifying attestations
     attestation_verifier: AttestationVerifier,
 }
 
 impl AttestedCertificateVerifier {
+    /// Create a certificate verifier with given attestation verification
+    /// and optionally a private CA root of trust
     pub fn new(
         root_store: Option<RootCertStore>,
         attestation_verifier: AttestationVerifier,
@@ -378,6 +388,7 @@ impl AttestedCertificateVerifier {
         Self::new_with_provider(root_store, attestation_verifier, default_crypto_provider()?)
     }
 
+    /// Also provide a crypto provider
     pub fn new_with_provider(
         root_store: Option<RootCertStore>,
         attestation_verifier: AttestationVerifier,
@@ -405,6 +416,7 @@ impl AttestedCertificateVerifier {
         Ok(Self { server_inner, client_inner, provider, attestation_verifier })
     }
 
+    /// Given a TLS certificate, return the embedded attestation
     fn extract_custom_attestation_from_cert(
         cert: &CertificateDer<'_>,
     ) -> Result<AttestationExchangeMessage, rustls::Error> {
@@ -695,8 +707,6 @@ pub enum AttestedTlsError {
     CertificateParams(#[source] rcgen::Error),
     #[error("Failed to self-sign certificate: {0}")]
     CertificateSigning(#[source] rcgen::Error),
-    #[error("Failed to load signing key into rustls: {0}")]
-    SigningKey(#[source] rustls::Error),
     #[error("Failed to build certificate verifier: {0}")]
     VerifierBuilder(#[source] VerifierBuilderError),
     #[error("Cetificate generation: {0}")]
