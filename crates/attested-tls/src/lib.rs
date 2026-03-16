@@ -1,3 +1,4 @@
+//! An attested TLS certificate resolver and verifier
 use std::{
     fmt,
     sync::{Arc, RwLock},
@@ -66,16 +67,10 @@ const CERTIFICATE_RENEWAL_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// A TLS certificate resolver which includes an attestation as a
 /// certificate extension
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AttestedCertificateResolver {
     /// Cloneable inner state
     state: Arc<ResolverState>,
-}
-
-impl fmt::Debug for AttestedCertificateResolver {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AttestedCertificateResolver").finish_non_exhaustive()
-    }
 }
 
 /// Internal state used by the resolver and its renewal loop
@@ -96,6 +91,22 @@ struct ResolverState {
     primary_name: String,
     /// DNS subject alternative names, including the primary name.
     subject_alt_names: Vec<String>,
+}
+
+impl fmt::Debug for ResolverState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let certificate_chain_len = self.certificate.read().ok().map(|certs| certs.len());
+
+        f.debug_struct("ResolverState")
+            .field("key", &"<signing key>")
+            .field("ca_present", &self.ca.is_some())
+            .field("key_pair_der_len", &self.key_pair_der.len())
+            .field("certificate_chain_len", &certificate_chain_len)
+            .field("attestation_generator", &self.attestation_generator)
+            .field("primary_name", &self.primary_name)
+            .field("subject_alt_names", &self.subject_alt_names)
+            .finish()
+    }
 }
 
 impl AttestedCertificateResolver {
@@ -615,9 +626,7 @@ impl ClientCertVerifier for AttestedCertificateVerifier {
     }
 
     fn client_auth_mandatory(&self) -> bool {
-        self.client_inner
-            .as_ref()
-            .is_none_or(|client_inner| client_inner.client_auth_mandatory())
+        self.client_inner.as_ref().is_none_or(|client_inner| client_inner.client_auth_mandatory())
     }
 
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
