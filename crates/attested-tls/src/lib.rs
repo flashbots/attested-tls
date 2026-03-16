@@ -611,11 +611,13 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
 
 impl ClientCertVerifier for AttestedCertificateVerifier {
     fn offer_client_auth(&self) -> bool {
-        self.client_inner.as_ref().map_or(true, |client_inner| client_inner.offer_client_auth())
+        self.client_inner.as_ref().is_none_or(|client_inner| client_inner.offer_client_auth())
     }
 
     fn client_auth_mandatory(&self) -> bool {
-        self.client_inner.as_ref().map_or(true, |client_inner| client_inner.client_auth_mandatory())
+        self.client_inner
+            .as_ref()
+            .is_none_or(|client_inner| client_inner.client_auth_mandatory())
     }
 
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
