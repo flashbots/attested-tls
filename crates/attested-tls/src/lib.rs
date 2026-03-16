@@ -234,12 +234,12 @@ impl AttestedCertificateResolver {
         attestation_generator: &AttestationGenerator,
     ) -> Result<VersionedAttestation, AttestedTlsError> {
         let report_data = create_report_data(pubkey, not_before, not_after)?;
-        let attestation = attestation_generator.generate_attestation(report_data).await.unwrap();
+        let attestation = attestation_generator.generate_attestation(report_data).await?;
         Ok(VersionedAttestation::V0 {
             attestation: Attestation {
                 quote: ra_tls::attestation::AttestationQuote::DstackTdx(
                     ra_tls::attestation::TdxQuote {
-                        quote: serde_json::to_vec(&attestation).unwrap(),
+                        quote: serde_json::to_vec(&attestation)?,
                         event_log: Vec::new(),
                     },
                 ),
@@ -740,6 +740,10 @@ pub enum AttestedTlsError {
     SystemTime(#[source] std::time::SystemTimeError),
     #[error("No rustls CryptoProvider is installed")]
     CryptoProviderUnavailable,
+    #[error("JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("Attestation: {0}")]
+    Attestation(#[from] attestation::AttestationError),
 }
 
 #[cfg(test)]
