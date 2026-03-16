@@ -519,6 +519,8 @@ impl AttestedCertificateVerifier {
         Ok(())
     }
 
+    /// Given a certificate with embedded attestation, verify the
+    /// attestation if it has not already been verified
     fn verify_attestation_binding(
         &self,
         end_entity: &CertificateDer<'_>,
@@ -578,18 +580,6 @@ impl AttestedCertificateVerifier {
         x509_parser::parse_x509_certificate(cert.as_ref())
             .map(|(_, parsed)| parsed)
             .map_err(|err| Self::bad_encoding(format!("Invalid X.509 DER: {err}")))
-    }
-}
-
-impl AttestedCertificateVerifier {
-    #[cfg(test)]
-    fn verify_server_cert_direct(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        server_name: &ServerName<'_>,
-        now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        self.verify_server_cert(end_entity, &[], server_name, &[], now)
     }
 }
 
@@ -769,6 +759,23 @@ mod tests {
     };
 
     use super::*;
+
+    /// Test helper to verify a certificate
+    fn verify_server_cert_direct(
+        verifier: &AttestedCertificateVerifier,
+        end_entity: &CertificateDer<'_>,
+        server_name: &ServerName<'_>,
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        rustls::client::danger::ServerCertVerifier::verify_server_cert(
+            verifier,
+            end_entity,
+            &[],
+            server_name,
+            &[],
+            now,
+        )
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn certificate_resolver_creates_initial_certificate() {
@@ -1071,7 +1078,8 @@ mod tests {
         .expect("verifier construction should succeed");
         let cert = CertificateDer::from(vec![1_u8, 2, 3, 4]);
 
-        let result = verifier.verify_server_cert_direct(
+        let result = verify_server_cert_direct(
+            &verifier,
             &cert,
             &ServerName::try_from("foo").expect("server name should be valid"),
             UnixTime::now(),
@@ -1093,7 +1101,8 @@ mod tests {
         )
         .expect("verifier construction should succeed");
 
-        let result = verifier.verify_server_cert_direct(
+        let result = verify_server_cert_direct(
+            &verifier,
             &cert,
             &ServerName::try_from("foo").expect("server name should be valid"),
             UnixTime::now(),
@@ -1130,7 +1139,8 @@ mod tests {
             .expect("resolver should hold a certificate")
             .clone();
 
-        let result = verifier.verify_server_cert_direct(
+        let result = verify_server_cert_direct(
+            &verifier,
             &cert,
             &ServerName::try_from("foo").expect("server name should be valid"),
             UnixTime::now(),
@@ -1172,13 +1182,13 @@ mod tests {
         let expected_input_data = AttestedCertificateVerifier::expected_input_data_from_cert(&cert)
             .expect("certificate report data should be computed");
 
-        verifier
-            .verify_server_cert_direct(
-                &cert,
-                &ServerName::try_from("foo").expect("server name should be valid"),
-                UnixTime::now(),
-            )
-            .expect("initial verification should succeed");
+        verify_server_cert_direct(
+            &verifier,
+            &cert,
+            &ServerName::try_from("foo").expect("server name should be valid"),
+            UnixTime::now(),
+        )
+        .expect("initial verification should succeed");
         assert!(
             verifier
                 .trusted_certificates
@@ -1189,13 +1199,13 @@ mod tests {
 
         verifier.attestation_verifier = AttestationVerifier::expect_none();
 
-        verifier
-            .verify_server_cert_direct(
-                &cert,
-                &ServerName::try_from("foo").expect("server name should be valid"),
-                UnixTime::now(),
-            )
-            .expect("cached verification should skip attestation verification");
+        verify_server_cert_direct(
+            &verifier,
+            &cert,
+            &ServerName::try_from("foo").expect("server name should be valid"),
+            UnixTime::now(),
+        )
+        .expect("cached verification should skip attestation verification");
     }
 
     fn test_ca() -> CaCert {
