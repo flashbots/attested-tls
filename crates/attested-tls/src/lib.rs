@@ -1348,4 +1348,3 @@ mod tests {
         client.process_new_packets().unwrap();
     }
 }
-
