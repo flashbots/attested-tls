@@ -190,8 +190,14 @@ impl AttestedCertificateResolver {
         let now = SystemTime::now();
         let not_after = now + CERTIFICATE_VALIDITY;
 
-        let attestation =
-            Self::create_attestation_payload(pubkey, now, not_after, attestation_generator).await?;
+        let attestation = Self::create_attestation_payload(
+            pubkey,
+            now,
+            not_after,
+            primary_name,
+            attestation_generator,
+        )
+        .await?;
 
         let cert_request = CertRequest::builder()
             .key(key)
@@ -233,9 +239,11 @@ impl AttestedCertificateResolver {
         pubkey: Vec<u8>,
         not_before: SystemTime,
         not_after: SystemTime,
+        primary_name: &str,
         attestation_generator: &AttestationGenerator,
     ) -> Result<VersionedAttestation, AttestedTlsError> {
-        let report_data = create_report_data(pubkey, not_before, not_after)?;
+        let report_data =
+            create_report_data(pubkey, not_before, not_after, primary_name.as_bytes())?;
         let attestation = attestation_generator.generate_attestation(report_data).await?;
         Ok(VersionedAttestation::V0 {
             attestation: Attestation {
@@ -340,12 +348,13 @@ fn normalized_subject_alt_names(primary_name: &str, subject_alt_names: Vec<Strin
     normalized
 }
 
-/// Make input data for the attestation by hashing together public key and
-/// validity period
+/// Make input data for the attestation by hashing together public key,
+/// validity period and hostname
 fn create_report_data(
     public_key: Vec<u8>,
     not_before: SystemTime,
     not_after: SystemTime,
+    hostname: &[u8],
 ) -> Result<[u8; 64], AttestedTlsError> {
     let not_before = not_before
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -362,6 +371,7 @@ fn create_report_data(
     hasher.update(public_key);
     hasher.update(not_before);
     hasher.update(not_after);
+    hasher.update(hostname_binding_data);
 
     Ok(hasher.finalize().into())
 }
@@ -471,10 +481,12 @@ impl AttestedCertificateVerifier {
             .timestamp()
             .try_into()
             .map_err(|_| rustls::Error::General("invalid certificate not_after".into()))?;
+        let hostname = Self::hostname_from_cert(&cert)?;
         let expected_input_data = create_report_data(
             cert.public_key().raw.to_vec(),
             SystemTime::UNIX_EPOCH + Duration::from_secs(not_before),
             SystemTime::UNIX_EPOCH + Duration::from_secs(not_after),
+            &hostname,
         )
         .map_err(|err| rustls::Error::General(err.to_string()))?;
         let not_after = UnixTime::since_unix_epoch(Duration::from_secs(not_after));
@@ -610,6 +622,17 @@ impl AttestedCertificateVerifier {
         x509_parser::parse_x509_certificate(cert.as_ref())
             .map(|(_, parsed)| parsed)
             .map_err(|err| Self::bad_encoding(format!("Invalid X.509 DER: {err}")))
+    }
+
+    /// Given a certificate get the hostname for report input data
+    fn hostname_from_cert(cert: &X509Certificate<'_>) -> Result<Vec<u8>, rustls::Error> {
+        cert.subject()
+            .iter_common_name()
+            .next()
+            .ok_or_else(|| Self::bad_encoding("Missing common name"))?
+            .as_str()
+            .map(|hostname| hostname.as_bytes().to_vec())
+            .map_err(|err| Self::bad_encoding(format!("Invalid common name: {err}")))
     }
 }
 
@@ -1158,6 +1181,46 @@ mod tests {
             result.unwrap_err(),
             Error::InvalidCertificate(CertificateError::NotValidForNameContext { .. })
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn certificate_binding_changes_when_identity_changes() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let resolver = AttestedCertificateResolver::new_with_provider(
+            AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            None,
+            "foo".to_string(),
+            vec![],
+            provider.clone(),
+        )
+        .await
+        .unwrap();
+        let original_cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
+        let (original_report_data, original_not_after) =
+            AttestedCertificateVerifier::cert_binding_data(&original_cert).unwrap();
+        let parsed_cert =
+            AttestedCertificateVerifier::parse_x509_certificate(&original_cert).unwrap();
+        let not_before = parsed_cert.validity().not_before.timestamp() as u64;
+        let not_after = parsed_cert.validity().not_after.timestamp() as u64;
+        let key_pair = KeyPair::try_from(resolver.state.key_pair_der.clone()).unwrap();
+        let replay_name = "bar".to_string();
+        let replay_alt_names = vec![replay_name.clone()];
+        let replayed_cert_request = CertRequest::builder()
+            .key(&key_pair)
+            .subject(&replay_name)
+            .alt_names(&replay_alt_names)
+            .not_before(SystemTime::UNIX_EPOCH + Duration::from_secs(not_before))
+            .not_after(SystemTime::UNIX_EPOCH + Duration::from_secs(not_after))
+            .usage_server_auth(true)
+            .usage_client_auth(true)
+            .build();
+        let replayed_cert: CertificateDer<'static> =
+            replayed_cert_request.self_signed().unwrap().der().to_vec().into();
+        let (replayed_report_data, replayed_not_after) =
+            AttestedCertificateVerifier::cert_binding_data(&replayed_cert).unwrap();
+
+        assert_eq!(original_not_after, replayed_not_after);
+        assert_ne!(original_report_data, replayed_report_data);
     }
 
     #[tokio::test(flavor = "multi_thread")]
