@@ -27,6 +27,7 @@ use rustls::{
         ResolvesClientCert,
         VerifierBuilderError,
         WebPkiServerVerifier,
+        verify_server_name,
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     },
     crypto::CryptoProvider,
@@ -39,6 +40,7 @@ use rustls::{
         pem::PemObject,
     },
     server::{
+        ParsedCertificate,
         ResolvesServerCert,
         WebPkiClientVerifier,
         danger::{ClientCertVerified, ClientCertVerifier},
@@ -484,6 +486,15 @@ impl AttestedCertificateVerifier {
         now: UnixTime,
     ) -> Result<(), rustls::Error> {
         let cert = Self::parse_x509_certificate(cert)?;
+        Self::verify_cert_time_validity_parsed(&cert, now)
+    }
+
+    /// Given a parsed cerificate and the current time, check if it is
+    /// currently valid
+    fn verify_cert_time_validity_parsed(
+        cert: &X509Certificate<'_>,
+        now: UnixTime,
+    ) -> Result<(), rustls::Error> {
         let now = now.as_secs();
         let not_before: u64 = cert
             .validity()
@@ -517,6 +528,18 @@ impl AttestedCertificateVerifier {
         }
 
         Ok(())
+    }
+
+    /// Verify server name and time validity for self-signed certs
+    fn verify_server_cert_constraints(
+        cert: &CertificateDer<'_>,
+        server_name: &ServerName<'_>,
+        now: UnixTime,
+    ) -> Result<(), rustls::Error> {
+        let parsed = ParsedCertificate::try_from(cert)?;
+        let cert = Self::parse_x509_certificate(cert)?;
+        Self::verify_cert_time_validity_parsed(&cert, now)?;
+        verify_server_name(&parsed, server_name)
     }
 
     /// Given a certificate with embedded attestation, verify the
@@ -602,13 +625,13 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
             ) {
                 Err(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)) => {
                     // handle self-signed certs differently
-                    Self::verify_cert_time_validity(end_entity, now)?;
+                    Self::verify_server_cert_constraints(end_entity, server_name, now)?;
                 }
                 Err(err) => return Err(err),
                 Ok(_) => {}
             }
         } else {
-            Self::verify_cert_time_validity(end_entity, now)?;
+            Self::verify_server_cert_constraints(end_entity, server_name, now)?;
         }
         self.verify_attestation_binding(end_entity)?;
         Ok(ServerCertVerified::assertion())
@@ -1095,6 +1118,39 @@ mod tests {
         );
 
         assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::BadEncoding));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn self_signed_attested_certificate_with_wrong_name_is_rejected() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let resolver = AttestedCertificateResolver::new_with_provider(
+            AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            None,
+            "foo".to_string(),
+            vec![],
+            provider.clone(),
+        )
+        .await
+        .unwrap();
+        let verifier = AttestedCertificateVerifier::new_with_provider(
+            None,
+            AttestationVerifier::mock(),
+            provider,
+        )
+        .unwrap();
+        let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
+
+        let result = verify_server_cert_direct(
+            &verifier,
+            &cert,
+            &ServerName::try_from("bar").unwrap(),
+            UnixTime::now(),
+        );
+
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::InvalidCertificate(CertificateError::NotValidForNameContext { .. })
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
