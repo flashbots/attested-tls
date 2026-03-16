@@ -918,28 +918,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let initial_certificate = resolver
-            .state
-            .certificate
-            .read()
-            .unwrap()
-            .first()
-            .unwrap()
-            .clone();
+        let initial_certificate =
+            resolver.state.certificate.read().unwrap().first().unwrap().clone();
 
         tokio::time::sleep(
             CERTIFICATE_VALIDITY - CERTIFICATE_RENEWAL_LEAD_TIME + Duration::from_secs(1),
         )
         .await;
 
-        let renewed_certificate = resolver
-            .state
-            .certificate
-            .read()
-            .unwrap()
-            .first()
-            .unwrap()
-            .clone();
+        let renewed_certificate =
+            resolver.state.certificate.read().unwrap().first().unwrap().clone();
 
         assert_ne!(initial_certificate.as_ref(), renewed_certificate.as_ref());
     }
@@ -1123,14 +1111,7 @@ mod tests {
             provider,
         )
         .unwrap();
-        let cert = resolver
-            .state
-            .certificate
-            .read()
-            .unwrap()
-            .first()
-            .unwrap()
-            .clone();
+        let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
 
         let result = verify_server_cert_direct(
             &verifier,
@@ -1163,16 +1144,9 @@ mod tests {
             provider,
         )
         .unwrap();
-        let cert = resolver
-            .state
-            .certificate
-            .read()
-            .unwrap()
-            .first()
-            .unwrap()
-            .clone();
-        let expected_input_data = AttestedCertificateVerifier::expected_input_data_from_cert(&cert)
-            .unwrap();
+        let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
+        let expected_input_data =
+            AttestedCertificateVerifier::expected_input_data_from_cert(&cert).unwrap();
 
         verify_server_cert_direct(
             &verifier,
@@ -1181,13 +1155,7 @@ mod tests {
             UnixTime::now(),
         )
         .unwrap();
-        assert!(
-            verifier
-                .trusted_certificates
-                .read()
-                .unwrap()
-                .contains(&expected_input_data)
-        );
+        assert!(verifier.trusted_certificates.read().unwrap().contains(&expected_input_data));
 
         verifier.attestation_verifier = AttestationVerifier::expect_none();
 
@@ -1200,6 +1168,7 @@ mod tests {
         .unwrap();
     }
 
+    /// Helper to create a private cerificate authority
     fn test_ca() -> CaCert {
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let mut params = CertificateParams::new(vec!["test-ca".to_string()]).unwrap();
@@ -1209,6 +1178,7 @@ mod tests {
         CaCert::from_parts(key, cert)
     }
 
+    /// Helper to create a self signed cert with no attestation
     fn plain_self_signed_certificate(subject_name: &str) -> CertificateDer<'static> {
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let params = CertificateParams::new(vec![subject_name.to_string()]).unwrap();
