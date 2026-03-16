@@ -371,7 +371,7 @@ fn create_report_data(
     hasher.update(public_key);
     hasher.update(not_before);
     hasher.update(not_after);
-    hasher.update(hostname_binding_data);
+    hasher.update(hostname);
 
     Ok(hasher.finalize().into())
 }
@@ -1348,3 +1348,4 @@ mod tests {
         client.process_new_packets().unwrap();
     }
 }
+
