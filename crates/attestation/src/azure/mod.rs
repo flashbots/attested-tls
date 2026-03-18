@@ -116,7 +116,11 @@ pub async fn verify_azure_attestation(
     .await
 }
 
-/// Verify a TDX attestation from Azure
+/// Verify a TDX attestation from Azure - synchronous version
+///
+/// This relies on having DCAP collateral already present in the cache
+///
+/// If possible, prefer the async version
 pub fn verify_azure_attestation_sync(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
@@ -176,6 +180,7 @@ async fn verify_azure_attestation_with_given_timestamp(
     )
 }
 
+/// Synchronous version of the verifier
 fn verify_azure_attestation_with_given_timestamp_sync(
     input: Vec<u8>,
     expected_input_data: [u8; 64],

@@ -46,7 +46,12 @@ pub async fn verify_dcap_attestation(
     .await
 }
 
-/// Verify a DCAP TDX quote, and return the measurement values
+/// Synchonous version - Verify a DCAP TDX quote, and return the measurement
+/// values
+///
+/// This relies on having DCAP collateral already present in the cache
+///
+/// If possible, prefer the async version
 #[cfg(not(any(test, feature = "mock")))]
 pub fn verify_dcap_attestation_sync(
     input: Vec<u8>,
@@ -65,6 +70,12 @@ pub fn verify_dcap_attestation_sync(
     )
 }
 
+/// Verify a DCAP TDX quote, and return the measurement values, providing a
+/// timestamp an optional pre-fetched collateral
+///
+/// This relies on having DCAP collateral already present in the cache
+///
+/// If possible, prefer the async version
 pub fn verify_dcap_attestation_with_timestamp_sync(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
