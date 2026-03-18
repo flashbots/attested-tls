@@ -13,7 +13,7 @@ use std::{
 
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
-use pccs::Pccs;
+use pccs::{Pccs, PccsError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -286,7 +286,26 @@ impl AttestationVerifier {
             measurement_policy: MeasurementPolicy::mock(),
             log_dcap_quote: false,
             override_azure_outdated_tcb: false,
-            internal_pccs: None,
+            internal_pccs: Some(Pccs::new_without_prewarm(None)),
+        }
+    }
+
+    /// Resolves once the internal PCCS cache is ready to verify
+    /// attestations
+    ///
+    /// Calling this is optional - it is only really needed when you want to
+    /// gaurantee that collateral will not be fetched during
+    /// verification
+    pub async fn ready(&self) -> Result<(), AttestationError> {
+        // If we have no PCCS then we are ready
+        let Some(pccs) = &self.internal_pccs else {
+            return Ok(());
+        };
+
+        // If we have pccs, and pre-warm is disabled we are also ready
+        match pccs.ready().await {
+            Ok(_) | Err(PccsError::PrewarmDisabled) => Ok(()),
+            Err(err) => Err(err.into()),
         }
     }
 
@@ -301,7 +320,7 @@ impl AttestationVerifier {
         tracing::debug!("Verifing {attestation_type} attestation");
 
         if self.log_dcap_quote {
-            log_attestation(&attestation_exchange_message).await;
+            log_attestation(&attestation_exchange_message);
         }
 
         let measurements = match attestation_type {
@@ -348,6 +367,63 @@ impl AttestationVerifier {
         Ok(Some(measurements))
     }
 
+    pub fn verify_attestation_sync(
+        &self,
+        attestation_exchange_message: AttestationExchangeMessage,
+        expected_input_data: [u8; 64],
+    ) -> Result<Option<MultiMeasurements>, AttestationError> {
+        let attestation_type = attestation_exchange_message.attestation_type;
+        tracing::debug!("Verifing {attestation_type} attestation");
+
+        if self.log_dcap_quote {
+            log_attestation(&attestation_exchange_message);
+        }
+
+        let measurements = match attestation_type {
+            AttestationType::None => {
+                if self.has_remote_attestion() {
+                    return Err(AttestationError::AttestationTypeNotAccepted);
+                }
+                if attestation_exchange_message.attestation.is_empty() {
+                    return Ok(None);
+                } else {
+                    return Err(AttestationError::AttestationGivenWhenNoneExpected);
+                }
+            }
+            AttestationType::AzureTdx => {
+                #[cfg(feature = "azure")]
+                {
+                    let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
+                    azure::verify_azure_attestation_sync(
+                        attestation_exchange_message.attestation,
+                        expected_input_data,
+                        pccs,
+                        self.override_azure_outdated_tcb,
+                    )?
+                }
+                #[cfg(not(feature = "azure"))]
+                {
+                    return Err(AttestationError::AttestationTypeNotSupported);
+                }
+            }
+            _ => {
+                let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
+
+                dcap::verify_dcap_attestation_sync(
+                    attestation_exchange_message.attestation,
+                    expected_input_data,
+                    pccs,
+                )?
+            }
+        };
+
+        // Do a measurement / attestation type policy check
+        self.measurement_policy.check_measurement(&measurements)?;
+
+        tracing::debug!("Verification successful");
+        Ok(Some(measurements))
+    }
+
     /// Whether we allow no remote attestation
     pub fn has_remote_attestion(&self) -> bool {
         self.measurement_policy.has_remote_attestion()
@@ -355,14 +431,25 @@ impl AttestationVerifier {
 }
 
 /// Write attestation data to a log file
-async fn log_attestation(attestation: &AttestationExchangeMessage) {
+fn log_attestation(attestation: &AttestationExchangeMessage) {
     if attestation.attestation_type != AttestationType::None {
         let timestamp =
             SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_nanos();
 
         let filename = format!("quotes/{}-{}", attestation.attestation_type, timestamp);
-        if let Err(err) = tokio::fs::write(&filename, attestation.attestation.clone()).await {
-            tracing::warn!("Failed to write {filename}: {err}");
+        let attestation_bytes = attestation.attestation.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(err) = tokio::fs::write(&filename, attestation_bytes).await {
+                    tracing::warn!("Failed to write {filename}: {err}");
+                }
+            });
+        } else {
+            std::thread::spawn(move || {
+                if let Err(err) = std::fs::write(&filename, attestation_bytes) {
+                    tracing::warn!("Failed to write {filename}: {err}");
+                }
+            });
         }
     }
 }
@@ -472,6 +559,10 @@ pub enum AttestationError {
     SerdeJson(#[from] serde_json::Error),
     #[error("HTTP client: {0}")]
     Reqwest(#[from] reqwest::Error),
+    #[error("PCCS: {0}")]
+    Pccs(#[from] PccsError),
+    #[error("Sync verification requested but no PCCS configured")]
+    NoPccs,
 }
 
 #[cfg(test)]
@@ -550,5 +641,19 @@ mod tests {
         .unwrap();
         assert_eq!(wrapped.attestation_type, AttestationType::DcapTdx);
         assert_eq!(wrapped.attestation, vec![9, 8]);
+    }
+
+    #[test]
+    fn mock_verifier_supports_sync_verification() {
+        let input_data = [7u8; 64];
+        let attestation = dcap::create_dcap_attestation(input_data).unwrap();
+        let verifier = AttestationVerifier::mock();
+
+        let result = verifier.verify_attestation_sync(
+            AttestationExchangeMessage { attestation_type: AttestationType::DcapTdx, attestation },
+            input_data,
+        );
+
+        assert!(result.is_ok(), "expected sync mock verification to succeed: {result:?}");
     }
 }
