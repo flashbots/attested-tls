@@ -629,10 +629,7 @@ mod tests {
         let verifier = AttestationVerifier::mock();
 
         let result = verifier.verify_attestation_sync(
-            AttestationExchangeMessage {
-                attestation_type: AttestationType::DcapTdx,
-                attestation,
-            },
+            AttestationExchangeMessage { attestation_type: AttestationType::DcapTdx, attestation },
             input_data,
         );
 
