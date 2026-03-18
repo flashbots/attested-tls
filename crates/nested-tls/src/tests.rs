@@ -12,6 +12,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+use tokio_rustls::TlsConnector;
 
 use crate::{client::NestingTlsConnector, server::NestingTlsAcceptor};
 
@@ -70,6 +71,40 @@ async fn establishes_end_to_end_nested_tls_connection() {
 
     let domain = ServerName::try_from("localhost").unwrap();
     let mut stream = connector.connect(domain, client_io).await.unwrap();
+
+    stream.write_all(b"hello").await.unwrap();
+    stream.flush().await.unwrap();
+
+    let mut resp = [0_u8; 5];
+    stream.read_exact(&mut resp).await.unwrap();
+    assert_eq!(&resp, b"world");
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn provides_inner_accept_method() {
+    let (outer_server, _outer_client) = config_pair();
+    let (inner_server, inner_client) = config_pair();
+
+    let acceptor = NestingTlsAcceptor::new(Arc::new(outer_server), Arc::new(inner_server));
+    let inner_connector = TlsConnector::from(Arc::new(inner_client));
+
+    let (client_io, server_io) = duplex(16 * 1024);
+
+    let server = tokio::spawn(async move {
+        let mut stream = acceptor.accept_inner(server_io).await.unwrap();
+
+        let mut req = [0_u8; 5];
+        stream.read_exact(&mut req).await.unwrap();
+        assert_eq!(&req, b"hello");
+
+        stream.write_all(b"world").await.unwrap();
+        stream.flush().await.unwrap();
+    });
+
+    let domain = ServerName::try_from("localhost").unwrap();
+    let mut stream = inner_connector.connect(domain, client_io).await.unwrap();
 
     stream.write_all(b"hello").await.unwrap();
     stream.flush().await.unwrap();

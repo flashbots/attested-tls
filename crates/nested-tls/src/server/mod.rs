@@ -54,6 +54,15 @@ impl NestingTlsAcceptor {
             state: NestingAcceptState::Outer(Box::pin(self.outer.accept(stream))),
         }
     }
+
+    /// Start a handshake on only the inner acceptor.
+    #[inline]
+    pub fn accept_inner<IO>(&self, stream: IO) -> Accept<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.inner.accept(stream)
+    }
 }
 
 impl From<(Arc<ServerConfig>, Arc<ServerConfig>)> for NestingTlsAcceptor {
