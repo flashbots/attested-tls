@@ -13,7 +13,7 @@ use std::{
 
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
-use pccs::Pccs;
+use pccs::{Pccs, PccsError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -290,6 +290,25 @@ impl AttestationVerifier {
         }
     }
 
+    /// Resolves once the internal PCCS cache is ready to verify
+    /// attestations
+    ///
+    /// Calling this is optional - it is only really needed when you want to
+    /// gaurantee that collateral will not be fetched during
+    /// verification
+    pub async fn ready(&self) -> Result<(), AttestationError> {
+        // If we have no PCCS then we are ready
+        let Some(pccs) = &self.internal_pccs else {
+            return Ok(());
+        };
+
+        // If we have pccs, and pre-warm is disabled we are also ready
+        match pccs.ready().await {
+            Ok(_) | Err(PccsError::PrewarmDisabled) => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     /// Verify an attestation, and ensure the measurements match one of our
     /// accepted measurements
     pub async fn verify_attestation(
@@ -540,6 +559,8 @@ pub enum AttestationError {
     SerdeJson(#[from] serde_json::Error),
     #[error("HTTP client: {0}")]
     Reqwest(#[from] reqwest::Error),
+    #[error("PCCS: {0}")]
+    Pccs(#[from] PccsError),
     #[error("Sync verification requested but no PCCS configured")]
     NoPccs,
 }
