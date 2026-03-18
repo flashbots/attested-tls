@@ -286,7 +286,7 @@ impl AttestationVerifier {
             measurement_policy: MeasurementPolicy::mock(),
             log_dcap_quote: false,
             override_azure_outdated_tcb: false,
-            internal_pccs: None,
+            internal_pccs: Some(Pccs::new_without_prewarm(None)),
         }
     }
 
@@ -389,6 +389,7 @@ impl AttestationVerifier {
             }
             _ => {
                 let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
+
                 dcap::verify_dcap_attestation_sync(
                     attestation_exchange_message.attestation,
                     expected_input_data,
@@ -619,5 +620,22 @@ mod tests {
         .unwrap();
         assert_eq!(wrapped.attestation_type, AttestationType::DcapTdx);
         assert_eq!(wrapped.attestation, vec![9, 8]);
+    }
+
+    #[test]
+    fn mock_verifier_supports_sync_verification() {
+        let input_data = [7u8; 64];
+        let attestation = dcap::create_dcap_attestation(input_data).unwrap();
+        let verifier = AttestationVerifier::mock();
+
+        let result = verifier.verify_attestation_sync(
+            AttestationExchangeMessage {
+                attestation_type: AttestationType::DcapTdx,
+                attestation,
+            },
+            input_data,
+        );
+
+        assert!(result.is_ok(), "expected sync mock verification to succeed: {result:?}");
     }
 }

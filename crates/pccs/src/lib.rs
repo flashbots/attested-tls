@@ -154,6 +154,14 @@ impl Pccs {
         Ok((collateral, true))
     }
 
+    /// A synchronous method to get collateral from the cache.
+    ///
+    /// If the requested collateral is not present in the cache, this will
+    /// return an error rather than waiting to fetch it.  But it does
+    /// begin fetching it in a background task.
+    ///
+    /// If the collateral is out of date, this will log a warning and return
+    /// it anyway on a best-effort basis.
     pub fn get_collateral_sync(
         &self,
         fmspc: String,
