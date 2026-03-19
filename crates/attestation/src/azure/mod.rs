@@ -202,7 +202,7 @@ async fn verify_azure_attestation_with_given_timestamp(
 /// Extract the measurements from the attestation, but do not verify
 /// anything
 pub fn get_measurements(input: &[u8]) -> Result<MultiMeasurements, MaaError> {
-    let attestation_document: AttestationDocument = serde_json::from_slice(&input)?;
+    let attestation_document: AttestationDocument = serde_json::from_slice(input)?;
     let vtpm_quote = attestation_document.tpm_attestation.quote;
     let pcrs = vtpm_quote.pcrs_sha256();
     Ok(MultiMeasurements::from_pcrs(pcrs))
