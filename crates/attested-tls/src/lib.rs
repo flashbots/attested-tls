@@ -438,7 +438,7 @@ impl AttestedCertificateVerifier {
     }
 
     /// Given a TLS certificate, return the embedded attestation
-    fn extract_custom_attestation_from_cert(
+    pub fn extract_custom_attestation_from_cert(
         cert: &CertificateDer<'_>,
     ) -> Result<AttestationExchangeMessage, rustls::Error> {
         // First try to parse using ra_tls which assumes DCAP
