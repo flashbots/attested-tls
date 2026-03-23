@@ -780,19 +780,22 @@ mod tests {
         assert!(policy.check_measurement(&measurements3).is_err());
     }
 
+    /// Checks that the Debug implementation for MultiMeasurements displays them as hex
     #[test]
     fn test_multi_measurements_debug_prints_hex() {
+        let register_value = [0xabu8; 48];
         let dcap =
-            MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, [0xabu8; 48])]));
+            MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, register_value)]));
         let dcap_debug = format!("{dcap:?}");
         assert!(dcap_debug.contains("DCAP"));
-        assert!(dcap_debug.contains("abababab"));
-        assert!(!dcap_debug.contains("[171"));
+        assert!(dcap_debug.contains(&hex::encode(register_value)));
+        assert!(!dcap_debug.contains(&format!("{register_value:?}")));
 
-        let azure = MultiMeasurements::Azure(HashMap::from([(9u32, [0x11u8; 32])]));
+        let azure_register_value = [0xabu8; 32];
+        let azure = MultiMeasurements::Azure(HashMap::from([(9u32, azure_register_value)]));
         let azure_debug = format!("{azure:?}");
         assert!(azure_debug.contains("Azure"));
-        assert!(azure_debug.contains("11111111"));
-        assert!(!azure_debug.contains("[17"));
+        assert!(azure_debug.contains(&hex::encode(azure_register_value)));
+        assert!(!azure_debug.contains(&format!("{azure_register_value:?}")));
     }
 }
