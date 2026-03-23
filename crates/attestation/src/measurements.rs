@@ -49,7 +49,7 @@ impl fmt::Debug for MultiMeasurements {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Dcap(measurements) => {
-                f.debug_tuple("Dcap").field(&DcapHexDebug(measurements)).finish()
+                f.debug_tuple("DCAP").field(&DcapHexDebug(measurements)).finish()
             }
             Self::Azure(measurements) => {
                 f.debug_tuple("Azure").field(&AzureHexDebug(measurements)).finish()
