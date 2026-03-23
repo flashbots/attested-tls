@@ -76,7 +76,7 @@ impl fmt::Debug for DcapHexDebug<'_> {
     }
 }
 
-/// Used to display measurements as hex
+/// Used to display Azure measurements as hex
 struct AzureHexDebug<'a>(&'a HashMap<u32, [u8; 32]>);
 
 impl fmt::Debug for AzureHexDebug<'_> {
