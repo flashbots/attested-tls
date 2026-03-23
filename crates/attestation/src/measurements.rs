@@ -194,7 +194,7 @@ impl MultiMeasurements {
     }
 }
 
-/// All-zero measurment values used in some tests
+/// All-zero measurement values used in some tests
 #[cfg(any(test, feature = "mock"))]
 pub fn mock_dcap_measurements() -> MultiMeasurements {
     MultiMeasurements::Dcap(HashMap::from([
