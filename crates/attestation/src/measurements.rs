@@ -785,7 +785,7 @@ mod tests {
         let dcap =
             MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, [0xabu8; 48])]));
         let dcap_debug = format!("{dcap:?}");
-        assert!(dcap_debug.contains("Dcap"));
+        assert!(dcap_debug.contains("DCAP"));
         assert!(dcap_debug.contains("abababab"));
         assert!(!dcap_debug.contains("[171"));
 
