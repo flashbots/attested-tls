@@ -57,7 +57,8 @@ impl AttestationExchangeMessage {
             _ => {
                 #[cfg(any(test, feature = "mock"))]
                 {
-                    let quote = tdx_quote::Quote::from_bytes(&self.attestation)?;
+                    let quote = tdx_quote::Quote::from_bytes(&self.attestation)
+                        .map_err(DcapVerificationError::from)?;
                     Ok(Some(MultiMeasurements::from_tdx_quote(&quote)))
                 }
 
