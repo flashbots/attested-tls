@@ -122,7 +122,7 @@ pub struct AttestationGenerator {
 }
 
 impl AttestationGenerator {
-    /// Create an attesation generator with given attestation type
+    /// Create an attestation generator with given attestation type
     pub fn new(
         attestation_type: AttestationType,
         attestation_provider_url: Option<String>,
