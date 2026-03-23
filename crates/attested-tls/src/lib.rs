@@ -441,19 +441,19 @@ impl AttestedCertificateVerifier {
     pub fn extract_custom_attestation_from_cert(
         cert: &CertificateDer<'_>,
     ) -> Result<AttestationExchangeMessage, rustls::Error> {
-        if let Ok(Some(attestation)) = ra_tls::attestation::from_der(cert.as_ref()) {
-            if let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote {
-                if let Ok(message) =
-                    serde_json::from_slice::<AttestationExchangeMessage>(&tdx_quote.quote)
-                {
-                    return Ok(message);
-                }
-
-                return Ok(AttestationExchangeMessage {
-                    attestation_type: AttestationType::DcapTdx,
-                    attestation: tdx_quote.quote,
-                });
+        if let Ok(Some(attestation)) = ra_tls::attestation::from_der(cert.as_ref()) &&
+            let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote
+        {
+            if let Ok(message) =
+                serde_json::from_slice::<AttestationExchangeMessage>(&tdx_quote.quote)
+            {
+                return Ok(message);
             }
+
+            return Ok(AttestationExchangeMessage {
+                attestation_type: AttestationType::DcapTdx,
+                attestation: tdx_quote.quote,
+            });
         }
 
         // If that fails, extract and parse the extension
