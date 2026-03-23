@@ -59,7 +59,7 @@ impl fmt::Debug for MultiMeasurements {
     }
 }
 
-/// Used to display measurements as hex
+/// Used to display DCAP measurements as hex
 struct DcapHexDebug<'a>(&'a HashMap<DcapMeasurementRegister, [u8; 48]>);
 
 impl fmt::Debug for DcapHexDebug<'_> {
