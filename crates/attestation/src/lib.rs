@@ -45,7 +45,7 @@ impl AttestationExchangeMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AttestationType {
-    /// No attestion
+    /// No attestation
     None,
     /// TDX on Google Cloud Platform
     GcpTdx,
