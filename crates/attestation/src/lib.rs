@@ -377,7 +377,7 @@ async fn running_on_gcp() -> Result<bool, AttestationError> {
     Ok(false)
 }
 
-/// If an attestion provider service is used, we ensure that it looks like a
+/// If an attestation provider service is used, we ensure that it looks like a
 /// local IP
 ///
 /// This is to avoid dangerous configuration where the attestation is
