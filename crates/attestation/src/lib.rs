@@ -386,6 +386,7 @@ fn map_attestation_provider_url(url: String) -> Result<String, AttestationError>
     };
 
     let url = url.strip_suffix('/').unwrap_or(&url).to_string();
+    let url = url.strip_suffix("/attest").unwrap_or(&url).to_string();
 
     // If compiled in test mode, skip this check
     if !cfg!(test) {
