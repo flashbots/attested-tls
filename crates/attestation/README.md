@@ -27,6 +27,13 @@ This feature is disabled by default. Note that without this feature,
 verification of azure attestations is not possible and azure attestations will
 be rejected with an error.
 
+*** Note ***
+
+Azure is known to use an outdated FMSPC `90C06F000000` which will cause
+verifications to fail.  A workaround is provided which will allow this, but it
+must be explicitly enabled via the `override_azure_outdated_tcb` flag on
+`AttestationVerifier`.
+
 ### `mock`
 
 Enables mock quote support via `tdx-quote` for tests and development on non-TDX

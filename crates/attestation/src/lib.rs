@@ -251,6 +251,8 @@ pub struct AttestationVerifier {
     /// Whether to log quotes to a file
     pub log_dcap_quote: bool,
     /// Whether to override outdated TCB when on Azure
+    ///
+    /// This provides a workaround for a known outdated FMSPC used by Azure
     pub override_azure_outdated_tcb: bool,
 }
 
