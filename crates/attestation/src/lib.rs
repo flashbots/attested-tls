@@ -256,8 +256,8 @@ pub struct AttestationVerifier {
 }
 
 impl AttestationVerifier {
-    /// Create an [AttestationVerifier] which will allow no remote
-    /// attestation
+    /// Create an [AttestationVerifier] which will only allow no attestation
+    /// and will reject if one is given
     pub fn expect_none() -> Self {
         Self {
             measurement_policy: MeasurementPolicy::expect_none(),
