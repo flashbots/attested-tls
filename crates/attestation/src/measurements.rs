@@ -464,16 +464,15 @@ impl MeasurementPolicy {
             }
         }
 
-        let measurements_simple: Vec<MeasurementRecordSimple> =
-            serde_json::from_slice(&json_bytes)?;
+        let records_simple: Vec<MeasurementRecordSimple> = serde_json::from_slice(&json_bytes)?;
 
         let mut measurement_policy = Vec::new();
 
-        for measurement in measurements_simple {
+        for record in records_simple {
             let attestation_type =
-                serde_json::from_value(serde_json::Value::String(measurement.attestation_type))?;
+                serde_json::from_value(serde_json::Value::String(record.attestation_type))?;
 
-            if let Some(measurements) = measurement.measurements {
+            if let Some(measurements) = record.measurements {
                 let expected_measurements = match attestation_type {
                     AttestationType::AzureTdx => {
                         let azure_measurements = measurements
@@ -510,7 +509,7 @@ impl MeasurementPolicy {
                 };
 
                 measurement_policy.push(MeasurementRecord {
-                    measurement_id: measurement.measurement_id.unwrap_or_default(),
+                    measurement_id: record.measurement_id.unwrap_or_default(),
                     measurements: expected_measurements,
                 });
             } else {
