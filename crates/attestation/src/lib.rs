@@ -295,7 +295,7 @@ impl AttestationVerifier {
 
         let measurements = match attestation_type {
             AttestationType::None => {
-                if self.has_remote_attestion() {
+                if self.has_remote_attestation() {
                     return Err(AttestationError::AttestationTypeNotAccepted);
                 }
                 if attestation_exchange_message.attestation.is_empty() {
@@ -338,7 +338,7 @@ impl AttestationVerifier {
     }
 
     /// Whether we allow no remote attestation
-    pub fn has_remote_attestion(&self) -> bool {
+    pub fn has_remote_attestation(&self) -> bool {
         self.measurement_policy.has_remote_attestation()
     }
 }
