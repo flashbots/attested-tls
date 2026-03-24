@@ -19,8 +19,7 @@ use thiserror::Error;
 use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy};
 
 /// Used in attestation type detection to check if we are on GCP
-const GCP_METADATA_API: &str =
-    "http://metadata.google.internal/computeMetadata/v1/project/project-id";
+const GCP_METADATA_API: &str = "http://metadata.google.internal";
 
 /// An attestation payload together with its type
 #[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
@@ -359,13 +358,7 @@ async fn log_attestation(attestation: &AttestationExchangeMessage) {
 /// Test whether it looks like we are running on GCP by hitting the metadata
 /// API
 async fn running_on_gcp() -> Result<bool, AttestationError> {
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("Metadata-Flavor", "Google".parse().expect("Cannot parse header"));
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(200))
-        .default_headers(headers)
-        .build()?;
+    let client = reqwest::Client::builder().timeout(Duration::from_millis(200)).build()?;
 
     let resp = client.get(GCP_METADATA_API).send().await;
 
