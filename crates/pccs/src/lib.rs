@@ -432,7 +432,7 @@ async fn refresh_loop(
         let sleep_secs = refresh_sleep_seconds(next_update, now);
         sleep(Duration::from_secs(sleep_secs)).await;
 
-        // Re-check the entry after waking in case annother task updated it
+        // Re-check the entry after waking in case another task updated it
         let now = match unix_now() {
             Ok(now) => now,
             Err(e) => {
