@@ -780,12 +780,15 @@ mod tests {
         assert!(policy.check_measurement(&measurements3).is_err());
     }
 
-    /// Checks that the Debug implementation for MultiMeasurements displays them as hex
+    /// Checks that the Debug implementation for MultiMeasurements displays
+    /// them as hex
     #[test]
     fn test_multi_measurements_debug_prints_hex() {
         let register_value = [0xabu8; 48];
-        let dcap =
-            MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, register_value)]));
+        let dcap = MultiMeasurements::Dcap(HashMap::from([(
+            DcapMeasurementRegister::MRTD,
+            register_value,
+        )]));
         let dcap_debug = format!("{dcap:?}");
         assert!(dcap_debug.contains("DCAP"));
         assert!(dcap_debug.contains(&hex::encode(register_value)));
