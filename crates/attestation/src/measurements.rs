@@ -379,7 +379,7 @@ impl MeasurementPolicy {
     }
 
     /// Whether or not we require attestation
-    pub fn has_remote_attestion(&self) -> bool {
+    pub fn has_remote_attestation(&self) -> bool {
         !self
             .accepted_measurements
             .iter()

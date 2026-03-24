@@ -339,7 +339,7 @@ impl AttestationVerifier {
 
     /// Whether we allow no remote attestation
     pub fn has_remote_attestion(&self) -> bool {
-        self.measurement_policy.has_remote_attestion()
+        self.measurement_policy.has_remote_attestation()
     }
 }
 
