@@ -34,11 +34,11 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-
 
-    - name: Check formatting
-      run: cargo fmt --all -- --check
+    - name: Check formatting using nightly
+      run: cargo +nightly fmt --all -- --check
 
-    - name: Run cargo clippy
-      run: cargo clippy --workspace --features azure -- -D warnings
+    - name: Run cargo clippy using nightly
+      run: cargo +nightly clippy --workspace --features azure -- -D warnings
 
     - name: Run cargo test
       run: cargo test --workspace --features azure --all-targets
