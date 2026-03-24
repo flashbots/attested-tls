@@ -247,8 +247,8 @@ pub struct AttestationVerifier {
     /// always injected into HTTP headers, so that they can be verified
     /// upstream A PCCS service to use - defaults to Intel PCS
     pub pccs_url: Option<String>,
-    /// Whether to log quotes to a file
-    pub log_dcap_quote: bool,
+    /// Whether to write quotes to files on disk
+    pub dump_dcap_quotes: bool,
     /// Whether to override outdated TCB when on Azure
     ///
     /// This provides a workaround for a known outdated FMSPC used by Azure
@@ -262,7 +262,7 @@ impl AttestationVerifier {
         Self {
             measurement_policy: MeasurementPolicy::expect_none(),
             pccs_url: None,
-            log_dcap_quote: false,
+            dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
         }
     }
@@ -273,7 +273,7 @@ impl AttestationVerifier {
         Self {
             measurement_policy: MeasurementPolicy::mock(),
             pccs_url: None,
-            log_dcap_quote: false,
+            dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
         }
     }
@@ -286,9 +286,9 @@ impl AttestationVerifier {
         expected_input_data: [u8; 64],
     ) -> Result<Option<MultiMeasurements>, AttestationError> {
         let attestation_type = attestation_exchange_message.attestation_type;
-        tracing::debug!("Verifing {attestation_type} attestation");
+        tracing::debug!("Verifying {attestation_type} attestation");
 
-        if self.log_dcap_quote {
+        if self.dump_dcap_quotes {
             log_attestation(&attestation_exchange_message).await;
         }
 
