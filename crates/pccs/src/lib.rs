@@ -32,7 +32,7 @@ const STARTUP_PREWARM_CONCURRENCY: usize = 8;
 #[derive(Clone)]
 pub struct Pccs {
     /// The URL of the service used to fetch collateral (PCS / PCCS)
-    pccs_url: String,
+    url: String,
     /// The internal cache
     cache: Arc<RwLock<HashMap<PccsInput, CacheEntry>>>,
     /// The state of the initial pre-warm fetch
@@ -45,14 +45,14 @@ impl std::fmt::Debug for Pccs {
     /// Formats PCCS config for debug output without exposing cache
     /// internals
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Pccs").field("pccs_url", &self.pccs_url).finish_non_exhaustive()
+        f.debug_struct("Pccs").field("url", &self.url).finish_non_exhaustive()
     }
 }
 
 impl Pccs {
     /// Creates a new PCCS cache using the provided URL or Intel PCS default
-    pub fn new(pccs_url: Option<String>) -> Self {
-        let pccs_url = pccs_url
+    pub fn new(url: Option<String>) -> Self {
+        let url = url
             .unwrap_or(PCS_URL.to_string())
             .trim_end_matches('/')
             .trim_end_matches("/sgx/certification/v4")
@@ -61,7 +61,7 @@ impl Pccs {
 
         let (prewarm_outcome_tx, _) = watch::channel(None);
         let pccs = Self {
-            pccs_url,
+            url,
             cache: RwLock::new(HashMap::new()).into(),
             prewarm_stats: Arc::new(PrewarmStats::default()),
             prewarm_outcome_tx,
@@ -121,7 +121,7 @@ impl Pccs {
             }
         }
 
-        let collateral = fetch_collateral(&self.pccs_url, fmspc.clone(), ca).await?;
+        let collateral = fetch_collateral(&self.url, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
 
         let mut cache = self.cache.write().await;
@@ -145,7 +145,7 @@ impl Pccs {
         ca: &'static str,
         now: i64,
     ) -> Result<QuoteCollateralV3, PccsError> {
-        let collateral = fetch_collateral(&self.pccs_url, fmspc.clone(), ca).await?;
+        let collateral = fetch_collateral(&self.url, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
         let cache_key = PccsInput::new(fmspc, ca);
 
@@ -170,9 +170,9 @@ impl Pccs {
 
         let weak_cache = Arc::downgrade(&self.cache);
         let key = cache_key.clone();
-        let pccs_url = self.pccs_url.clone();
+        let url = self.url.clone();
         entry.refresh_task = Some(tokio::spawn(async move {
-            refresh_loop(weak_cache, pccs_url, key).await;
+            refresh_loop(weak_cache, url, key).await;
         }));
     }
 
@@ -271,7 +271,7 @@ impl Pccs {
 
     /// Fetches available FMSPC entries from configured PCCS/PCS endpoint
     async fn fetch_fmspcs(&self) -> Result<Vec<FmspcEntry>, PccsError> {
-        let url = format!("{}/sgx/certification/v4/fmspcs", self.pccs_url);
+        let url = format!("{}/sgx/certification/v4/fmspcs", self.url);
         let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?;
         let response = client.get(&url).send().await?;
         if !response.status().is_success() {
@@ -314,12 +314,12 @@ impl PccsInput {
 
 /// Fetches collateral from PCCS for a given FMSPC and CA
 async fn fetch_collateral(
-    pccs_url: &str,
+    url: &str,
     fmspc: String,
     ca: &'static str,
 ) -> Result<QuoteCollateralV3, PccsError> {
     get_collateral_for_fmspc(
-        pccs_url, fmspc, ca, false, // Indicates not SGX
+        url, fmspc, ca, false, // Indicates not SGX
     )
     .await
     .map_err(Into::into)
