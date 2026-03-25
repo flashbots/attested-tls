@@ -17,8 +17,14 @@ use axum::{
 };
 use dcap_qvl::QuoteCollateralV3;
 use rcgen::{
-    BasicConstraints, CertificateParams, CertificateRevocationListParams, IsCa, Issuer,
-    KeyPair, KeyUsagePurpose, SerialNumber,
+    BasicConstraints,
+    CertificateParams,
+    CertificateRevocationListParams,
+    IsCa,
+    Issuer,
+    KeyPair,
+    KeyUsagePurpose,
+    SerialNumber,
 };
 use serde_json::{Value, json};
 use time::{Duration, OffsetDateTime};

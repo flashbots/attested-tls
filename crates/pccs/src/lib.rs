@@ -347,10 +347,8 @@ fn extract_next_update(collateral: &QuoteCollateralV3, now: i64) -> Result<i64, 
     let root_ca_crl_next_update =
         parse_crl_next_update("root_ca_crl.nextUpdate", &collateral.root_ca_crl)?;
     let pck_crl_next_update = parse_crl_next_update("pck_crl.nextUpdate", &collateral.pck_crl)?;
-    let next_update = tcb_next_update
-        .min(qe_next_update)
-        .min(root_ca_crl_next_update)
-        .min(pck_crl_next_update);
+    let next_update =
+        tcb_next_update.min(qe_next_update).min(root_ca_crl_next_update).min(pck_crl_next_update);
 
     if now >= next_update {
         return Err(PccsError::PccsCollateralExpired(format!(
@@ -374,17 +372,17 @@ fn parse_next_update(field: &str, value: &str) -> Result<i64, PccsError> {
         .map(|parsed| parsed.unix_timestamp())
 }
 
-/// Parse a certifcate revocation list and extract the timestamp for next update
+/// Parse a certifcate revocation list and extract the timestamp for next
+/// update
 fn parse_crl_next_update(field: &str, crl_der: &[u8]) -> Result<i64, PccsError> {
     let (_, crl) = CertificateRevocationList::from_der(crl_der).map_err(|e| {
         PccsError::PccsCollateralParse(format!("Failed to parse {field} as DER CRL: {e}"))
     })?;
-    let next_update = crl.next_update().ok_or_else(|| {
-        PccsError::PccsCollateralParse(format!("Missing {field} in DER CRL"))
-    })?;
-    i64::try_from(next_update.timestamp()).map_err(|_| {
-        PccsError::PccsCollateralParse(format!("{field} exceeds i64 range"))
-    })
+    let next_update = crl
+        .next_update()
+        .ok_or_else(|| PccsError::PccsCollateralParse(format!("Missing {field} in DER CRL")))?;
+    i64::try_from(next_update.timestamp())
+        .map_err(|_| PccsError::PccsCollateralParse(format!("{field} exceeds i64 range")))
 }
 
 /// Returns current unix time in seconds
@@ -649,8 +647,7 @@ mod tests {
 
         let mut qe_identity: serde_json::Value =
             serde_json::from_str(&collateral.qe_identity).unwrap();
-        qe_identity["nextUpdate"] =
-            serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
+        qe_identity["nextUpdate"] = serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
         collateral.qe_identity = serde_json::to_string(&qe_identity).unwrap();
 
         let expected = parse_crl_next_update("root_ca_crl.nextUpdate", &collateral.root_ca_crl)
