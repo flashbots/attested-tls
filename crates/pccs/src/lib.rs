@@ -381,8 +381,7 @@ fn parse_crl_next_update(field: &str, crl_der: &[u8]) -> Result<i64, PccsError> 
     let next_update = crl
         .next_update()
         .ok_or_else(|| PccsError::PccsCollateralParse(format!("Missing {field} in DER CRL")))?;
-    i64::try_from(next_update.timestamp())
-        .map_err(|_| PccsError::PccsCollateralParse(format!("{field} exceeds i64 range")))
+    Ok(next_update.timestamp())
 }
 
 /// Returns current unix time in seconds
