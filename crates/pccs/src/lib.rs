@@ -17,6 +17,7 @@ use tokio::{
     time::{Duration, sleep},
 };
 use tracing::debug;
+use x509_parser::{prelude::FromDer, revocation_list::CertificateRevocationList};
 
 /// For fetching collateral directly from Intel
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
@@ -326,6 +327,12 @@ async fn fetch_collateral(
 }
 
 /// Extracts the earliest next update timestamp from collateral metadata
+///
+/// This returns the soonest timestamp from either:
+/// - The TCB
+/// - The Quoting enclave
+/// - The root CA certificate revocation list
+/// - The PCK certificate revocation list
 fn extract_next_update(collateral: &QuoteCollateralV3, now: i64) -> Result<i64, PccsError> {
     let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).map_err(|e| {
         PccsError::PccsCollateralParse(format!("Failed to parse TCB info JSON: {e}"))
@@ -337,12 +344,21 @@ fn extract_next_update(collateral: &QuoteCollateralV3, now: i64) -> Result<i64, 
 
     let tcb_next_update = parse_next_update("tcb_info.nextUpdate", &tcb_info.next_update)?;
     let qe_next_update = parse_next_update("qe_identity.nextUpdate", &qe_identity.next_update)?;
-    let next_update = tcb_next_update.min(qe_next_update);
+    let root_ca_crl_next_update =
+        parse_crl_next_update("root_ca_crl.nextUpdate", &collateral.root_ca_crl)?;
+    let pck_crl_next_update = parse_crl_next_update("pck_crl.nextUpdate", &collateral.pck_crl)?;
+    let next_update = tcb_next_update
+        .min(qe_next_update)
+        .min(root_ca_crl_next_update)
+        .min(pck_crl_next_update);
 
     if now >= next_update {
         return Err(PccsError::PccsCollateralExpired(format!(
-            "Collateral expired (tcb_next_update={}, qe_next_update={}, now={now})",
-            tcb_info.next_update, qe_identity.next_update
+            "Collateral expired (tcb_next_update={}, qe_next_update={}, root_ca_crl_next_update={}, pck_crl_next_update={}, now={now})",
+            tcb_info.next_update,
+            qe_identity.next_update,
+            root_ca_crl_next_update,
+            pck_crl_next_update
         )));
     }
 
@@ -356,6 +372,19 @@ fn parse_next_update(field: &str, value: &str) -> Result<i64, PccsError> {
             PccsError::PccsCollateralParse(format!("Failed to parse {field} as RFC3339: {e}"))
         })
         .map(|parsed| parsed.unix_timestamp())
+}
+
+/// Parse a certifcate revocation list and extract the timestamp for next update
+fn parse_crl_next_update(field: &str, crl_der: &[u8]) -> Result<i64, PccsError> {
+    let (_, crl) = CertificateRevocationList::from_der(crl_der).map_err(|e| {
+        PccsError::PccsCollateralParse(format!("Failed to parse {field} as DER CRL: {e}"))
+    })?;
+    let next_update = crl.next_update().ok_or_else(|| {
+        PccsError::PccsCollateralParse(format!("Missing {field} in DER CRL"))
+    })?;
+    i64::try_from(next_update.timestamp()).map_err(|_| {
+        PccsError::PccsCollateralParse(format!("{field} exceeds i64 range"))
+    })
 }
 
 /// Returns current unix time in seconds
@@ -605,6 +634,30 @@ mod tests {
         let (_, is_fresh) =
             pccs.get_collateral("00806F050000".to_string(), "processor", now).await.unwrap();
         assert!(is_fresh);
+    }
+
+    #[test]
+    fn test_extract_next_update_includes_crl_expiry() {
+        let mut collateral: QuoteCollateralV3 = serde_json::from_slice(include_bytes!(
+            "../../attestation/test-assets/dcap-quote-collateral-00.json"
+        ))
+        .unwrap();
+
+        let mut tcb_info: serde_json::Value = serde_json::from_str(&collateral.tcb_info).unwrap();
+        tcb_info["nextUpdate"] = serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
+        collateral.tcb_info = serde_json::to_string(&tcb_info).unwrap();
+
+        let mut qe_identity: serde_json::Value =
+            serde_json::from_str(&collateral.qe_identity).unwrap();
+        qe_identity["nextUpdate"] =
+            serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
+        collateral.qe_identity = serde_json::to_string(&qe_identity).unwrap();
+
+        let expected = parse_crl_next_update("root_ca_crl.nextUpdate", &collateral.root_ca_crl)
+            .unwrap()
+            .min(parse_crl_next_update("pck_crl.nextUpdate", &collateral.pck_crl).unwrap());
+
+        assert_eq!(extract_next_update(&collateral, 0).unwrap(), expected);
     }
 
     #[tokio::test]

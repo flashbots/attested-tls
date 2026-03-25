@@ -16,7 +16,12 @@ use axum::{
     routing::get,
 };
 use dcap_qvl::QuoteCollateralV3;
+use rcgen::{
+    BasicConstraints, CertificateParams, CertificateRevocationListParams, IsCa, Issuer,
+    KeyPair, KeyUsagePurpose, SerialNumber,
+};
 use serde_json::{Value, json};
+use time::{Duration, OffsetDateTime};
 use tokio::{net::TcpListener, task::JoinHandle};
 
 #[derive(Clone)]
@@ -79,6 +84,8 @@ pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServe
         "../../attestation/test-assets/dcap-quote-collateral-00.json"
     ))
     .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let fresh_crl = generate_mock_crl_der(now, now + Duration::days(365));
 
     let mut tcb_info: Value = serde_json::from_str(&base_collateral.tcb_info).unwrap();
     tcb_info["nextUpdate"] = Value::String(config.tcb_next_update.clone());
@@ -99,11 +106,11 @@ pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServe
         qe_next_update: config.qe_next_update,
         refreshed_tcb_next_update: config.refreshed_tcb_next_update,
         refreshed_qe_next_update: config.refreshed_qe_next_update,
-        pck_crl: base_collateral.pck_crl,
+        pck_crl: fresh_crl.clone(),
         pck_crl_issuer_chain: "mock-pck-crl-issuer-chain".to_string(),
         tcb_issuer_chain: "mock-tcb-info-issuer-chain".to_string(),
         qe_issuer_chain: "mock-qe-issuer-chain".to_string(),
-        root_ca_crl_hex: hex::encode(base_collateral.root_ca_crl),
+        root_ca_crl_hex: hex::encode(fresh_crl),
         tcb_calls: tcb_calls.clone(),
         qe_calls: qe_calls.clone(),
     });
@@ -194,4 +201,30 @@ async fn mock_qe_identity_handler(
 
 async fn mock_root_ca_crl_handler(State(state): State<Arc<MockPcsState>>) -> impl IntoResponse {
     state.root_ca_crl_hex.clone()
+}
+
+/// Create a mock certificate revocation list
+fn generate_mock_crl_der(this_update: OffsetDateTime, next_update: OffsetDateTime) -> Vec<u8> {
+    let mut issuer_params = CertificateParams::new(Vec::new()).unwrap();
+    issuer_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    issuer_params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::CrlSign,
+    ];
+    let issuer_key = KeyPair::generate().unwrap();
+    let issuer = Issuer::new(issuer_params, issuer_key);
+
+    CertificateRevocationListParams {
+        this_update,
+        next_update,
+        crl_number: SerialNumber::from(1_u64),
+        issuing_distribution_point: None,
+        revoked_certs: Vec::new(),
+        key_identifier_method: rcgen::KeyIdMethod::Sha256,
+    }
+    .signed_by(&issuer)
+    .unwrap()
+    .der()
+    .to_vec()
 }

@@ -2344,6 +2344,7 @@ dependencies = [
  "axum",
  "dcap-qvl",
  "hex",
+ "rcgen",
  "reqwest",
  "serde",
  "serde_json",
@@ -2352,6 +2353,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "x509-parser",
 ]
 
 [[package]]
