@@ -49,7 +49,7 @@ impl fmt::Debug for MultiMeasurements {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Dcap(measurements) => {
-                f.debug_tuple("Dcap").field(&DcapHexDebug(measurements)).finish()
+                f.debug_tuple("DCAP").field(&DcapHexDebug(measurements)).finish()
             }
             Self::Azure(measurements) => {
                 f.debug_tuple("Azure").field(&AzureHexDebug(measurements)).finish()
@@ -59,7 +59,7 @@ impl fmt::Debug for MultiMeasurements {
     }
 }
 
-/// Used to display measurements as hex
+/// Used to display DCAP measurements as hex
 struct DcapHexDebug<'a>(&'a HashMap<DcapMeasurementRegister, [u8; 48]>);
 
 impl fmt::Debug for DcapHexDebug<'_> {
@@ -76,7 +76,7 @@ impl fmt::Debug for DcapHexDebug<'_> {
     }
 }
 
-/// Used to display measurements as hex
+/// Used to display Azure measurements as hex
 struct AzureHexDebug<'a>(&'a HashMap<u32, [u8; 32]>);
 
 impl fmt::Debug for AzureHexDebug<'_> {
@@ -194,7 +194,7 @@ impl MultiMeasurements {
     }
 }
 
-/// All-zero measurment values used in some tests
+/// All-zero measurement values used in some tests
 #[cfg(any(test, feature = "mock"))]
 pub fn mock_dcap_measurements() -> MultiMeasurements {
     MultiMeasurements::Dcap(HashMap::from([
@@ -379,7 +379,7 @@ impl MeasurementPolicy {
     }
 
     /// Whether or not we require attestation
-    pub fn has_remote_attestion(&self) -> bool {
+    pub fn has_remote_attestation(&self) -> bool {
         !self
             .accepted_measurements
             .iter()
@@ -464,16 +464,15 @@ impl MeasurementPolicy {
             }
         }
 
-        let measurements_simple: Vec<MeasurementRecordSimple> =
-            serde_json::from_slice(&json_bytes)?;
+        let records_simple: Vec<MeasurementRecordSimple> = serde_json::from_slice(&json_bytes)?;
 
         let mut measurement_policy = Vec::new();
 
-        for measurement in measurements_simple {
+        for record in records_simple {
             let attestation_type =
-                serde_json::from_value(serde_json::Value::String(measurement.attestation_type))?;
+                serde_json::from_value(serde_json::Value::String(record.attestation_type))?;
 
-            if let Some(measurements) = measurement.measurements {
+            if let Some(measurements) = record.measurements {
                 let expected_measurements = match attestation_type {
                     AttestationType::AzureTdx => {
                         let azure_measurements = measurements
@@ -510,7 +509,7 @@ impl MeasurementPolicy {
                 };
 
                 measurement_policy.push(MeasurementRecord {
-                    measurement_id: measurement.measurement_id.unwrap_or_default(),
+                    measurement_id: record.measurement_id.unwrap_or_default(),
                     measurements: expected_measurements,
                 });
             } else {
@@ -780,19 +779,25 @@ mod tests {
         assert!(policy.check_measurement(&measurements3).is_err());
     }
 
+    /// Checks that the Debug implementation for MultiMeasurements displays
+    /// them as hex
     #[test]
     fn test_multi_measurements_debug_prints_hex() {
-        let dcap =
-            MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, [0xabu8; 48])]));
+        let register_value = [0xabu8; 48];
+        let dcap = MultiMeasurements::Dcap(HashMap::from([(
+            DcapMeasurementRegister::MRTD,
+            register_value,
+        )]));
         let dcap_debug = format!("{dcap:?}");
-        assert!(dcap_debug.contains("Dcap"));
-        assert!(dcap_debug.contains("abababab"));
-        assert!(!dcap_debug.contains("[171"));
+        assert!(dcap_debug.contains("DCAP"));
+        assert!(dcap_debug.contains(&hex::encode(register_value)));
+        assert!(!dcap_debug.contains(&format!("{register_value:?}")));
 
-        let azure = MultiMeasurements::Azure(HashMap::from([(9u32, [0x11u8; 32])]));
+        let azure_register_value = [0xabu8; 32];
+        let azure = MultiMeasurements::Azure(HashMap::from([(9u32, azure_register_value)]));
         let azure_debug = format!("{azure:?}");
         assert!(azure_debug.contains("Azure"));
-        assert!(azure_debug.contains("11111111"));
-        assert!(!azure_debug.contains("[17"));
+        assert!(azure_debug.contains(&hex::encode(azure_register_value)));
+        assert!(!azure_debug.contains(&format!("{azure_register_value:?}")));
     }
 }

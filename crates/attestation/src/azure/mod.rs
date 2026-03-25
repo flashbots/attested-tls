@@ -337,7 +337,7 @@ mod tests {
 
     fn input_data_from_attestation(attestation_bytes: &[u8]) -> [u8; 64] {
         let attestation_document: AttestationDocument =
-            serde_json::from_slice(attestation_bytes).unwrap();
+            serde_saphyr::from_slice(attestation_bytes).unwrap();
         let hcl_report_bytes =
             BASE64_URL_SAFE.decode(attestation_document.hcl_report_base64).unwrap();
         let hcl_report = hcl::HclReport::new(hcl_report_bytes).unwrap();
@@ -364,7 +364,7 @@ mod tests {
     #[tokio::test]
     async fn test_verify() {
         let attestation_bytes: &'static [u8] =
-            include_bytes!("../../test-assets/azure-tdx-1764662251380464271");
+            include_bytes!("../../test-assets/azure-tdx-1764662251380464271.yaml");
 
         // To avoid this test stopping working when the certificate is no longer
         // valid we pass in a timestamp
@@ -392,12 +392,16 @@ mod tests {
             MeasurementPolicy::from_json_bytes(measurements_json.to_vec()).unwrap();
 
         let collateral_bytes: &'static [u8] =
-            include_bytes!("../../test-assets/azure-collateral02.json");
+            include_bytes!("../../test-assets/azure-collateral02.yaml");
 
-        let collateral = serde_json::from_slice(collateral_bytes).unwrap();
+        let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
+        let attestation_json = serde_json::to_vec(
+            &serde_saphyr::from_slice::<AttestationDocument>(attestation_bytes).unwrap(),
+        )
+        .unwrap();
 
         let measurements = verify_azure_attestation_with_given_timestamp(
-            attestation_bytes.to_vec(),
+            attestation_json,
             [0; 64], // Input data
             None,
             collateral,
@@ -413,18 +417,22 @@ mod tests {
     #[tokio::test]
     async fn test_verify_fails_on_input_mismatch() {
         let attestation_bytes: &'static [u8] =
-            include_bytes!("../../test-assets/azure-tdx-1764662251380464271");
+            include_bytes!("../../test-assets/azure-tdx-1764662251380464271.yaml");
         let now = 1771423480;
 
         let mut expected_input_data = input_data_from_attestation(attestation_bytes);
         expected_input_data[63] ^= 0x01;
 
         let collateral_bytes: &'static [u8] =
-            include_bytes!("../../test-assets/azure-collateral02.json");
-        let collateral = serde_json::from_slice(collateral_bytes).unwrap();
+            include_bytes!("../../test-assets/azure-collateral02.yaml");
+        let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
+        let attestation_json = serde_json::to_vec(
+            &serde_saphyr::from_slice::<AttestationDocument>(attestation_bytes).unwrap(),
+        )
+        .unwrap();
 
         let err = verify_azure_attestation_with_given_timestamp(
-            attestation_bytes.to_vec(),
+            attestation_json,
             expected_input_data,
             None,
             Some(collateral),
