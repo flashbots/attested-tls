@@ -44,6 +44,7 @@ tdx-quote = { version = "0.0.5", features = ["mock"], optional = true }
 tempfile = "3.23.0"
 tdx-quote = { version = "0.0.5", features = ["mock"] }
 tokio-rustls = { workspace = true, default-features = true }
+serde-saphyr = "0.0.22"
 
 [features]
 default = []
