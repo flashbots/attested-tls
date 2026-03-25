@@ -2393,6 +2393,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "thiserror 2.0.18",
  "time",

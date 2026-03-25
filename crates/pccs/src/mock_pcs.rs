@@ -86,8 +86,8 @@ struct MockPcsState {
 }
 
 pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServer {
-    let base_collateral: QuoteCollateralV3 = serde_json::from_slice(include_bytes!(
-        "../../attestation/test-assets/dcap-quote-collateral-00.json"
+    let base_collateral: QuoteCollateralV3 = serde_saphyr::from_slice(include_bytes!(
+        "../../attestation/test-assets/dcap-quote-collateral-00.yaml"
     ))
     .unwrap();
     let now = OffsetDateTime::now_utc();

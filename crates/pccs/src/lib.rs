@@ -635,8 +635,8 @@ mod tests {
 
     #[test]
     fn test_extract_next_update_includes_crl_expiry() {
-        let mut collateral: QuoteCollateralV3 = serde_json::from_slice(include_bytes!(
-            "../../attestation/test-assets/dcap-quote-collateral-00.json"
+        let mut collateral: QuoteCollateralV3 = serde_saphyr::from_slice(include_bytes!(
+            "../../attestation/test-assets/dcap-quote-collateral-00.yaml"
         ))
         .unwrap();
 
