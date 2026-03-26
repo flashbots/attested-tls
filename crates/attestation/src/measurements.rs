@@ -632,13 +632,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_remote_buildernet_measurements() {
-        // Check that the buildernet measurements are available and parse correctly
-        let policy = MeasurementPolicy::from_file_or_url(
-            "https://measurements.builder.flashbots.net".to_string(),
-        )
-        .await
-        .unwrap();
+    async fn test_buildernet_measurements() {
+        // Refresh this fixture explicitly with:
+        //   sh crates/attestation/test-assets/
+        // refresh-buildernet-measurements-fixture.sh
+        let policy =
+            MeasurementPolicy::from_file("test-assets/buildernet_measurements.json".into())
+                .await
+                .unwrap();
 
         assert!(!policy.accepted_measurements.is_empty());
 
