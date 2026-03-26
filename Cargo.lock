@@ -647,8 +647,8 @@ dependencies = [
 
 [[package]]
 name = "cc-eventlog"
-version = "0.5.7"
-source = "git+https://github.com/Dstack-TEE/dstack.git#31cfd481b178fd36b2137fc8fc1e5c728f89145d"
+version = "0.5.8"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
 dependencies = [
  "anyhow",
  "digest",
@@ -1239,8 +1239,8 @@ dependencies = [
 
 [[package]]
 name = "dstack-attest"
-version = "0.5.7"
-source = "git+https://github.com/Dstack-TEE/dstack.git#31cfd481b178fd36b2137fc8fc1e5c728f89145d"
+version = "0.5.8"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
 dependencies = [
  "anyhow",
  "cc-eventlog",
@@ -1260,12 +1260,13 @@ dependencies = [
  "sha2",
  "sha3",
  "tdx-attest",
+ "tracing",
 ]
 
 [[package]]
 name = "dstack-types"
-version = "0.5.7"
-source = "git+https://github.com/Dstack-TEE/dstack.git#31cfd481b178fd36b2137fc8fc1e5c728f89145d"
+version = "0.5.8"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
 dependencies = [
  "parity-scale-codec",
  "serde",
@@ -2965,8 +2966,8 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ra-tls"
-version = "0.5.7"
-source = "git+https://github.com/Dstack-TEE/dstack.git#31cfd481b178fd36b2137fc8fc1e5c728f89145d"
+version = "0.5.8"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
 dependencies = [
  "anyhow",
  "bon",
@@ -3616,8 +3617,8 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "size-parser"
-version = "0.5.7"
-source = "git+https://github.com/Dstack-TEE/dstack.git#31cfd481b178fd36b2137fc8fc1e5c728f89145d"
+version = "0.5.8"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
 dependencies = [
  "anyhow",
  "serde",
@@ -3747,8 +3748,8 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tdx-attest"
-version = "0.5.7"
-source = "git+https://github.com/Dstack-TEE/dstack.git#31cfd481b178fd36b2137fc8fc1e5c728f89145d"
+version = "0.5.8"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
 dependencies = [
  "anyhow",
  "cc-eventlog",
