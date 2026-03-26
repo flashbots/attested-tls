@@ -55,6 +55,26 @@ impl DcapMeasurementRegister {
     }
 }
 
+fn parse_azure_pcr_index(value: &str) -> Result<u32, MeasurementFormatError> {
+    // For backwards compatibility support bare numeric field names. Also
+    // accept a clearer case-insensitive "pcr" prefix, e.g. "pcr4".
+    let index = if let Ok(index) = value.parse::<u32>() {
+        index
+    } else if let Some(suffix) = value.strip_prefix("pcr").or_else(|| value.strip_prefix("PCR")) {
+        suffix.parse::<u32>()?
+    } else if value.get(..3).is_some_and(|prefix| prefix.eq_ignore_ascii_case("pcr")) {
+        value[3..].parse::<u32>()?
+    } else {
+        return Err(MeasurementFormatError::ParseInt(value.parse::<u32>().unwrap_err()));
+    };
+
+    if index > 23 {
+        return Err(MeasurementFormatError::BadRegisterIndex);
+    }
+
+    Ok(index)
+}
+
 /// Represents a set of measurements values for one of the supported CVM
 /// platforms
 #[derive(Clone, PartialEq)]
@@ -497,12 +517,7 @@ impl MeasurementPolicy {
                         let azure_measurements = measurements
                             .iter()
                             .map(|(index_str, entry)| {
-                                let index: u32 = index_str.parse()?;
-
-                                if index > 23 {
-                                    return Err(MeasurementFormatError::BadRegisterIndex);
-                                }
-
+                                let index = parse_azure_pcr_index(index_str)?;
                                 Ok((index, parse_measurement_entry::<32>(entry, index_str)?))
                             })
                             .collect::<Result<HashMap<u32, Vec<[u8; 32]>>, MeasurementFormatError>>(
@@ -874,6 +889,107 @@ mod tests {
                 "measurements": {
                     "rtmr4": {
                         "expected_any": ["000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"]
+                    }
+                }
+            }
+        ]"#;
+
+        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec());
+        assert!(matches!(result, Err(MeasurementFormatError::BadRegisterIndex)));
+    }
+
+    #[tokio::test]
+    async fn test_parse_azure_pcr_prefixed_registers() {
+        let json = r#"[
+            {
+                "measurement_id": "azure-pcr-prefixed",
+                "attestation_type": "azure-tdx",
+                "measurements": {
+                    "pcr4": {
+                        "expected_any": ["1111111111111111111111111111111111111111111111111111111111111111"]
+                    },
+                    "pcr9": {
+                        "expected_any": ["2222222222222222222222222222222222222222222222222222222222222222"]
+                    },
+                    "pcr11": {
+                        "expected_any": ["3333333333333333333333333333333333333333333333333333333333333333"]
+                    }
+                }
+            }
+        ]"#;
+
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
+        let record = &policy.accepted_measurements[0];
+
+        if let ExpectedMeasurements::Azure(azure) = &record.measurements {
+            assert_eq!(azure.keys().collect::<HashSet<_>>(), HashSet::from([&4, &9, &11]));
+        } else {
+            panic!("Expected ExpectedMeasurements::Azure");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_case_insensitive_azure_pcr_prefix() {
+        let json = r#"[
+            {
+                "measurement_id": "azure-case-insensitive",
+                "attestation_type": "azure-tdx",
+                "measurements": {
+                    "PCR4": {
+                        "expected_any": ["1111111111111111111111111111111111111111111111111111111111111111"]
+                    },
+                    "PcR9": {
+                        "expected_any": ["2222222222222222222222222222222222222222222222222222222222222222"]
+                    }
+                }
+            }
+        ]"#;
+
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
+        let record = &policy.accepted_measurements[0];
+
+        if let ExpectedMeasurements::Azure(azure) = &record.measurements {
+            assert_eq!(azure.keys().collect::<HashSet<_>>(), HashSet::from([&4, &9]));
+        } else {
+            panic!("Expected ExpectedMeasurements::Azure");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_mixed_numeric_and_prefixed_azure_pcr_keys() {
+        let json = r#"[
+            {
+                "measurement_id": "azure-mixed-keys",
+                "attestation_type": "azure-tdx",
+                "measurements": {
+                    "4": {
+                        "expected_any": ["1111111111111111111111111111111111111111111111111111111111111111"]
+                    },
+                    "pcr9": {
+                        "expected_any": ["2222222222222222222222222222222222222222222222222222222222222222"]
+                    }
+                }
+            }
+        ]"#;
+
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
+        let record = &policy.accepted_measurements[0];
+
+        if let ExpectedMeasurements::Azure(azure) = &record.measurements {
+            assert_eq!(azure.keys().collect::<HashSet<_>>(), HashSet::from([&4, &9]));
+        } else {
+            panic!("Expected ExpectedMeasurements::Azure");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_invalid_prefixed_azure_pcr_key_error() {
+        let json = r#"[
+            {
+                "attestation_type": "azure-tdx",
+                "measurements": {
+                    "pcr24": {
+                        "expected_any": ["1111111111111111111111111111111111111111111111111111111111111111"]
                     }
                 }
             }

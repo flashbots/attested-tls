@@ -174,23 +174,31 @@ up to these external programs to reject unacceptable measurements.
 
 ### Measurement field names
 
-For Azure vTMP attestations, the numbered fields are PCR register indexes.  For
-example the following specifies PCRs 4 and 9:
+For Azure vTMP attestations, the preferred field names are PCR register
+indexes prefixed with `pcr` or `PCR`. For example the following specifies PCRs
+4 and 9:
 
 ```JSON
 {
     "measurement_id": "cvm-image-azure-tdx.rootfs-20241107200854.wic.vhd",
     "attestation_type": "azure-tdx",
     "measurements": {
-        "4": {
+        "pcr4": {
             "expected_any": ["1b8cd655f5ebdf50bedabfb5db6b896a0a7c56de54f318103a2de1e7cea57b6b"]
         },
-        "9": {
+        "pcr9": {
             "expected_any": ["992465f922102234c196f596fdaba86ea16eaa4c264dc425ec26bc2d1c364472"]
         }
     }
 }
 ```
+
+Legacy numeric field names are still supported for backwards compatibility:
+
+- `"4"` - PCR 4
+- `"9"` - PCR 9
+- `"11"` - PCR 11
+- and so on for valid PCR indices `0` through `23`
 
 All other attestation types are DCAP based. In measurement-policy JSON, the
 preferred field names are the register names and they are matched
