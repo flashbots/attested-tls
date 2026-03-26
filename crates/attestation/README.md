@@ -100,27 +100,27 @@ Example using `expected_any` (recommended):
     "measurement_id": "dcap-tdx-example",
     "attestation_type": "dcap-tdx",
     "measurements": {
-      "0": {
+      "mrtd": {
         "expected_any": [
           "47a1cc074b914df8596bad0ed13d50d561ad1effc7f7cc530ab86da7ea49ffc03e57e7da829f8cba9c629c3970505323"
         ]
       },
-      "1": {
+      "rtmr0": {
         "expected_any": [
           "da6e07866635cb34a9ffcdc26ec6622f289e625c42c39b320f29cdf1dc84390b4f89dd0b073be52ac38ca7b0a0f375bb"
         ]
       },
-      "2": {
+      "rtmr1": {
         "expected_any": [
           "a7157e7c5f932e9babac9209d4527ec9ed837b8e335a931517677fa746db51ee56062e3324e266e3f39ec26a516f4f71"
         ]
       },
-      "3": {
+      "rtmr2": {
         "expected_any": [
           "e63560e50830e22fbc9b06cdce8afe784bf111e4251256cf104050f1347cd4ad9f30da408475066575145da0b098a124"
         ]
       },
-      "4": {
+      "rtmr3": {
         "expected_any": [
           "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         ]
@@ -135,7 +135,7 @@ accepted for a register (e.g., for different versions of the firmware):
 
 ```JSON 
 {
-  "0": {
+  "mrtd": {
     "expected_any": [
       "47a1cc074b914df8596bad0ed13d50d561ad1effc7f7cc530ab86da7ea49ffc03e57e7da829f8cba9c629c3970505323",
       "abc123def456789012345678901234567890123456789012345678901234567890123456789012345678901234567890"
@@ -156,7 +156,7 @@ compatibility:
     "measurement_id": "dcap-tdx-example",
     "attestation_type": "dcap-tdx",
     "measurements": {
-      "0": {
+      "mrtd": {
         "expected": "47a1cc074b914df8596bad0ed13d50d561ad1effc7f7cc530ab86da7ea49ffc03e57e7da829f8cba9c629c3970505323"
       }
     }
@@ -192,8 +192,17 @@ example the following specifies PCRs 4 and 9:
 }
 ```
 
-All other attestation types are DCAP based, where the TDX registers are given as
-follows:
+All other attestation types are DCAP based. In measurement-policy JSON, the
+preferred field names are the register names and they are matched
+case-insensitively:
+
+- `mrtd` - MRTD
+- `rtmr0` - RTMR0
+- `rtmr1` - RTMR1
+- `rtmr2` - RTMR2
+- `rtmr3` - RTMR3
+
+Legacy numeric field names are still supported for backwards compatibility:
 
 - "0" - MRTD
 - "1" - RTMR0

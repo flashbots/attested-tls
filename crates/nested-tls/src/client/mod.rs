@@ -94,7 +94,7 @@ where
                     Poll::Ready(Err(err)) => {
                         trace!(domain = ?self.domain, error = ?err, "Outer handshake failed");
                         // bail out on error
-                        return Poll::Ready(Err(err))
+                        return Poll::Ready(Err(err));
                     }
 
                     Poll::Ready(Ok(outer)) => {
@@ -125,7 +125,7 @@ where
                     Poll::Ready(Ok(inner)) => {
                         trace!(domain = ?self.domain, "Finished both handshakes");
                         // done
-                        return Poll::Ready(Ok(inner))
+                        return Poll::Ready(Ok(inner));
                     }
                 },
 
