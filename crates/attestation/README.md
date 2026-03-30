@@ -4,6 +4,7 @@ Attestation generation and verification for confidential VMs, plus measurement
 policy handling.
 
 This crate provides:
+
 - Attestation type detection (`none`, `dcap-tdx`, `gcp-tdx`, and `azure-tdx`
   when enabled)
 - Attestation generation and verification for DCAP and (optionally) Azure
@@ -21,7 +22,7 @@ be installed. On Debian-based systems tpm2 is provided by
 [`libtss2-dev`](https://packages.debian.org/trixie/libtss2-dev), and on nix
 `tpm2-tss`. This dependency is currently not packaged for MacOS, meaning
 currently it is not possible to compile or run with the `azure` feature on
-MacOS. 
+MacOS.
 
 This feature is disabled by default. Note that without this feature,
 verification of azure attestations is not possible and azure attestations will
@@ -45,7 +46,7 @@ These are the attestation type names used in the measurements file.
 
 - `none` - No attestation provided
 - `gcp-tdx` - DCAP TDX on Google Cloud Platform
-- `azure-tdx` - TDX on Azure, with vTPM attestation 
+- `azure-tdx` - TDX on Azure, with vTPM attestation
 - `qemu-tdx` - TDX on Qemu (no cloud platform)
 - `dcap-tdx` - DCAP TDX (platform not specified)
 
@@ -77,6 +78,7 @@ type and set of measurements.
 This aims to match the formatting used by `cvm-reverse-proxy`.
 
 These objects have the following fields:
+
 - `measurement_id` - a name used to describe the entry. For example the name and
   version of the CVM OS image that these measurements correspond to.
 - `attestation_type` - a string containing one of the attestation types
@@ -86,6 +88,7 @@ These objects have the following fields:
   below).
 
 Each measurement register entry supports two mutually exclusive fields:
+
 - `expected_any` - **(recommended)** an array of hex-encoded measurement values.
   The attestation is accepted if the actual measurement matches **any** value in
   the list (OR semantics).
@@ -94,33 +97,33 @@ Each measurement register entry supports two mutually exclusive fields:
 
 Example using `expected_any` (recommended):
 
-```JSON 
+```JSON
 [
   {
     "measurement_id": "dcap-tdx-example",
     "attestation_type": "dcap-tdx",
     "measurements": {
-      "0": {
+      "mrtd": {
         "expected_any": [
           "47a1cc074b914df8596bad0ed13d50d561ad1effc7f7cc530ab86da7ea49ffc03e57e7da829f8cba9c629c3970505323"
         ]
       },
-      "1": {
+      "rtmr0": {
         "expected_any": [
           "da6e07866635cb34a9ffcdc26ec6622f289e625c42c39b320f29cdf1dc84390b4f89dd0b073be52ac38ca7b0a0f375bb"
         ]
       },
-      "2": {
+      "rtmr1": {
         "expected_any": [
           "a7157e7c5f932e9babac9209d4527ec9ed837b8e335a931517677fa746db51ee56062e3324e266e3f39ec26a516f4f71"
         ]
       },
-      "3": {
+      "rtmr2": {
         "expected_any": [
           "e63560e50830e22fbc9b06cdce8afe784bf111e4251256cf104050f1347cd4ad9f30da408475066575145da0b098a124"
         ]
       },
-      "4": {
+      "rtmr3": {
         "expected_any": [
           "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         ]
@@ -133,9 +136,9 @@ Example using `expected_any` (recommended):
 The `expected_any` field is useful when multiple measurement values should be
 accepted for a register (e.g., for different versions of the firmware):
 
-```JSON 
+```JSON
 {
-  "0": {
+  "mrtd": {
     "expected_any": [
       "47a1cc074b914df8596bad0ed13d50d561ad1effc7f7cc530ab86da7ea49ffc03e57e7da829f8cba9c629c3970505323",
       "abc123def456789012345678901234567890123456789012345678901234567890123456789012345678901234567890"
@@ -156,7 +159,7 @@ compatibility:
     "measurement_id": "dcap-tdx-example",
     "attestation_type": "dcap-tdx",
     "measurements": {
-      "0": {
+      "mrtd": {
         "expected": "47a1cc074b914df8596bad0ed13d50d561ad1effc7f7cc530ab86da7ea49ffc03e57e7da829f8cba9c629c3970505323"
       }
     }
@@ -174,26 +177,43 @@ up to these external programs to reject unacceptable measurements.
 
 ### Measurement field names
 
-For Azure vTMP attestations, the numbered fields are PCR register indexes.  For
-example the following specifies PCRs 4 and 9:
+For Azure vTMP attestations, the preferred field names are PCR register
+indexes prefixed with `pcr` or `PCR`. For example the following specifies PCRs
+4 and 9:
 
 ```JSON
 {
     "measurement_id": "cvm-image-azure-tdx.rootfs-20241107200854.wic.vhd",
     "attestation_type": "azure-tdx",
     "measurements": {
-        "4": {
+        "pcr4": {
             "expected_any": ["1b8cd655f5ebdf50bedabfb5db6b896a0a7c56de54f318103a2de1e7cea57b6b"]
         },
-        "9": {
+        "pcr9": {
             "expected_any": ["992465f922102234c196f596fdaba86ea16eaa4c264dc425ec26bc2d1c364472"]
         }
     }
 }
 ```
 
-All other attestation types are DCAP based, where the TDX registers are given as
-follows:
+Legacy numeric field names are still supported for backwards compatibility:
+
+- `"4"` - PCR 4
+- `"9"` - PCR 9
+- `"11"` - PCR 11
+- and so on for valid PCR indices `0` through `23`
+
+All other attestation types are DCAP based. In measurement-policy JSON, the
+preferred field names are the register names and they are matched
+case-insensitively:
+
+- `mrtd` - MRTD
+- `rtmr0` - RTMR0
+- `rtmr1` - RTMR1
+- `rtmr2` - RTMR2
+- `rtmr3` - RTMR3
+
+Legacy numeric field names are still supported for backwards compatibility:
 
 - "0" - MRTD
 - "1" - RTMR0
