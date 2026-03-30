@@ -1,0 +1,46 @@
+name: Test
+
+on: [push, pull_request]
+
+jobs:
+  build_and_test:
+    name: "CI: Build & Test"
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libtss2-dev
+
+    - name: Set up stable Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Set up nightly Rust for clippy/fmt
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: rustfmt, clippy
+
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Check formatting using nightly
+      run: cargo +nightly fmt --all -- --check
+
+    - name: Run cargo clippy using nightly
+      run: cargo +nightly clippy --workspace --features azure -- -D warnings
+
+    - name: Run cargo test
+      run: cargo test --workspace --features azure --all-targets
