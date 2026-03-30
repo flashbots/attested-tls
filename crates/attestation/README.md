@@ -4,6 +4,7 @@ Attestation generation and verification for confidential VMs, plus measurement
 policy handling.
 
 This crate provides:
+
 - Attestation type detection (`none`, `dcap-tdx`, `gcp-tdx`, and `azure-tdx`
   when enabled)
 - Attestation generation and verification for DCAP and (optionally) Azure
@@ -21,7 +22,7 @@ be installed. On Debian-based systems tpm2 is provided by
 [`libtss2-dev`](https://packages.debian.org/trixie/libtss2-dev), and on nix
 `tpm2-tss`. This dependency is currently not packaged for MacOS, meaning
 currently it is not possible to compile or run with the `azure` feature on
-MacOS. 
+MacOS.
 
 This feature is disabled by default. Note that without this feature,
 verification of azure attestations is not possible and azure attestations will
@@ -45,7 +46,7 @@ These are the attestation type names used in the measurements file.
 
 - `none` - No attestation provided
 - `gcp-tdx` - DCAP TDX on Google Cloud Platform
-- `azure-tdx` - TDX on Azure, with vTPM attestation 
+- `azure-tdx` - TDX on Azure, with vTPM attestation
 - `qemu-tdx` - TDX on Qemu (no cloud platform)
 - `dcap-tdx` - DCAP TDX (platform not specified)
 
@@ -77,6 +78,7 @@ type and set of measurements.
 This aims to match the formatting used by `cvm-reverse-proxy`.
 
 These objects have the following fields:
+
 - `measurement_id` - a name used to describe the entry. For example the name and
   version of the CVM OS image that these measurements correspond to.
 - `attestation_type` - a string containing one of the attestation types
@@ -86,6 +88,7 @@ These objects have the following fields:
   below).
 
 Each measurement register entry supports two mutually exclusive fields:
+
 - `expected_any` - **(recommended)** an array of hex-encoded measurement values.
   The attestation is accepted if the actual measurement matches **any** value in
   the list (OR semantics).
@@ -94,7 +97,7 @@ Each measurement register entry supports two mutually exclusive fields:
 
 Example using `expected_any` (recommended):
 
-```JSON 
+```JSON
 [
   {
     "measurement_id": "dcap-tdx-example",
@@ -133,7 +136,7 @@ Example using `expected_any` (recommended):
 The `expected_any` field is useful when multiple measurement values should be
 accepted for a register (e.g., for different versions of the firmware):
 
-```JSON 
+```JSON
 {
   "mrtd": {
     "expected_any": [
