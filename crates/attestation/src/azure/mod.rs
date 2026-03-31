@@ -1,6 +1,8 @@
 //! Microsoft Azure vTPM attestation evidence generation and verification
 mod ak_certificate;
 mod nv_index;
+use std::time::Duration;
+
 use ak_certificate::{read_ak_certificate_from_tpm, verify_ak_cert_with_azure_roots};
 use az_tdx_vtpm::{hcl, imds, vtpm};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
@@ -12,6 +14,9 @@ use thiserror::Error;
 use x509_parser::prelude::*;
 
 use crate::{dcap::verify_dcap_attestation_with_given_timestamp, measurements::MultiMeasurements};
+
+/// Used in attestation type detection to check if we are on Azure
+const AZURE_METADATA_API: &str = "http://169.254.169.254/metadata/instance";
 
 /// The attestation evidence payload that gets sent over the channel
 #[derive(Debug, Serialize, Deserialize)]
@@ -264,6 +269,24 @@ impl RsaPubKey {
             e: BigUint::from_bytes_be(&rsa_from_pkey.e().to_vec()),
         })
     }
+}
+
+/// Detect whether we are on Azure and can make an Azure vTPM attestation
+pub async fn detect_azure_cvm() -> Result<bool, reqwest::Error> {
+    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build()?;
+
+    let resp = client.get(AZURE_METADATA_API).header("Metadata", "true").send().await;
+
+    if let Ok(r) = resp &&
+        r.status().is_success() &&
+        r.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"))
+    {
+        return Ok(az_tdx_vtpm::is_tdx_cvm().unwrap_or(false));
+    }
+    Ok(false)
 }
 
 /// An error when generating or verifying a Microsoft Azure vTPM attestation
