@@ -17,10 +17,12 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y pkg-config libtss2-dev
 
-    - name: Set up Rust
+    - name: Set up stable Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Set up nightly Rust for clippy/fmt
       uses: dtolnay/rust-toolchain@nightly
       with:
-        toolchain: nightly
         components: rustfmt, clippy
 
     - name: Cache dependencies
@@ -34,11 +36,11 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-
 
-    - name: Check formatting
-      run: cargo fmt --all -- --check
+    - name: Check formatting using nightly
+      run: cargo +nightly fmt --all -- --check
 
-    - name: Run cargo clippy
-      run: cargo clippy --workspace --features azure -- -D warnings
+    - name: Run cargo clippy using nightly
+      run: cargo +nightly clippy --workspace --features azure -- -D warnings
 
     - name: Run cargo test
       run: cargo test --workspace --features azure --all-targets

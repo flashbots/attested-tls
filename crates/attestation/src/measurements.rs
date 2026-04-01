@@ -36,6 +36,45 @@ impl TryFrom<u8> for DcapMeasurementRegister {
     }
 }
 
+impl DcapMeasurementRegister {
+    fn from_policy_key(value: &str) -> Result<Self, MeasurementFormatError> {
+        // For backwards compatiblity support numeric field names where
+        // "0" is MRTD, "1" is RTMR0, etc.
+        if let Ok(index) = value.parse::<u8>() {
+            return Self::try_from(index);
+        }
+
+        match value.to_ascii_lowercase().as_str() {
+            "mrtd" => Ok(Self::MRTD),
+            "rtmr0" => Ok(Self::RTMR0),
+            "rtmr1" => Ok(Self::RTMR1),
+            "rtmr2" => Ok(Self::RTMR2),
+            "rtmr3" => Ok(Self::RTMR3),
+            _ => Err(MeasurementFormatError::BadRegisterIndex),
+        }
+    }
+}
+
+fn parse_azure_pcr_index(value: &str) -> Result<u32, MeasurementFormatError> {
+    // For backwards compatibility support bare numeric field names. Also
+    // accept a clearer case-insensitive "pcr" prefix, e.g. "pcr4".
+    let index = if let Ok(index) = value.parse::<u32>() {
+        index
+    } else if let Some(suffix) = value.strip_prefix("pcr").or_else(|| value.strip_prefix("PCR")) {
+        suffix.parse::<u32>()?
+    } else if value.get(..3).is_some_and(|prefix| prefix.eq_ignore_ascii_case("pcr")) {
+        value[3..].parse::<u32>()?
+    } else {
+        return Err(MeasurementFormatError::ParseInt(value.parse::<u32>().unwrap_err()));
+    };
+
+    if index > 23 {
+        return Err(MeasurementFormatError::BadRegisterIndex);
+    }
+
+    Ok(index)
+}
+
 /// Represents a set of measurements values for one of the supported CVM
 /// platforms
 #[derive(Clone, PartialEq)]
@@ -49,7 +88,7 @@ impl fmt::Debug for MultiMeasurements {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Dcap(measurements) => {
-                f.debug_tuple("Dcap").field(&DcapHexDebug(measurements)).finish()
+                f.debug_tuple("DCAP").field(&DcapHexDebug(measurements)).finish()
             }
             Self::Azure(measurements) => {
                 f.debug_tuple("Azure").field(&AzureHexDebug(measurements)).finish()
@@ -59,7 +98,7 @@ impl fmt::Debug for MultiMeasurements {
     }
 }
 
-/// Used to display measurements as hex
+/// Used to display DCAP measurements as hex
 struct DcapHexDebug<'a>(&'a HashMap<DcapMeasurementRegister, [u8; 48]>);
 
 impl fmt::Debug for DcapHexDebug<'_> {
@@ -76,7 +115,7 @@ impl fmt::Debug for DcapHexDebug<'_> {
     }
 }
 
-/// Used to display measurements as hex
+/// Used to display Azure measurements as hex
 struct AzureHexDebug<'a>(&'a HashMap<u32, [u8; 32]>);
 
 impl fmt::Debug for AzureHexDebug<'_> {
@@ -194,7 +233,7 @@ impl MultiMeasurements {
     }
 }
 
-/// All-zero measurment values used in some tests
+/// All-zero measurement values used in some tests
 #[cfg(any(test, feature = "mock"))]
 pub fn mock_dcap_measurements() -> MultiMeasurements {
     MultiMeasurements::Dcap(HashMap::from([
@@ -379,7 +418,7 @@ impl MeasurementPolicy {
     }
 
     /// Whether or not we require attestation
-    pub fn has_remote_attestion(&self) -> bool {
+    pub fn has_remote_attestation(&self) -> bool {
         !self
             .accepted_measurements
             .iter()
@@ -464,27 +503,21 @@ impl MeasurementPolicy {
             }
         }
 
-        let measurements_simple: Vec<MeasurementRecordSimple> =
-            serde_json::from_slice(&json_bytes)?;
+        let records_simple: Vec<MeasurementRecordSimple> = serde_json::from_slice(&json_bytes)?;
 
         let mut measurement_policy = Vec::new();
 
-        for measurement in measurements_simple {
+        for record in records_simple {
             let attestation_type =
-                serde_json::from_value(serde_json::Value::String(measurement.attestation_type))?;
+                serde_json::from_value(serde_json::Value::String(record.attestation_type))?;
 
-            if let Some(measurements) = measurement.measurements {
+            if let Some(measurements) = record.measurements {
                 let expected_measurements = match attestation_type {
                     AttestationType::AzureTdx => {
                         let azure_measurements = measurements
                             .iter()
                             .map(|(index_str, entry)| {
-                                let index: u32 = index_str.parse()?;
-
-                                if index > 23 {
-                                    return Err(MeasurementFormatError::BadRegisterIndex);
-                                }
-
+                                let index = parse_azure_pcr_index(index_str)?;
                                 Ok((index, parse_measurement_entry::<32>(entry, index_str)?))
                             })
                             .collect::<Result<HashMap<u32, Vec<[u8; 32]>>, MeasurementFormatError>>(
@@ -496,9 +529,8 @@ impl MeasurementPolicy {
                         measurements
                             .iter()
                             .map(|(index_str, entry)| {
-                                let index: u8 = index_str.parse()?;
                                 Ok((
-                                    DcapMeasurementRegister::try_from(index)?,
+                                    DcapMeasurementRegister::from_policy_key(index_str)?,
                                     parse_measurement_entry::<48>(entry, index_str)?,
                                 ))
                             })
@@ -510,7 +542,7 @@ impl MeasurementPolicy {
                 };
 
                 measurement_policy.push(MeasurementRecord {
-                    measurement_id: measurement.measurement_id.unwrap_or_default(),
+                    measurement_id: record.measurement_id.unwrap_or_default(),
                     measurements: expected_measurements,
                 });
             } else {
@@ -600,13 +632,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_remote_buildernet_measurements() {
-        // Check that the buildernet measurements are available and parse correctly
-        let policy = MeasurementPolicy::from_file_or_url(
-            "https://measurements.builder.flashbots.net".to_string(),
-        )
-        .await
-        .unwrap();
+    async fn test_buildernet_measurements() {
+        // Refresh this fixture explicitly with:
+        //   sh crates/attestation/test-assets/
+        // refresh-buildernet-measurements-fixture.sh
+        let policy =
+            MeasurementPolicy::from_file("test-assets/buildernet_measurements.json".into())
+                .await
+                .unwrap();
 
         assert!(!policy.accepted_measurements.is_empty());
 
@@ -629,7 +662,7 @@ mod tests {
                 "measurement_id": "test-any",
                 "attestation_type": "dcap-tdx",
                 "measurements": {
-                    "0": {
+                    "mrtd": {
                         "expected_any": [
                             "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
                             "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
@@ -658,7 +691,7 @@ mod tests {
                 "measurement_id": "test-or",
                 "attestation_type": "dcap-tdx",
                 "measurements": {
-                    "0": {
+                    "MRTD": {
                         "expected_any": [
                             "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
                             "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
@@ -780,19 +813,212 @@ mod tests {
         assert!(policy.check_measurement(&measurements3).is_err());
     }
 
+    #[tokio::test]
+    async fn test_parse_case_insensitive_named_dcap_registers() {
+        let json = r#"[
+            {
+                "measurement_id": "named-registers",
+                "attestation_type": "dcap-tdx",
+                "measurements": {
+                    "mrtd": {
+                        "expected_any": ["000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"]
+                    },
+                    "RTMR0": {
+                        "expected_any": ["111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"]
+                    },
+                    "rTmR1": {
+                        "expected_any": ["222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222"]
+                    },
+                    "rtmr2": {
+                        "expected_any": ["333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333"]
+                    },
+                    "RTMR3": {
+                        "expected_any": ["444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444"]
+                    }
+                }
+            }
+        ]"#;
+
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
+        let record = &policy.accepted_measurements[0];
+
+        if let ExpectedMeasurements::Dcap(dcap) = &record.measurements {
+            assert_eq!(dcap.keys().collect::<HashSet<_>>().len(), 5);
+            assert!(dcap.contains_key(&DcapMeasurementRegister::MRTD));
+            assert!(dcap.contains_key(&DcapMeasurementRegister::RTMR0));
+            assert!(dcap.contains_key(&DcapMeasurementRegister::RTMR1));
+            assert!(dcap.contains_key(&DcapMeasurementRegister::RTMR2));
+            assert!(dcap.contains_key(&DcapMeasurementRegister::RTMR3));
+        } else {
+            panic!("Expected ExpectedMeasurements::Dcap");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_mixed_numeric_and_named_dcap_registers() {
+        let json = r#"[
+            {
+                "measurement_id": "mixed-keys",
+                "attestation_type": "dcap-tdx",
+                "measurements": {
+                    "0": {
+                        "expected_any": ["000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"]
+                    },
+                    "rtmr0": {
+                        "expected_any": ["111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"]
+                    }
+                }
+            }
+        ]"#;
+
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
+        let record = &policy.accepted_measurements[0];
+
+        if let ExpectedMeasurements::Dcap(dcap) = &record.measurements {
+            assert!(dcap.contains_key(&DcapMeasurementRegister::MRTD));
+            assert!(dcap.contains_key(&DcapMeasurementRegister::RTMR0));
+        } else {
+            panic!("Expected ExpectedMeasurements::Dcap");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_invalid_named_dcap_register_error() {
+        let json = r#"[
+            {
+                "attestation_type": "dcap-tdx",
+                "measurements": {
+                    "rtmr4": {
+                        "expected_any": ["000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"]
+                    }
+                }
+            }
+        ]"#;
+
+        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec());
+        assert!(matches!(result, Err(MeasurementFormatError::BadRegisterIndex)));
+    }
+
+    #[tokio::test]
+    async fn test_parse_azure_pcr_prefixed_registers() {
+        let json = r#"[
+            {
+                "measurement_id": "azure-pcr-prefixed",
+                "attestation_type": "azure-tdx",
+                "measurements": {
+                    "pcr4": {
+                        "expected_any": ["1111111111111111111111111111111111111111111111111111111111111111"]
+                    },
+                    "pcr9": {
+                        "expected_any": ["2222222222222222222222222222222222222222222222222222222222222222"]
+                    },
+                    "pcr11": {
+                        "expected_any": ["3333333333333333333333333333333333333333333333333333333333333333"]
+                    }
+                }
+            }
+        ]"#;
+
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
+        let record = &policy.accepted_measurements[0];
+
+        if let ExpectedMeasurements::Azure(azure) = &record.measurements {
+            assert_eq!(azure.keys().collect::<HashSet<_>>(), HashSet::from([&4, &9, &11]));
+        } else {
+            panic!("Expected ExpectedMeasurements::Azure");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_case_insensitive_azure_pcr_prefix() {
+        let json = r#"[
+            {
+                "measurement_id": "azure-case-insensitive",
+                "attestation_type": "azure-tdx",
+                "measurements": {
+                    "PCR4": {
+                        "expected_any": ["1111111111111111111111111111111111111111111111111111111111111111"]
+                    },
+                    "PcR9": {
+                        "expected_any": ["2222222222222222222222222222222222222222222222222222222222222222"]
+                    }
+                }
+            }
+        ]"#;
+
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
+        let record = &policy.accepted_measurements[0];
+
+        if let ExpectedMeasurements::Azure(azure) = &record.measurements {
+            assert_eq!(azure.keys().collect::<HashSet<_>>(), HashSet::from([&4, &9]));
+        } else {
+            panic!("Expected ExpectedMeasurements::Azure");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_mixed_numeric_and_prefixed_azure_pcr_keys() {
+        let json = r#"[
+            {
+                "measurement_id": "azure-mixed-keys",
+                "attestation_type": "azure-tdx",
+                "measurements": {
+                    "4": {
+                        "expected_any": ["1111111111111111111111111111111111111111111111111111111111111111"]
+                    },
+                    "pcr9": {
+                        "expected_any": ["2222222222222222222222222222222222222222222222222222222222222222"]
+                    }
+                }
+            }
+        ]"#;
+
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
+        let record = &policy.accepted_measurements[0];
+
+        if let ExpectedMeasurements::Azure(azure) = &record.measurements {
+            assert_eq!(azure.keys().collect::<HashSet<_>>(), HashSet::from([&4, &9]));
+        } else {
+            panic!("Expected ExpectedMeasurements::Azure");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_invalid_prefixed_azure_pcr_key_error() {
+        let json = r#"[
+            {
+                "attestation_type": "azure-tdx",
+                "measurements": {
+                    "pcr24": {
+                        "expected_any": ["1111111111111111111111111111111111111111111111111111111111111111"]
+                    }
+                }
+            }
+        ]"#;
+
+        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec());
+        assert!(matches!(result, Err(MeasurementFormatError::BadRegisterIndex)));
+    }
+
+    /// Checks that the Debug implementation for MultiMeasurements displays
+    /// them as hex
     #[test]
     fn test_multi_measurements_debug_prints_hex() {
-        let dcap =
-            MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, [0xabu8; 48])]));
+        let register_value = [0xabu8; 48];
+        let dcap = MultiMeasurements::Dcap(HashMap::from([(
+            DcapMeasurementRegister::MRTD,
+            register_value,
+        )]));
         let dcap_debug = format!("{dcap:?}");
-        assert!(dcap_debug.contains("Dcap"));
-        assert!(dcap_debug.contains("abababab"));
-        assert!(!dcap_debug.contains("[171"));
+        assert!(dcap_debug.contains("DCAP"));
+        assert!(dcap_debug.contains(&hex::encode(register_value)));
+        assert!(!dcap_debug.contains(&format!("{register_value:?}")));
 
-        let azure = MultiMeasurements::Azure(HashMap::from([(9u32, [0x11u8; 32])]));
+        let azure_register_value = [0xabu8; 32];
+        let azure = MultiMeasurements::Azure(HashMap::from([(9u32, azure_register_value)]));
         let azure_debug = format!("{azure:?}");
         assert!(azure_debug.contains("Azure"));
-        assert!(azure_debug.contains("11111111"));
-        assert!(!azure_debug.contains("[17"));
+        assert!(azure_debug.contains(&hex::encode(azure_register_value)));
+        assert!(!azure_debug.contains(&format!("{azure_register_value:?}")));
     }
 }
