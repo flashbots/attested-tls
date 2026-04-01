@@ -37,6 +37,39 @@ impl AttestationExchangeMessage {
     pub fn without_attestation() -> Self {
         Self { attestation_type: AttestationType::None, attestation: Vec::new() }
     }
+
+    /// Extract the measurements from the attestation, if present, but do
+    /// not verify
+    pub fn get_measurements(&self) -> Result<Option<MultiMeasurements>, AttestationError> {
+        match self.attestation_type {
+            AttestationType::None => Ok(None),
+            AttestationType::AzureTdx => {
+                #[cfg(feature = "azure")]
+                {
+                    Ok(Some(azure::get_measurements(&self.attestation)?))
+                }
+                #[cfg(not(feature = "azure"))]
+                {
+                    Err(AttestationError::AttestationTypeNotSupported)
+                }
+            }
+            _ => {
+                #[cfg(any(test, feature = "mock"))]
+                {
+                    let quote = tdx_quote::Quote::from_bytes(&self.attestation)
+                        .map_err(DcapVerificationError::from)?;
+                    Ok(Some(MultiMeasurements::from_tdx_quote(&quote)))
+                }
+
+                #[cfg(not(any(test, feature = "mock")))]
+                {
+                    let quote = dcap_qvl::verify::Quote::parse(&self.attestation)
+                        .map_err(DcapVerificationError::from)?;
+                    Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
+                }
+            }
+        }
+    }
 }
 
 /// Type of attestation used
