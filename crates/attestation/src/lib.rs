@@ -13,6 +13,7 @@ use std::{
 
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
+use pccs::Pccs;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -253,9 +254,26 @@ pub struct AttestationVerifier {
     ///
     /// This provides a workaround for a known outdated FMSPC used by Azure
     pub override_azure_outdated_tcb: bool,
+    /// Internal cache for collateral
+    pub internal_pccs: Option<Pccs>,
 }
 
 impl AttestationVerifier {
+    pub fn new(
+        measurement_policy: MeasurementPolicy,
+        pccs_url: Option<String>,
+        dump_dcap_quotes: bool,
+        override_azure_outdated_tcb: bool,
+    ) -> Self {
+        Self {
+            measurement_policy,
+            pccs_url: pccs_url.clone(),
+            dump_dcap_quotes,
+            override_azure_outdated_tcb,
+            internal_pccs: Some(Pccs::new(pccs_url)),
+        }
+    }
+
     /// Create an [AttestationVerifier] which will only allow no attestation
     /// and will reject if one is given
     pub fn expect_none() -> Self {
@@ -264,6 +282,7 @@ impl AttestationVerifier {
             pccs_url: None,
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
+            internal_pccs: None,
         }
     }
 
@@ -275,6 +294,7 @@ impl AttestationVerifier {
             pccs_url: None,
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
+            internal_pccs: None,
         }
     }
 
@@ -309,7 +329,7 @@ impl AttestationVerifier {
                     azure::verify_azure_attestation(
                         attestation_exchange_message.attestation,
                         expected_input_data,
-                        self.pccs_url.clone(),
+                        self.internal_pccs.clone(),
                         self.override_azure_outdated_tcb,
                     )
                     .await?
@@ -323,7 +343,7 @@ impl AttestationVerifier {
                 dcap::verify_dcap_attestation(
                     attestation_exchange_message.attestation,
                     expected_input_data,
-                    self.pccs_url.clone(),
+                    self.internal_pccs.clone(),
                 )
                 .await?
             }
