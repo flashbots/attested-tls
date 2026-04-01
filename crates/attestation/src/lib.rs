@@ -19,8 +19,7 @@ use thiserror::Error;
 use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy};
 
 /// Used in attestation type detection to check if we are on GCP
-const GCP_METADATA_API: &str =
-    "http://metadata.google.internal/computeMetadata/v1/project/project-id";
+const GCP_METADATA_API: &str = "http://metadata.google.internal";
 
 /// An attestation payload together with its type
 #[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
@@ -73,12 +72,12 @@ impl AttestationExchangeMessage {
     }
 }
 
-/// Type of attestaion used
+/// Type of attestation used
 /// Only supported (or soon-to-be supported) types are given
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AttestationType {
-    /// No attestion
+    /// No attestation
     None,
     /// TDX on Google Cloud Platform
     GcpTdx,
@@ -155,7 +154,7 @@ pub struct AttestationGenerator {
 }
 
 impl AttestationGenerator {
-    /// Create an attesation generator with given attestation type
+    /// Create an attestation generator with given attestation type
     pub fn new(
         attestation_type: AttestationType,
         attestation_provider_url: Option<String>,
@@ -281,20 +280,22 @@ pub struct AttestationVerifier {
     /// always injected into HTTP headers, so that they can be verified
     /// upstream A PCCS service to use - defaults to Intel PCS
     pub pccs_url: Option<String>,
-    /// Whether to log quotes to a file
-    pub log_dcap_quote: bool,
+    /// Whether to write quotes to files on disk
+    pub dump_dcap_quotes: bool,
     /// Whether to override outdated TCB when on Azure
+    ///
+    /// This provides a workaround for a known outdated FMSPC used by Azure
     pub override_azure_outdated_tcb: bool,
 }
 
 impl AttestationVerifier {
-    /// Create an [AttestationVerifier] which will allow no remote
-    /// attestation
+    /// Create an [AttestationVerifier] which will only allow no attestation
+    /// and will reject if one is given
     pub fn expect_none() -> Self {
         Self {
             measurement_policy: MeasurementPolicy::expect_none(),
             pccs_url: None,
-            log_dcap_quote: false,
+            dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
         }
     }
@@ -305,7 +306,7 @@ impl AttestationVerifier {
         Self {
             measurement_policy: MeasurementPolicy::mock(),
             pccs_url: None,
-            log_dcap_quote: false,
+            dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
         }
     }
@@ -318,15 +319,15 @@ impl AttestationVerifier {
         expected_input_data: [u8; 64],
     ) -> Result<Option<MultiMeasurements>, AttestationError> {
         let attestation_type = attestation_exchange_message.attestation_type;
-        tracing::debug!("Verifing {attestation_type} attestation");
+        tracing::debug!("Verifying {attestation_type} attestation");
 
-        if self.log_dcap_quote {
+        if self.dump_dcap_quotes {
             log_attestation(&attestation_exchange_message).await;
         }
 
         let measurements = match attestation_type {
             AttestationType::None => {
-                if self.has_remote_attestion() {
+                if self.has_remote_attestation() {
                     return Err(AttestationError::AttestationTypeNotAccepted);
                 }
                 if attestation_exchange_message.attestation.is_empty() {
@@ -369,8 +370,8 @@ impl AttestationVerifier {
     }
 
     /// Whether we allow no remote attestation
-    pub fn has_remote_attestion(&self) -> bool {
-        self.measurement_policy.has_remote_attestion()
+    pub fn has_remote_attestation(&self) -> bool {
+        self.measurement_policy.has_remote_attestation()
     }
 }
 
@@ -390,13 +391,7 @@ async fn log_attestation(attestation: &AttestationExchangeMessage) {
 /// Test whether it looks like we are running on GCP by hitting the metadata
 /// API
 async fn running_on_gcp() -> Result<bool, AttestationError> {
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("Metadata-Flavor", "Google".parse().expect("Cannot parse header"));
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(200))
-        .default_headers(headers)
-        .build()?;
+    let client = reqwest::Client::builder().timeout(Duration::from_millis(200)).build()?;
 
     let resp = client.get(GCP_METADATA_API).send().await;
 
@@ -408,8 +403,8 @@ async fn running_on_gcp() -> Result<bool, AttestationError> {
     Ok(false)
 }
 
-/// If an attestion provider service is used, we ensure that it looks like a
-/// local IP
+/// If an attestation provider service is used, we ensure that it looks like
+/// a local IP
 ///
 /// This is to avoid dangerous configuration where the attestation is
 /// provided by a remote machine
@@ -424,6 +419,7 @@ fn map_attestation_provider_url(url: String) -> Result<String, AttestationError>
     };
 
     let url = url.strip_suffix('/').unwrap_or(&url).to_string();
+    let url = url.strip_suffix("/attest").unwrap_or(&url).to_string();
 
     // If compiled in test mode, skip this check
     if !cfg!(test) {

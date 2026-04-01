@@ -1,0 +1,3 @@
+MD013: true  # long lines
+MD033: false # in-line html
+MD037: false # spaces in emphasis
