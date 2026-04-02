@@ -5,6 +5,7 @@ members = [
     "crates/attested-tls",
     "crates/nested-tls",
     "crates/attestation",
+    "crates/attestation-provider-server",
 ]
 
 [workspace.lints.rust]
