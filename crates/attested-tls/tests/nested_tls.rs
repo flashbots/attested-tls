@@ -84,8 +84,10 @@ fn plain_tls_config_pair(provider: Arc<CryptoProvider>) -> (ServerConfig, Client
 /// Create attested server TLS config with mock DCAP attestation and
 /// self-signed certs
 async fn attested_server_config(server_name: &str, provider: Arc<CryptoProvider>) -> ServerConfig {
+    let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
     let resolver = AttestedCertificateResolver::new_with_provider(
         AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+        &key_pair,
         None,
         server_name.to_string(),
         vec![],

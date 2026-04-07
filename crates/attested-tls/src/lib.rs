@@ -16,7 +16,7 @@ pub use ra_tls::cert::CaCert;
 use ra_tls::{
     attestation::{Attestation, AttestationQuote, VersionedAttestation},
     cert::CertRequest,
-    rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256},
+    rcgen::KeyPair,
 };
 use rustls::{
     DigitallySignedStruct,
@@ -119,12 +119,14 @@ impl AttestedCertificateResolver {
     /// certificates will be self signed
     pub async fn new(
         attestation_generator: AttestationGenerator,
+        key_pair: &KeyPair,
         ca: Option<CaCert>,
         subject: String,
         subject_alt_names: Vec<String>,
     ) -> Result<Self, AttestedTlsError> {
         Self::new_with_provider(
             attestation_generator,
+            key_pair,
             ca,
             subject,
             subject_alt_names,
@@ -136,6 +138,7 @@ impl AttestedCertificateResolver {
     /// Also provide a crypto provider
     pub async fn new_with_provider(
         attestation_generator: AttestationGenerator,
+        key_pair: &KeyPair,
         ca: Option<CaCert>,
         subject: String,
         subject_alt_names: Vec<String>,
@@ -144,14 +147,12 @@ impl AttestedCertificateResolver {
         debug_assert!(CERTIFICATE_RENEWAL_LEAD_TIME < CERTIFICATE_VALIDITY);
         let subject_alt_names = normalized_subject_alt_names(subject.as_str(), subject_alt_names);
 
-        // Generate keypair
-        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
         let key_pair_der = key_pair.serialize_der();
-        let key = Self::load_signing_key(&key_pair, provider)?;
+        let key = Self::load_signing_key(key_pair, provider)?;
 
         // Generate initial attested certificate
         let certificate = Self::issue_ra_cert_chain(
-            &key_pair,
+            key_pair,
             ca.as_ref(),
             subject.as_str(),
             &subject_alt_names,
@@ -178,14 +179,14 @@ impl AttestedCertificateResolver {
     /// Create an attested certificate chain - either self-signed or with
     /// the provided CA
     async fn issue_ra_cert_chain(
-        key: &KeyPair,
+        key_pair: &KeyPair,
         ca: Option<&CaCert>,
         subject: &str,
         subject_alt_names: &[String],
         attestation_generator: &AttestationGenerator,
     ) -> Result<Vec<CertificateDer<'static>>, AttestedTlsError> {
         tracing::debug!("Generating new remote-attested ceritifcate for {subject}");
-        let pubkey = key.public_key_der();
+        let pubkey = key_pair.public_key_der();
         let now = SystemTime::now();
         let not_after = now + CERTIFICATE_VALIDITY;
 
@@ -199,7 +200,7 @@ impl AttestedCertificateResolver {
         .await?;
 
         let cert_request = CertRequest::builder()
-            .key(key)
+            .key(key_pair)
             .subject(subject)
             .alt_names(subject_alt_names)
             .not_before(now)
@@ -806,7 +807,13 @@ pub enum AttestedTlsError {
 mod tests {
     use std::{io::Cursor, sync::Arc};
 
-    use ra_tls::rcgen::{BasicConstraints, CertificateParams, IsCa};
+    use ra_tls::rcgen::{
+        BasicConstraints,
+        CertificateParams,
+        IsCa,
+        KeyPair,
+        PKCS_ECDSA_P256_SHA256,
+    };
     use rustls::{
         CertificateError,
         ClientConfig,
@@ -840,8 +847,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn certificate_resolver_creates_initial_certificate() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            &key_pair,
             None,
             "foo".to_string(),
             vec![],
@@ -859,8 +868,10 @@ mod tests {
     async fn server_and_client_configs_complete_a_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let server_name = "foo";
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            &key_pair,
             None,
             server_name.to_string(),
             vec![],
@@ -908,12 +919,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn ca_signed_server_and_client_configs_complete_a_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let server_name = "foo";
         let ca = test_ca();
         let ca_cert = CertificateDer::from_pem_slice(ca.pem_cert.as_bytes()).unwrap();
 
         let resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            &key_pair,
             Some(ca),
             server_name.to_string(),
             vec![],
@@ -969,8 +982,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn certificate_is_renewed_before_expiry() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            &key_pair,
             None,
             "foo".to_string(),
             vec![],
@@ -995,10 +1010,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn server_and_client_configs_complete_a_mutual_auth_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let server_name = "foo";
 
         let server_resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            &key_pair,
             None,
             server_name.to_string(),
             vec![],
@@ -1009,6 +1026,7 @@ mod tests {
 
         let client_resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            &key_pair,
             None,
             "client".to_string(),
             vec![],
@@ -1063,10 +1081,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn alternate_san_completes_a_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let subject = "foo";
         let alternate_name = "bar";
         let resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            &key_pair,
             None,
             subject.to_string(),
             vec![alternate_name.to_string(), subject.to_string()],
@@ -1156,8 +1176,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn self_signed_attested_certificate_with_wrong_name_is_rejected() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            &key_pair,
             None,
             "foo".to_string(),
             vec![],
@@ -1189,8 +1211,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn certificate_binding_changes_when_identity_changes() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            &key_pair,
             None,
             "foo".to_string(),
             vec![],
@@ -1229,8 +1253,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn attestation_rejection_returns_application_verification_failure() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            &key_pair,
             None,
             "foo".to_string(),
             vec![],
@@ -1262,8 +1288,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn verifier_reuses_trusted_certificate_cache() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            &key_pair,
             None,
             "foo".to_string(),
             vec![],
