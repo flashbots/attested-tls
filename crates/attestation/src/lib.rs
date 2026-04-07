@@ -633,12 +633,14 @@ mod tests {
         addr
     }
 
+    #[test]
     fn attestation_detection_does_not_panic() {
         // We dont enforce what platform the test is run on, only that the function
         // does not panic
         let _ = AttestationGenerator::new_with_detection(None, None);
     }
 
+    #[test]
     fn running_on_gcp_check_does_not_panic() {
         let _ = running_on_gcp();
     }
