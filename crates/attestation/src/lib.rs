@@ -102,7 +102,7 @@ impl AttestationType {
     }
 
     /// Detect what platform we are on by attempting an attestation
-    pub async fn detect() -> Result<Self, AttestationError> {
+    pub fn detect() -> Result<Self, AttestationError> {
         // First attempt azure, if the feature is present
         #[cfg(feature = "azure")]
         {
@@ -113,7 +113,7 @@ impl AttestationType {
         // Otherwise try DCAP quote - this internally checks that the quote provider
         // is `tdx_guest`
         if configfs_tsm::create_tdx_quote([0; 64]).is_ok() {
-            if running_on_gcp().await? {
+            if running_on_gcp()? {
                 return Ok(AttestationType::GcpTdx);
             } else {
                 return Ok(AttestationType::DcapTdx);
@@ -169,8 +169,8 @@ impl AttestationGenerator {
 
     /// Detect what confidential compute platform is present and create the
     /// appropriate attestation generator
-    pub async fn detect() -> Result<Self, AttestationError> {
-        Self::new_with_detection(None, None).await
+    pub fn detect() -> Result<Self, AttestationError> {
+        Self::new_with_detection(None, None)
     }
 
     /// Do not generate attestations
@@ -180,7 +180,7 @@ impl AttestationGenerator {
 
     /// Create an [AttestationGenerator] detecting the attestation type if
     /// it is not given
-    pub async fn new_with_detection(
+    pub fn new_with_detection(
         attestation_type_string: Option<String>,
         attestation_provider_url: Option<String>,
     ) -> Result<Self, AttestationError> {
@@ -195,7 +195,7 @@ impl AttestationGenerator {
         let attestation_type_string = attestation_type_string.unwrap_or_else(|| "auto".to_string());
         let attestation_type = if attestation_type_string == "auto" {
             tracing::info!("Doing attestation type detection...");
-            AttestationType::detect().await?
+            AttestationType::detect()?
         } else {
             serde_json::from_value(serde_json::Value::String(attestation_type_string))?
         };
@@ -390,10 +390,11 @@ async fn log_attestation(attestation: &AttestationExchangeMessage) {
 
 /// Test whether it looks like we are running on GCP by hitting the metadata
 /// API
-async fn running_on_gcp() -> Result<bool, AttestationError> {
-    let client = reqwest::Client::builder().timeout(Duration::from_millis(200)).build()?;
+fn running_on_gcp() -> Result<bool, AttestationError> {
+    let client =
+        reqwest::blocking::Client::builder().timeout(Duration::from_millis(200)).build()?;
 
-    let resp = client.get(GCP_METADATA_API).send().await;
+    let resp = client.get(GCP_METADATA_API).send();
 
     if let Ok(r) = resp {
         return Ok(r.status().is_success() &&
@@ -521,16 +522,14 @@ mod tests {
         addr
     }
 
-    #[tokio::test]
-    async fn attestation_detection_does_not_panic() {
+    fn attestation_detection_does_not_panic() {
         // We dont enforce what platform the test is run on, only that the function
         // does not panic
-        let _ = AttestationGenerator::new_with_detection(None, None).await;
+        let _ = AttestationGenerator::new_with_detection(None, None);
     }
 
-    #[tokio::test]
-    async fn running_on_gcp_check_does_not_panic() {
-        let _ = running_on_gcp().await;
+    fn running_on_gcp_check_does_not_panic() {
+        let _ = running_on_gcp();
     }
 
     #[tokio::test]
