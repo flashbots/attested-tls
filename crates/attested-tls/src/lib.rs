@@ -12,12 +12,12 @@ pub use attestation::{
     AttestationType,
     AttestationVerifier,
 };
-pub use ra_tls::cert::CaCert;
 use ra_tls::{
     attestation::{Attestation, AttestationQuote, VersionedAttestation},
     cert::CertRequest,
     rcgen::KeyPair,
 };
+pub use ra_tls::{cert::CaCert, rcgen};
 use rustls::{
     DigitallySignedStruct,
     DistinguishedName,
