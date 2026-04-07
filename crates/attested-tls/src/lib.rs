@@ -92,7 +92,7 @@ struct ResolverState {
     /// Attestation generator used when renewing ceritifcate
     attestation_generator: AttestationGenerator,
     /// Primary DNS name used as certificate subject / common name.
-    primary_name: String,
+    subject: String,
     /// DNS subject alternative names, including the primary name.
     subject_alt_names: Vec<String>,
 }
@@ -107,7 +107,7 @@ impl fmt::Debug for ResolverState {
             .field("key_pair_der_len", &self.key_pair_der.len())
             .field("certificate_chain_len", &certificate_chain_len)
             .field("attestation_generator", &self.attestation_generator)
-            .field("primary_name", &self.primary_name)
+            .field("subject", &self.subject)
             .field("subject_alt_names", &self.subject_alt_names)
             .finish()
     }
@@ -120,13 +120,13 @@ impl AttestedCertificateResolver {
     pub async fn new(
         attestation_generator: AttestationGenerator,
         ca: Option<CaCert>,
-        primary_name: String,
+        subject: String,
         subject_alt_names: Vec<String>,
     ) -> Result<Self, AttestedTlsError> {
         Self::new_with_provider(
             attestation_generator,
             ca,
-            primary_name,
+            subject,
             subject_alt_names,
             default_crypto_provider()?,
         )
@@ -137,13 +137,12 @@ impl AttestedCertificateResolver {
     pub async fn new_with_provider(
         attestation_generator: AttestationGenerator,
         ca: Option<CaCert>,
-        primary_name: String,
+        subject: String,
         subject_alt_names: Vec<String>,
         provider: Arc<CryptoProvider>,
     ) -> Result<Self, AttestedTlsError> {
         debug_assert!(CERTIFICATE_RENEWAL_LEAD_TIME < CERTIFICATE_VALIDITY);
-        let subject_alt_names =
-            normalized_subject_alt_names(primary_name.as_str(), subject_alt_names);
+        let subject_alt_names = normalized_subject_alt_names(subject.as_str(), subject_alt_names);
 
         // Generate keypair
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
@@ -154,7 +153,7 @@ impl AttestedCertificateResolver {
         let certificate = Self::issue_ra_cert_chain(
             &key_pair,
             ca.as_ref(),
-            primary_name.as_str(),
+            subject.as_str(),
             &subject_alt_names,
             &attestation_generator,
         )
@@ -166,7 +165,7 @@ impl AttestedCertificateResolver {
             ca: ca.map(Arc::new),
             key_pair_der,
             attestation_generator,
-            primary_name,
+            subject,
             subject_alt_names,
         });
 
@@ -181,11 +180,11 @@ impl AttestedCertificateResolver {
     async fn issue_ra_cert_chain(
         key: &KeyPair,
         ca: Option<&CaCert>,
-        primary_name: &str,
+        subject: &str,
         subject_alt_names: &[String],
         attestation_generator: &AttestationGenerator,
     ) -> Result<Vec<CertificateDer<'static>>, AttestedTlsError> {
-        tracing::debug!("Generating new remote-attested ceritifcate for {primary_name}");
+        tracing::debug!("Generating new remote-attested ceritifcate for {subject}");
         let pubkey = key.public_key_der();
         let now = SystemTime::now();
         let not_after = now + CERTIFICATE_VALIDITY;
@@ -194,14 +193,14 @@ impl AttestedCertificateResolver {
             pubkey,
             now,
             not_after,
-            primary_name,
+            subject,
             attestation_generator,
         )
         .await?;
 
         let cert_request = CertRequest::builder()
             .key(key)
-            .subject(primary_name)
+            .subject(subject)
             .alt_names(subject_alt_names)
             .not_before(now)
             .not_after(not_after)
@@ -239,11 +238,10 @@ impl AttestedCertificateResolver {
         pubkey: Vec<u8>,
         not_before: SystemTime,
         not_after: SystemTime,
-        primary_name: &str,
+        subject: &str,
         attestation_generator: &AttestationGenerator,
     ) -> Result<VersionedAttestation, AttestedTlsError> {
-        let report_data =
-            create_report_data(pubkey, not_before, not_after, primary_name.as_bytes())?;
+        let report_data = create_report_data(pubkey, not_before, not_after, subject.as_bytes())?;
         let attestation = attestation_generator.generate_attestation(report_data).await?;
         Ok(VersionedAttestation::V0 {
             attestation: Attestation {
@@ -286,7 +284,7 @@ impl AttestedCertificateResolver {
                 next_delay = match Self::issue_ra_cert_chain(
                     &key_pair,
                     current.ca.as_deref(),
-                    current.primary_name.as_str(),
+                    current.subject.as_str(),
                     &current.subject_alt_names,
                     &current.attestation_generator,
                 )
@@ -335,9 +333,9 @@ fn default_crypto_provider() -> Result<Arc<CryptoProvider>, AttestedTlsError> {
 }
 
 /// Ensures that SAN contains the primary hostname
-fn normalized_subject_alt_names(primary_name: &str, subject_alt_names: Vec<String>) -> Vec<String> {
+fn normalized_subject_alt_names(subject: &str, subject_alt_names: Vec<String>) -> Vec<String> {
     let mut normalized = Vec::with_capacity(subject_alt_names.len() + 1);
-    normalized.push(primary_name.to_string());
+    normalized.push(subject.to_string());
 
     for name in subject_alt_names {
         if !normalized.iter().any(|existing| existing == &name) {
@@ -1065,13 +1063,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn alternate_san_completes_a_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
-        let primary_name = "foo";
+        let subject = "foo";
         let alternate_name = "bar";
         let resolver = AttestedCertificateResolver::new_with_provider(
             AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
             None,
-            primary_name.to_string(),
-            vec![alternate_name.to_string(), primary_name.to_string()],
+            subject.to_string(),
+            vec![alternate_name.to_string(), subject.to_string()],
             provider.clone(),
         )
         .await
