@@ -113,7 +113,7 @@ impl AttestedCertificateResolver {
     /// Create a certificate resolver with a given attestation generator
     /// A private certificate authority can also be given - otherwise
     /// certificates will be self signed
-    pub async fn new(
+    pub fn new(
         attestation_generator: AttestationGenerator,
         key_pair: &KeyPair,
         ca: Option<CaCert>,
@@ -130,11 +130,10 @@ impl AttestedCertificateResolver {
             default_crypto_provider()?,
             certificate_validity_duration,
         )
-        .await
     }
 
     /// Also provide a crypto provider
-    pub async fn new_with_provider(
+    pub fn new_with_provider(
         attestation_generator: AttestationGenerator,
         key_pair: &KeyPair,
         ca: Option<CaCert>,
@@ -161,8 +160,7 @@ impl AttestedCertificateResolver {
             &subject_alt_names,
             &attestation_generator,
             certificate_validity_duration,
-        )
-        .await?;
+        )?;
 
         let state = Arc::new(ResolverState {
             key,
@@ -182,7 +180,7 @@ impl AttestedCertificateResolver {
 
     /// Create an attested certificate chain - either self-signed or with
     /// the provided CA
-    async fn issue_ra_cert_chain(
+    fn issue_ra_cert_chain(
         key_pair: &KeyPair,
         ca: Option<&CaCert>,
         subject: &str,
@@ -201,8 +199,7 @@ impl AttestedCertificateResolver {
             not_after,
             subject,
             attestation_generator,
-        )
-        .await?;
+        )?;
 
         let cert_request = CertRequest::builder()
             .key(key_pair)
@@ -240,7 +237,7 @@ impl AttestedCertificateResolver {
 
     /// Create an attestation, and format it to be used in certificate
     /// extension
-    async fn create_attestation_payload(
+    fn create_attestation_payload(
         pubkey: Vec<u8>,
         not_before: SystemTime,
         not_after: SystemTime,
@@ -248,7 +245,7 @@ impl AttestedCertificateResolver {
         attestation_generator: &AttestationGenerator,
     ) -> Result<VersionedAttestation, AttestedTlsError> {
         let report_data = create_report_data(pubkey, not_before, not_after, subject.as_bytes())?;
-        let attestation = attestation_generator.generate_attestation(report_data).await?;
+        let attestation = attestation_generator.generate_attestation(report_data)?;
         Ok(VersionedAttestation::V0 {
             attestation: Attestation {
                 quote: ra_tls::attestation::AttestationQuote::DstackTdx(
@@ -297,9 +294,7 @@ impl AttestedCertificateResolver {
                     &current.subject_alt_names,
                     &current.attestation_generator,
                     certificate_validity_duration,
-                )
-                .await
-                {
+                ) {
                     Ok(certificate) => {
                         *current.certificate.write().expect("Certificate lock poisoned") =
                             certificate;
@@ -879,7 +874,6 @@ mod tests {
             provider,
             Duration::from_secs(4),
         )
-        .await
         .unwrap();
 
         let certificate = resolver.state.certificate.read().unwrap();
@@ -900,7 +894,6 @@ mod tests {
             provider,
             CERTIFICATE_RENEWAL_RETRY_DELAY * 3,
         )
-        .await
         .unwrap_err();
 
         assert!(matches!(error, AttestedTlsError::InvalidCertificateValidityDuration { .. }));
@@ -920,7 +913,6 @@ mod tests {
             provider.clone(),
             Duration::from_secs(4),
         )
-        .await
         .unwrap();
 
         let verifier = AttestedCertificateVerifier::new_with_provider(
@@ -976,7 +968,6 @@ mod tests {
             provider.clone(),
             Duration::from_secs(4),
         )
-        .await
         .unwrap();
 
         let certificate_chain = resolver.state.certificate.read().unwrap().clone();
@@ -1036,7 +1027,6 @@ mod tests {
             provider,
             Duration::from_secs(4),
         )
-        .await
         .unwrap();
         let initial_certificate =
             resolver.state.certificate.read().unwrap().first().unwrap().clone();
@@ -1064,7 +1054,6 @@ mod tests {
             provider.clone(),
             Duration::from_secs(4),
         )
-        .await
         .unwrap();
 
         let client_resolver = AttestedCertificateResolver::new_with_provider(
@@ -1076,7 +1065,6 @@ mod tests {
             provider.clone(),
             Duration::from_secs(4),
         )
-        .await
         .unwrap();
 
         let server_verifier = AttestedCertificateVerifier::new_with_provider(
@@ -1137,7 +1125,6 @@ mod tests {
             provider.clone(),
             Duration::from_secs(4),
         )
-        .await
         .unwrap();
         let verifier = AttestedCertificateVerifier::new_with_provider(
             None,
@@ -1298,7 +1285,6 @@ mod tests {
             provider.clone(),
             Duration::from_secs(4),
         )
-        .await
         .unwrap();
         let verifier = AttestedCertificateVerifier::new_with_provider(
             None,
@@ -1334,7 +1320,6 @@ mod tests {
             provider.clone(),
             Duration::from_secs(4),
         )
-        .await
         .unwrap();
         let original_cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
         let (original_report_data, original_not_after) =
@@ -1377,7 +1362,6 @@ mod tests {
             provider.clone(),
             Duration::from_secs(4),
         )
-        .await
         .unwrap();
         let verifier = AttestedCertificateVerifier::new_with_provider(
             None,
@@ -1413,7 +1397,6 @@ mod tests {
             provider.clone(),
             Duration::from_secs(4),
         )
-        .await
         .unwrap();
         let mut verifier = AttestedCertificateVerifier::new_with_provider(
             None,

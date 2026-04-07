@@ -18,7 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 async fn nested_tls_uses_attested_tls_for_inner_session() {
     let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
     let (outer_server, outer_client) = plain_tls_config_pair(provider.clone());
-    let inner_server = attested_server_config("localhost", provider.clone()).await;
+    let inner_server = attested_server_config("localhost", provider.clone());
     let inner_client = attested_client_config(provider.clone());
 
     let acceptor = NestingTlsAcceptor::new(Arc::new(outer_server), Arc::new(inner_server));
@@ -83,7 +83,7 @@ fn plain_tls_config_pair(provider: Arc<CryptoProvider>) -> (ServerConfig, Client
 
 /// Create attested server TLS config with mock DCAP attestation and
 /// self-signed certs
-async fn attested_server_config(server_name: &str, provider: Arc<CryptoProvider>) -> ServerConfig {
+fn attested_server_config(server_name: &str, provider: Arc<CryptoProvider>) -> ServerConfig {
     let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
     let resolver = AttestedCertificateResolver::new_with_provider(
         AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
@@ -94,7 +94,6 @@ async fn attested_server_config(server_name: &str, provider: Arc<CryptoProvider>
         provider.clone(),
         std::time::Duration::from_secs(91),
     )
-    .await
     .unwrap();
 
     ServerConfig::builder_with_provider(provider)

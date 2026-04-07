@@ -7,6 +7,7 @@ pub mod measurements;
 
 use std::{
     fmt::{self, Display, Formatter},
+    io::Read,
     net::IpAddr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -206,12 +207,12 @@ impl AttestationGenerator {
     }
 
     /// Generate an attestation exchange message with given input data
-    pub async fn generate_attestation(
+    pub fn generate_attestation(
         &self,
         input_data: [u8; 64],
     ) -> Result<AttestationExchangeMessage, AttestationError> {
         if let Some(url) = &self.attestation_provider_url {
-            Self::use_attestation_provider(url, self.attestation_type, input_data).await
+            Self::use_attestation_provider(url, self.attestation_type, input_data)
         } else {
             Ok(AttestationExchangeMessage {
                 attestation_type: self.attestation_type,
@@ -247,27 +248,29 @@ impl AttestationGenerator {
 
     /// Generate an attestation by using an external service for the
     /// attestation generation
-    async fn use_attestation_provider(
+    fn use_attestation_provider(
         url: &str,
         attestation_type: AttestationType,
         input_data: [u8; 64],
     ) -> Result<AttestationExchangeMessage, AttestationError> {
         let url = format!("{}/attest/{}", url, hex::encode(input_data));
 
-        let response = reqwest::get(url)
-            .await
+        let mut response = ureq::get(&url)
+            .timeout(Duration::from_millis(1000))
+            .call()
             .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?
-            .bytes()
-            .await
-            .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?
-            .to_vec();
+            .into_reader();
+        let mut body = Vec::new();
+        response
+            .read_to_end(&mut body)
+            .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?;
 
         // If the response is not already wrapped in an attestation exchange
         // message, wrap it in one
-        if let Ok(message) = AttestationExchangeMessage::decode(&mut &response[..]) {
+        if let Ok(message) = AttestationExchangeMessage::decode(&mut &body[..]) {
             Ok(message)
         } else {
-            Ok(AttestationExchangeMessage { attestation_type, attestation: response })
+            Ok(AttestationExchangeMessage { attestation_type, attestation: body })
         }
     }
 }
@@ -498,14 +501,12 @@ fn log_attestation(attestation: &AttestationExchangeMessage) {
 /// Test whether it looks like we are running on GCP by hitting the metadata
 /// API
 fn running_on_gcp() -> Result<bool, AttestationError> {
-    let client =
-        reqwest::blocking::Client::builder().timeout(Duration::from_millis(200)).build()?;
-
-    let resp = client.get(GCP_METADATA_API).send();
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_millis(200)).build();
+    let resp = agent.get(GCP_METADATA_API).call();
 
     if let Ok(r) = resp {
-        return Ok(r.status().is_success() &&
-            r.headers().get("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
+        return Ok(r.status() == 200 &&
+            r.header("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
     }
 
     Ok(false)
@@ -645,7 +646,7 @@ mod tests {
         let _ = running_on_gcp();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn attestation_provider_response_is_wrapped_if_needed() {
         let input_data = [0u8; 64];
 
@@ -662,7 +663,6 @@ mod tests {
             AttestationType::GcpTdx,
             input_data,
         )
-        .await
         .unwrap();
         assert_eq!(decoded.attestation_type, AttestationType::None);
         assert_eq!(decoded.attestation, vec![1, 2, 3]);
@@ -674,7 +674,6 @@ mod tests {
             AttestationType::DcapTdx,
             input_data,
         )
-        .await
         .unwrap();
         assert_eq!(wrapped.attestation_type, AttestationType::DcapTdx);
         assert_eq!(wrapped.attestation, vec![9, 8]);
