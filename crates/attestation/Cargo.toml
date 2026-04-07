@@ -25,6 +25,7 @@ base64 = "0.22.1"
 reqwest = { version = "0.12.23", default-features = false, features = [
   "rustls-tls-webpki-roots-no-provider",
 ] }
+ureq = "2.12.1"
 tracing = "0.1.41"
 parity-scale-codec = "3.7.5"
 num-bigint = "0.4.6"
