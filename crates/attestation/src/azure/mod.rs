@@ -9,6 +9,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
 use dcap_qvl::QuoteCollateralV3;
 use num_bigint::BigUint;
 use openssl::{error::ErrorStack, pkey::PKey};
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use x509_parser::prelude::*;
@@ -272,21 +273,48 @@ impl RsaPubKey {
 }
 
 /// Detect whether we are on Azure and can make an Azure vTPM attestation
-pub async fn detect_azure_cvm() -> Result<bool, reqwest::Error> {
+pub async fn detect_azure_cvm() -> Result<bool, MaaError> {
     let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build()?;
 
-    let resp = client.get(AZURE_METADATA_API).header("Metadata", "true").send().await;
+    let response = match client.get(AZURE_METADATA_API).header("Metadata", "true").send().await {
+        Ok(response) => response,
+        Err(err) => {
+            tracing::debug!("Azure CVM detection failed: Azure metadata API request failed: {err}");
+            return Ok(false);
+        }
+    };
 
-    if let Ok(r) = resp &&
-        r.status().is_success() &&
-        r.headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("application/json"))
-    {
-        return Ok(az_tdx_vtpm::is_tdx_cvm().unwrap_or(false));
+    if !response.status().is_success() {
+        tracing::debug!(
+            "Azure CVM detection failed: metadata API returned non-success status: {}",
+            response.status()
+        );
+        return Ok(false);
     }
-    Ok(false)
+
+    // Ensure the response has a JSON content type
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .map(|value| value.to_str().map(str::to_owned))
+        .transpose()
+        .map_err(|_| MaaError::AzureMetadataApiNonJsonResponse { content_type: None })?;
+
+    if !content_type.as_deref().is_some_and(|value| value.starts_with("application/json")) {
+        return Err(MaaError::AzureMetadataApiNonJsonResponse { content_type });
+    }
+
+    match az_tdx_vtpm::is_tdx_cvm() {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            tracing::debug!("Azure CVM detection failed: platform is not an Azure TDX CVM");
+            Ok(false)
+        }
+        Err(err) => {
+            tracing::debug!("Azure CVM detection failed: Azure TDX CVM probe failed: {err}");
+            Ok(false)
+        }
+    }
 }
 
 /// An error when generating or verifying a Microsoft Azure vTPM attestation
@@ -302,6 +330,8 @@ pub enum MaaError {
     Hcl(#[from] hcl::HclError),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("HTTP client: {0}")]
+    Reqwest(#[from] reqwest::Error),
     #[error("vTPM quote: {0}")]
     VtpmQuote(#[from] vtpm::QuoteError),
     #[error("AK public key: {0}")]
@@ -350,6 +380,10 @@ pub enum MaaError {
     ClaimsUserDataInputMismatch,
     #[error("DCAP verification: {0}")]
     DcapVerification(#[from] crate::dcap::DcapVerificationError),
+    #[error(
+        "Azure metadata API returned a successful response with non-JSON content-type: {content_type:?}"
+    )]
+    AzureMetadataApiNonJsonResponse { content_type: Option<String> },
 }
 
 #[cfg(test)]
