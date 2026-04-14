@@ -185,7 +185,7 @@ impl AttestedCertificateResolver {
         subject_alt_names: &[String],
         attestation_generator: &AttestationGenerator,
     ) -> Result<Vec<CertificateDer<'static>>, AttestedTlsError> {
-        tracing::debug!("Generating new remote-attested ceritifcate for {primary_name}");
+        tracing::debug!("Generating new remote-attested certificate for {primary_name}");
         let pubkey = key.public_key_der();
         let now = SystemTime::now();
         let not_after = now + CERTIFICATE_VALIDITY;
