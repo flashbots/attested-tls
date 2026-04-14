@@ -504,7 +504,7 @@ impl AttestedCertificateVerifier {
         Self::verify_cert_time_validity_parsed(&cert, now)
     }
 
-    /// Given a parsed cerificate and the current time, check if it is
+    /// Given a parsed certificate and the current time, check if it is
     /// currently valid
     fn verify_cert_time_validity_parsed(
         cert: &X509Certificate<'_>,
