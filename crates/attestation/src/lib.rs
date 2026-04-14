@@ -55,7 +55,7 @@ impl AttestationExchangeMessage {
                     Err(AttestationError::AttestationTypeNotSupported)
                 }
             }
-            _ => {
+            AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
                 #[cfg(any(test, feature = "mock"))]
                 {
                     let quote = tdx_quote::Quote::from_bytes(&self.attestation)
@@ -242,7 +242,9 @@ impl AttestationGenerator {
                     Err(AttestationError::AttestationTypeNotSupported)
                 }
             }
-            _ => dcap::create_dcap_attestation(input_data),
+            AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
+                dcap::create_dcap_attestation(input_data)
+            }
         }
     }
 
@@ -394,7 +396,7 @@ impl AttestationVerifier {
                     return Err(AttestationError::AttestationTypeNotSupported);
                 }
             }
-            _ => {
+            AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
                 dcap::verify_dcap_attestation(
                     attestation_exchange_message.attestation,
                     expected_input_data,
