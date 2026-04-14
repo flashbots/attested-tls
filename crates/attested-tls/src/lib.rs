@@ -1301,7 +1301,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Helper to create a private cerificate authority
+    /// Helper to create a private certificate authority
     fn test_ca() -> CaCert {
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let mut params = CertificateParams::new(vec!["test-ca".to_string()]).unwrap();
