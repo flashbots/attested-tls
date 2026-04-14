@@ -466,7 +466,7 @@ impl AttestedCertificateVerifier {
     }
 
     /// Given a certificate, return the attestation report input data based
-    /// on public key and expriy, as well as the expiry time
+    /// on public key and expiry, as well as the expiry time
     fn cert_binding_data(cert: &CertificateDer<'_>) -> Result<([u8; 64], UnixTime), rustls::Error> {
         let cert = Self::parse_x509_certificate(cert)?;
         let not_before: u64 = cert
