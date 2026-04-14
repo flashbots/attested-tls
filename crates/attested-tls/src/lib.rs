@@ -781,7 +781,7 @@ pub enum AttestedTlsError {
     CertificateSigning(#[source] rcgen::Error),
     #[error("Failed to build certificate verifier: {0}")]
     VerifierBuilder(#[source] VerifierBuilderError),
-    #[error("Cetificate generation: {0}")]
+    #[error("Certificate generation: {0}")]
     RcGen(#[from] ra_tls::rcgen::Error),
     #[error("RA-TLS: {0}")]
     RaTls(#[source] anyhow::Error),
