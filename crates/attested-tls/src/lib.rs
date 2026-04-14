@@ -494,7 +494,7 @@ impl AttestedCertificateVerifier {
         Ok((expected_input_data, not_after))
     }
 
-    /// Given a cerificate and the current time, check if it is currently
+    /// Given a certificate and the current time, check if it is currently
     /// valid
     fn verify_cert_time_validity(
         cert: &CertificateDer<'_>,
