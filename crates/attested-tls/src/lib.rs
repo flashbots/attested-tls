@@ -115,7 +115,7 @@ impl fmt::Debug for ResolverState {
 
 impl AttestedCertificateResolver {
     /// Create a certificate resolver with a given attestation generator
-    /// A private cerificate authority can also be given - otherwise
+    /// A private certificate authority can also be given - otherwise
     /// certificates will be self signed
     pub async fn new(
         attestation_generator: AttestationGenerator,
