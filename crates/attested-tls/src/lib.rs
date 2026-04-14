@@ -89,7 +89,7 @@ struct ResolverState {
     key_pair_der: Vec<u8>,
     /// The current certificate with attestation
     certificate: RwLock<Vec<CertificateDer<'static>>>,
-    /// Attestation generator used when renewing ceritifcate
+    /// Attestation generator used when renewing certificate
     attestation_generator: AttestationGenerator,
     /// Primary DNS name used as certificate subject / common name.
     primary_name: String,
