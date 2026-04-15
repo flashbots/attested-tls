@@ -53,12 +53,7 @@ impl std::fmt::Debug for Pccs {
 impl Pccs {
     /// Creates a new PCCS cache using the provided URL or Intel PCS default
     pub fn new(url: Option<String>) -> Self {
-        let url = url
-            .unwrap_or(PCS_URL.to_string())
-            .trim_end_matches('/')
-            .trim_end_matches("/sgx/certification/v4")
-            .trim_end_matches("/tdx/certification/v4")
-            .to_string();
+        let url = url.unwrap_or(PCS_URL.to_string()).trim_end_matches('/').to_string();
 
         let (prewarm_outcome_tx, _) = watch::channel(None);
         let pccs = Self {
