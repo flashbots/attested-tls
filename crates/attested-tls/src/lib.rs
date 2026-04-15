@@ -51,23 +51,19 @@ use sha2::{Digest as _, Sha512};
 use thiserror::Error;
 use x509_parser::{certificate::X509Certificate, oid_registry::Oid};
 
-/// The length of time a certificate is valid for
-#[cfg(not(test))]
-const CERTIFICATE_VALIDITY: Duration = Duration::from_secs(30 * 60);
-#[cfg(test)]
-const CERTIFICATE_VALIDITY: Duration = Duration::from_secs(4);
-
-/// How long before expiry to renew certificate
-#[cfg(not(test))]
-const CERTIFICATE_RENEWAL_LEAD_TIME: Duration = Duration::from_secs(5 * 60);
-#[cfg(test)]
-const CERTIFICATE_RENEWAL_LEAD_TIME: Duration = Duration::from_secs(2);
-
 /// How long to wait before re-trying certificate renewal on failure
 #[cfg(not(test))]
 const CERTIFICATE_RENEWAL_RETRY_DELAY: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const CERTIFICATE_RENEWAL_RETRY_DELAY: Duration = Duration::from_millis(200);
+
+/// Certificate validity must be strictly greater than 3x the retry delay so
+/// that, after renewing at 2/3 of the validity period, there is still
+/// enough time left for one retry before the certificate expires.
+#[cfg(not(test))]
+const MIN_CERTIFICATE_VALIDITY_DURATION: Duration = Duration::from_secs(91);
+#[cfg(test)]
+const MIN_CERTIFICATE_VALIDITY_DURATION: Duration = Duration::from_millis(601);
 
 /// A TLS certificate resolver which includes an attestation as a
 /// certificate extension
@@ -89,7 +85,7 @@ struct ResolverState {
     key_pair_der: Vec<u8>,
     /// The current certificate with attestation
     certificate: RwLock<Vec<CertificateDer<'static>>>,
-    /// Attestation generator used when renewing ceritifcate
+    /// Attestation generator used when renewing certificate
     attestation_generator: AttestationGenerator,
     /// Primary DNS name used as certificate subject / common name.
     primary_name: String,
@@ -115,13 +111,14 @@ impl fmt::Debug for ResolverState {
 
 impl AttestedCertificateResolver {
     /// Create a certificate resolver with a given attestation generator
-    /// A private cerificate authority can also be given - otherwise
+    /// A private certificate authority can also be given - otherwise
     /// certificates will be self signed
     pub async fn new(
         attestation_generator: AttestationGenerator,
         ca: Option<CaCert>,
         primary_name: String,
         subject_alt_names: Vec<String>,
+        certificate_validity_duration: Duration,
     ) -> Result<Self, AttestedTlsError> {
         Self::new_with_provider(
             attestation_generator,
@@ -129,6 +126,7 @@ impl AttestedCertificateResolver {
             primary_name,
             subject_alt_names,
             default_crypto_provider()?,
+            certificate_validity_duration,
         )
         .await
     }
@@ -140,8 +138,13 @@ impl AttestedCertificateResolver {
         primary_name: String,
         subject_alt_names: Vec<String>,
         provider: Arc<CryptoProvider>,
+        certificate_validity_duration: Duration,
     ) -> Result<Self, AttestedTlsError> {
-        debug_assert!(CERTIFICATE_RENEWAL_LEAD_TIME < CERTIFICATE_VALIDITY);
+        if certificate_validity_duration < MIN_CERTIFICATE_VALIDITY_DURATION {
+            return Err(AttestedTlsError::InvalidCertificateValidityDuration {
+                minimum: MIN_CERTIFICATE_VALIDITY_DURATION,
+            });
+        }
         let subject_alt_names =
             normalized_subject_alt_names(primary_name.as_str(), subject_alt_names);
 
@@ -157,6 +160,7 @@ impl AttestedCertificateResolver {
             primary_name.as_str(),
             &subject_alt_names,
             &attestation_generator,
+            certificate_validity_duration,
         )
         .await?;
 
@@ -171,7 +175,7 @@ impl AttestedCertificateResolver {
         });
 
         // Start a loop which will periodically renew the certificate
-        Self::spawn_renewal_task(Arc::downgrade(&state));
+        Self::spawn_renewal_task(Arc::downgrade(&state), certificate_validity_duration);
 
         Ok(Self { state })
     }
@@ -184,11 +188,12 @@ impl AttestedCertificateResolver {
         primary_name: &str,
         subject_alt_names: &[String],
         attestation_generator: &AttestationGenerator,
+        certificate_validity_duration: Duration,
     ) -> Result<Vec<CertificateDer<'static>>, AttestedTlsError> {
-        tracing::debug!("Generating new remote-attested ceritifcate for {primary_name}");
+        tracing::debug!("Generating new remote-attested certificate for {primary_name}");
         let pubkey = key.public_key_der();
         let now = SystemTime::now();
-        let not_after = now + CERTIFICATE_VALIDITY;
+        let not_after = now + certificate_validity_duration;
 
         let attestation = Self::create_attestation_payload(
             pubkey,
@@ -262,9 +267,12 @@ impl AttestedCertificateResolver {
     }
 
     /// Start a loop which periodically renews the certificate
-    fn spawn_renewal_task(state: std::sync::Weak<ResolverState>) {
+    fn spawn_renewal_task(
+        state: std::sync::Weak<ResolverState>,
+        certificate_validity_duration: Duration,
+    ) {
         tokio::spawn(async move {
-            let renewal_delay = CERTIFICATE_VALIDITY - CERTIFICATE_RENEWAL_LEAD_TIME;
+            let renewal_delay = renewal_delay(certificate_validity_duration);
             let mut next_delay = renewal_delay;
 
             loop {
@@ -289,6 +297,7 @@ impl AttestedCertificateResolver {
                     current.primary_name.as_str(),
                     &current.subject_alt_names,
                     &current.attestation_generator,
+                    certificate_validity_duration,
                 )
                 .await
                 {
@@ -305,6 +314,14 @@ impl AttestedCertificateResolver {
             }
         });
     }
+}
+
+/// Renew certificates after 2/3 of their configured validity period
+fn renewal_delay(certificate_validity_duration: Duration) -> Duration {
+    certificate_validity_duration
+        .checked_mul(2)
+        .and_then(|duration| duration.checked_div(3))
+        .unwrap_or(certificate_validity_duration)
 }
 
 impl ResolvesServerCert for AttestedCertificateResolver {
@@ -471,7 +488,7 @@ impl AttestedCertificateVerifier {
     }
 
     /// Given a certificate, return the attestation report input data based
-    /// on public key and expriy, as well as the expiry time
+    /// on public key and expiry, as well as the expiry time
     fn cert_binding_data(cert: &CertificateDer<'_>) -> Result<([u8; 64], UnixTime), rustls::Error> {
         let cert = Self::parse_x509_certificate(cert)?;
         let not_before: u64 = cert
@@ -499,7 +516,7 @@ impl AttestedCertificateVerifier {
         Ok((expected_input_data, not_after))
     }
 
-    /// Given a cerificate and the current time, check if it is currently
+    /// Given a certificate and the current time, check if it is currently
     /// valid
     fn verify_cert_time_validity(
         cert: &CertificateDer<'_>,
@@ -509,7 +526,7 @@ impl AttestedCertificateVerifier {
         Self::verify_cert_time_validity_parsed(&cert, now)
     }
 
-    /// Given a parsed cerificate and the current time, check if it is
+    /// Given a parsed certificate and the current time, check if it is
     /// currently valid
     fn verify_cert_time_validity_parsed(
         cert: &X509Certificate<'_>,
@@ -778,6 +795,8 @@ impl ClientCertVerifier for AttestedCertificateVerifier {
 
 #[derive(Debug, Error)]
 pub enum AttestedTlsError {
+    #[error("Certificate validity duration must be at least {minimum:?}")]
+    InvalidCertificateValidityDuration { minimum: Duration },
     #[error("Failed to generate certificate key pair: {0}")]
     CertificateKeyGeneration(#[source] rcgen::Error),
     #[error("Failed to build certificate parameters: {0}")]
@@ -786,7 +805,7 @@ pub enum AttestedTlsError {
     CertificateSigning(#[source] rcgen::Error),
     #[error("Failed to build certificate verifier: {0}")]
     VerifierBuilder(#[source] VerifierBuilderError),
-    #[error("Cetificate generation: {0}")]
+    #[error("Certificate generation: {0}")]
     RcGen(#[from] ra_tls::rcgen::Error),
     #[error("RA-TLS: {0}")]
     RaTls(#[source] anyhow::Error),
@@ -848,6 +867,7 @@ mod tests {
             "foo".to_string(),
             vec![],
             provider,
+            Duration::from_secs(4),
         )
         .await
         .unwrap();
@@ -855,6 +875,23 @@ mod tests {
         let certificate = resolver.state.certificate.read().unwrap();
 
         assert_eq!(certificate.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn certificate_resolver_rejects_too_short_validity_duration() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let error = AttestedCertificateResolver::new_with_provider(
+            AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            None,
+            "foo".to_string(),
+            vec![],
+            provider,
+            CERTIFICATE_RENEWAL_RETRY_DELAY * 3,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, AttestedTlsError::InvalidCertificateValidityDuration { .. }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -867,6 +904,7 @@ mod tests {
             server_name.to_string(),
             vec![],
             provider.clone(),
+            Duration::from_secs(4),
         )
         .await
         .unwrap();
@@ -920,6 +958,7 @@ mod tests {
             server_name.to_string(),
             vec![],
             provider.clone(),
+            Duration::from_secs(4),
         )
         .await
         .unwrap();
@@ -977,16 +1016,14 @@ mod tests {
             "foo".to_string(),
             vec![],
             provider,
+            Duration::from_secs(4),
         )
         .await
         .unwrap();
         let initial_certificate =
             resolver.state.certificate.read().unwrap().first().unwrap().clone();
 
-        tokio::time::sleep(
-            CERTIFICATE_VALIDITY - CERTIFICATE_RENEWAL_LEAD_TIME + Duration::from_secs(1),
-        )
-        .await;
+        tokio::time::sleep(renewal_delay(Duration::from_secs(4)) + Duration::from_secs(1)).await;
 
         let renewed_certificate =
             resolver.state.certificate.read().unwrap().first().unwrap().clone();
@@ -1005,6 +1042,7 @@ mod tests {
             server_name.to_string(),
             vec![],
             provider.clone(),
+            Duration::from_secs(4),
         )
         .await
         .unwrap();
@@ -1015,6 +1053,7 @@ mod tests {
             "client".to_string(),
             vec![],
             provider.clone(),
+            Duration::from_secs(4),
         )
         .await
         .unwrap();
@@ -1073,6 +1112,7 @@ mod tests {
             primary_name.to_string(),
             vec![alternate_name.to_string(), primary_name.to_string()],
             provider.clone(),
+            Duration::from_secs(4),
         )
         .await
         .unwrap();
@@ -1164,6 +1204,7 @@ mod tests {
             "foo".to_string(),
             vec![],
             provider.clone(),
+            Duration::from_secs(4),
         )
         .await
         .unwrap();
@@ -1197,6 +1238,7 @@ mod tests {
             "foo".to_string(),
             vec![],
             provider.clone(),
+            Duration::from_secs(4),
         )
         .await
         .unwrap();
@@ -1237,6 +1279,7 @@ mod tests {
             "foo".to_string(),
             vec![],
             provider.clone(),
+            Duration::from_secs(4),
         )
         .await
         .unwrap();
@@ -1270,6 +1313,7 @@ mod tests {
             "foo".to_string(),
             vec![],
             provider.clone(),
+            Duration::from_secs(4),
         )
         .await
         .unwrap();
@@ -1306,7 +1350,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Helper to create a private cerificate authority
+    /// Helper to create a private certificate authority
     fn test_ca() -> CaCert {
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let mut params = CertificateParams::new(vec!["test-ca".to_string()]).unwrap();

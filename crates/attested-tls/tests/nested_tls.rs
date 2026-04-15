@@ -90,6 +90,7 @@ async fn attested_server_config(server_name: &str, provider: Arc<CryptoProvider>
         server_name.to_string(),
         vec![],
         provider.clone(),
+        std::time::Duration::from_secs(91),
     )
     .await
     .unwrap();
