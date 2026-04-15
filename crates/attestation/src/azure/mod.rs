@@ -7,6 +7,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
 use dcap_qvl::QuoteCollateralV3;
 use num_bigint::BigUint;
 use openssl::{error::ErrorStack, pkey::PKey};
+use pccs::Pccs;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use x509_parser::prelude::*;
@@ -80,7 +81,7 @@ pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaErro
 pub async fn verify_azure_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs_url: Option<String>,
+    pccs: Option<Pccs>,
     override_azure_outdated_tcb: bool,
 ) -> Result<super::measurements::MultiMeasurements, MaaError> {
     let now = std::time::SystemTime::now()
@@ -91,7 +92,7 @@ pub async fn verify_azure_attestation(
     verify_azure_attestation_with_given_timestamp(
         input,
         expected_input_data,
-        pccs_url,
+        pccs,
         None,
         now,
         override_azure_outdated_tcb,
@@ -105,7 +106,7 @@ pub async fn verify_azure_attestation(
 async fn verify_azure_attestation_with_given_timestamp(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs_url: Option<String>,
+    pccs: Option<Pccs>,
     collateral: Option<QuoteCollateralV3>,
     now: u64,
     override_azure_outdated_tcb: bool,
@@ -127,7 +128,7 @@ async fn verify_azure_attestation_with_given_timestamp(
     let _dcap_measurements = verify_dcap_attestation_with_given_timestamp(
         tdx_quote_bytes,
         expected_tdx_input_data,
-        pccs_url,
+        pccs,
         collateral,
         now,
         override_azure_outdated_tcb,
