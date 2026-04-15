@@ -21,5 +21,5 @@ unused_async = "warn"
 rustls = { version = "0.23.37", default-features = false, features = ["brotli"] }
 tokio = { version = "1.50.0", features = ["default"] }
 tokio-rustls = { version = "0.26.4", default-features = false }
-dcap-qvl = { git = "https://github.com/Phala-Network/dcap-qvl.git" }
+dcap-qvl = { git = "https://github.com/Phala-Network/dcap-qvl.git", rev = "f1dcc65371e941a7b83e3234833d23a1fb232ab1" }
 pccs = { path = "crates/pccs" }

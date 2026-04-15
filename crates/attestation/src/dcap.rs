@@ -164,6 +164,7 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
     // be outdated
     let override_outdated_tcb = if override_azure_outdated_tcb {
         |mut tcb_info: TcbInfo| {
+            // This is a workaround for a known outdated FMSPC used by azure
             if tcb_info.fmspc == AZURE_BAD_FMSPC {
                 for tcb_level in &mut tcb_info.tcb_levels {
                     if tcb_level.tcb.sgx_components[7].svn > 3 {
@@ -311,10 +312,10 @@ mod tests {
             MeasurementPolicy::from_json_bytes(measurements_json.to_vec()).unwrap();
 
         let collateral_bytes: &'static [u8] =
-            include_bytes!("../test-assets/dcap-quote-collateral-00.json");
+            include_bytes!("../test-assets/dcap-quote-collateral-00.yaml");
 
-        let async_collateral = serde_json::from_slice(collateral_bytes).unwrap();
-        let sync_collateral = serde_json::from_slice(collateral_bytes).unwrap();
+        let async_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
+        let sync_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
 
         let async_measurements = verify_dcap_attestation_with_given_timestamp(
             attestation_bytes.to_vec(),
@@ -362,9 +363,9 @@ mod tests {
         let now = 1771414156;
 
         let collateral_bytes: &'static [u8] =
-            include_bytes!("../test-assets/azure-collateral.json");
+            include_bytes!("../test-assets/azure-collateral.yaml");
 
-        let collateral = serde_json::from_slice(collateral_bytes).unwrap();
+        let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
 
         let _measurements = verify_dcap_attestation_with_given_timestamp(
             attestation_bytes.to_vec(),

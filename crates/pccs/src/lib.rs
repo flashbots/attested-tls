@@ -18,6 +18,7 @@ use tokio::{
     time::{Duration, sleep},
 };
 use tracing::debug;
+use x509_parser::{prelude::FromDer, revocation_list::CertificateRevocationList};
 
 /// For fetching collateral directly from Intel
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
@@ -33,7 +34,7 @@ const STARTUP_PREWARM_CONCURRENCY: usize = 8;
 #[derive(Clone)]
 pub struct Pccs {
     /// The URL of the service used to fetch collateral (PCS / PCCS)
-    pccs_url: String,
+    url: String,
     /// The internal cache
     cache: Arc<RwLock<HashMap<PccsInput, CacheEntry>>>,
     /// Dedupes one-shot background refreshes for cache misses
@@ -48,14 +49,14 @@ impl std::fmt::Debug for Pccs {
     /// Formats PCCS config for debug output without exposing cache
     /// internals
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Pccs").field("pccs_url", &self.pccs_url).finish_non_exhaustive()
+        f.debug_struct("Pccs").field("url", &self.url).finish_non_exhaustive()
     }
 }
 
 impl Pccs {
     /// Creates a new PCCS cache using the provided URL or Intel PCS default
-    pub fn new(pccs_url: Option<String>) -> Self {
-        let mut pccs = Self::new_without_prewarm(pccs_url);
+    pub fn new(url: Option<String>) -> Self {
+        let mut pccs = Self::new_without_prewarm(url);
 
         let (prewarm_outcome_tx, _) = watch::channel(None);
         pccs.prewarm_outcome_tx = Some(prewarm_outcome_tx);
@@ -72,8 +73,8 @@ impl Pccs {
 
     /// Creates a new PCCS cache using the provided URL or Intel PCS default
     /// and does not pre-warm by proactively fetching collateral
-    pub fn new_without_prewarm(pccs_url: Option<String>) -> Self {
-        let pccs_url = pccs_url
+    pub fn new_without_prewarm(url: Option<String>) -> Self {
+        let url = url
             .unwrap_or(PCS_URL.to_string())
             .trim_end_matches('/')
             .trim_end_matches("/sgx/certification/v4")
@@ -81,7 +82,7 @@ impl Pccs {
             .to_string();
 
         Self {
-            pccs_url,
+            url,
             cache: RwLock::new(HashMap::new()).into(),
             pending_refreshes: RwLock::new(HashSet::new()).into(),
             prewarm_stats: Arc::new(PrewarmStats::default()),
@@ -137,7 +138,7 @@ impl Pccs {
             }
         }
 
-        let collateral = fetch_collateral(&self.pccs_url, fmspc.clone(), ca).await?;
+        let collateral = fetch_collateral(&self.url, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
 
         {
@@ -205,8 +206,8 @@ impl Pccs {
         fmspc: String,
         ca: &'static str,
     ) -> Result<QuoteCollateralV3, PccsError> {
-        let collateral = fetch_collateral(&self.pccs_url, fmspc.clone(), ca).await?;
         let now = unix_now()?;
+        let collateral = fetch_collateral(&self.url, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
         let cache_key = PccsInput::new(fmspc, ca);
 
@@ -234,9 +235,9 @@ impl Pccs {
 
         let weak_cache = Arc::downgrade(&self.cache);
         let key = cache_key.clone();
-        let pccs_url = self.pccs_url.clone();
+        let url = self.url.clone();
         entry.refresh_task = Some(tokio::spawn(async move {
-            refresh_loop(weak_cache, pccs_url, key).await;
+            refresh_loop(weak_cache, url, key).await;
         }));
     }
 
@@ -376,7 +377,7 @@ impl Pccs {
 
     /// Fetches available FMSPC entries from configured PCCS/PCS endpoint
     async fn fetch_fmspcs(&self) -> Result<Vec<FmspcEntry>, PccsError> {
-        let url = format!("{}/sgx/certification/v4/fmspcs", self.pccs_url);
+        let url = format!("{}/sgx/certification/v4/fmspcs", self.url);
         let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?;
         let response = client.get(&url).send().await?;
         if !response.status().is_success() {
@@ -419,18 +420,24 @@ impl PccsInput {
 
 /// Fetches collateral from PCCS for a given FMSPC and CA
 async fn fetch_collateral(
-    pccs_url: &str,
+    url: &str,
     fmspc: String,
     ca: &'static str,
 ) -> Result<QuoteCollateralV3, PccsError> {
     get_collateral_for_fmspc(
-        pccs_url, fmspc, ca, false, // Indicates not SGX
+        url, fmspc, ca, false, // Indicates not SGX
     )
     .await
     .map_err(Into::into)
 }
 
 /// Extracts the earliest next update timestamp from collateral metadata
+///
+/// This returns the soonest timestamp from either:
+/// - The TCB
+/// - The Quoting enclave
+/// - The root CA certificate revocation list
+/// - The PCK certificate revocation list
 fn extract_next_update(collateral: &QuoteCollateralV3, now: i64) -> Result<i64, PccsError> {
     let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).map_err(|e| {
         PccsError::PccsCollateralParse(format!("Failed to parse TCB info JSON: {e}"))
@@ -442,12 +449,19 @@ fn extract_next_update(collateral: &QuoteCollateralV3, now: i64) -> Result<i64, 
 
     let tcb_next_update = parse_next_update("tcb_info.nextUpdate", &tcb_info.next_update)?;
     let qe_next_update = parse_next_update("qe_identity.nextUpdate", &qe_identity.next_update)?;
-    let next_update = tcb_next_update.min(qe_next_update);
+    let root_ca_crl_next_update =
+        parse_crl_next_update("root_ca_crl.nextUpdate", &collateral.root_ca_crl)?;
+    let pck_crl_next_update = parse_crl_next_update("pck_crl.nextUpdate", &collateral.pck_crl)?;
+    let next_update =
+        tcb_next_update.min(qe_next_update).min(root_ca_crl_next_update).min(pck_crl_next_update);
 
     if now >= next_update {
         return Err(PccsError::PccsCollateralExpired(format!(
-            "Collateral expired (tcb_next_update={}, qe_next_update={}, now={now})",
-            tcb_info.next_update, qe_identity.next_update
+            "Collateral expired (tcb_next_update={}, qe_next_update={}, root_ca_crl_next_update={}, pck_crl_next_update={}, now={now})",
+            tcb_info.next_update,
+            qe_identity.next_update,
+            root_ca_crl_next_update,
+            pck_crl_next_update
         )));
     }
 
@@ -461,6 +475,18 @@ fn parse_next_update(field: &str, value: &str) -> Result<i64, PccsError> {
             PccsError::PccsCollateralParse(format!("Failed to parse {field} as RFC3339: {e}"))
         })
         .map(|parsed| parsed.unix_timestamp())
+}
+
+/// Parse a certifcate revocation list and extract the timestamp for next
+/// update
+fn parse_crl_next_update(field: &str, crl_der: &[u8]) -> Result<i64, PccsError> {
+    let (_, crl) = CertificateRevocationList::from_der(crl_der).map_err(|e| {
+        PccsError::PccsCollateralParse(format!("Failed to parse {field} as DER CRL: {e}"))
+    })?;
+    let next_update = crl
+        .next_update()
+        .ok_or_else(|| PccsError::PccsCollateralParse(format!("Missing {field} in DER CRL")))?;
+    Ok(next_update.timestamp())
 }
 
 /// Returns current unix time in seconds
@@ -540,7 +566,7 @@ async fn refresh_loop(
         let sleep_secs = refresh_sleep_seconds(next_update, now);
         sleep(Duration::from_secs(sleep_secs)).await;
 
-        // Re-check the entry after waking in case annother task updated it
+        // Re-check the entry after waking in case another task updated it
         let now = match unix_now() {
             Ok(now) => now,
             Err(e) => {
@@ -725,6 +751,29 @@ mod tests {
         let (_, is_fresh) =
             pccs.get_collateral("00806F050000".to_string(), "processor", now).await.unwrap();
         assert!(is_fresh);
+    }
+
+    #[test]
+    fn test_extract_next_update_includes_crl_expiry() {
+        let mut collateral: QuoteCollateralV3 = serde_saphyr::from_slice(include_bytes!(
+            "../../attestation/test-assets/dcap-quote-collateral-00.yaml"
+        ))
+        .unwrap();
+
+        let mut tcb_info: serde_json::Value = serde_json::from_str(&collateral.tcb_info).unwrap();
+        tcb_info["nextUpdate"] = serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
+        collateral.tcb_info = serde_json::to_string(&tcb_info).unwrap();
+
+        let mut qe_identity: serde_json::Value =
+            serde_json::from_str(&collateral.qe_identity).unwrap();
+        qe_identity["nextUpdate"] = serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
+        collateral.qe_identity = serde_json::to_string(&qe_identity).unwrap();
+
+        let expected = parse_crl_next_update("root_ca_crl.nextUpdate", &collateral.root_ca_crl)
+            .unwrap()
+            .min(parse_crl_next_update("pck_crl.nextUpdate", &collateral.pck_crl).unwrap());
+
+        assert_eq!(extract_next_update(&collateral, 0).unwrap(), expected);
     }
 
     #[tokio::test]
