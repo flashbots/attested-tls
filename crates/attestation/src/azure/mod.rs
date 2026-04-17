@@ -310,7 +310,10 @@ pub async fn detect_azure_cvm() -> Result<bool, MaaError> {
         .transpose()
         .map_err(|_| MaaError::AzureMetadataApiNonJsonResponse { content_type: None })?;
 
-    if !content_type.as_deref().is_some_and(|value| value.to_lowercase().starts_with("application/json")) {
+    if !content_type
+        .as_deref()
+        .is_some_and(|value| value.to_lowercase().starts_with("application/json"))
+    {
         return Err(MaaError::AzureMetadataApiNonJsonResponse { content_type });
     }
 
