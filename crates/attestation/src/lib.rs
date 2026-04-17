@@ -302,7 +302,7 @@ impl AttestationVerifier {
     /// attestations
     ///
     /// Calling this is optional - it is only really needed when you want to
-    /// gaurantee that collateral will not be fetched during
+    /// guarantee that collateral will not be fetched during
     /// verification
     pub async fn ready(&self) -> Result<(), AttestationError> {
         // If we have no PCCS then we are ready
@@ -381,7 +381,7 @@ impl AttestationVerifier {
         expected_input_data: [u8; 64],
     ) -> Result<Option<MultiMeasurements>, AttestationError> {
         let attestation_type = attestation_exchange_message.attestation_type;
-        tracing::debug!("Verifing {attestation_type} attestation");
+        tracing::debug!("Verifying {attestation_type} attestation");
 
         if self.dump_dcap_quotes {
             log_attestation(&attestation_exchange_message);
