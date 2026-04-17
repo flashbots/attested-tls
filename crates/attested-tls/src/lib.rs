@@ -455,13 +455,18 @@ impl AttestedCertificateVerifier {
     }
 
     /// Given a TLS certificate, return the embedded attestation
-    fn extract_custom_attestation_from_cert(
+    pub fn extract_custom_attestation_from_cert(
         cert: &CertificateDer<'_>,
     ) -> Result<AttestationExchangeMessage, rustls::Error> {
-        // First try to parse using ra_tls which assumes DCAP
         if let Ok(Some(attestation)) = ra_tls::attestation::from_der(cert.as_ref()) &&
             let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote
         {
+            if let Ok(message) =
+                serde_json::from_slice::<AttestationExchangeMessage>(&tdx_quote.quote)
+            {
+                return Ok(message);
+            }
+
             return Ok(AttestationExchangeMessage {
                 attestation_type: AttestationType::DcapTdx,
                 attestation: tdx_quote.quote,
