@@ -432,10 +432,10 @@ impl MeasurementPolicy {
     /// Given either a URL or the path to a file, parse the measurement
     /// policy from JSON
     pub async fn from_file_or_url(file_or_url: String) -> Result<Self, MeasurementFormatError> {
-        if file_or_url.starts_with("https://") {
+        if file_or_url.to_lowercase().trim_ascii().starts_with("https://") {
             let measurements_json = reqwest::get(file_or_url).await?.bytes().await?;
             Self::from_json_bytes(measurements_json.to_vec())
-        } else if file_or_url.starts_with("http://") {
+        } else if file_or_url.to_lowercase().trim_ascii().starts_with("http://") {
             if !Self::is_loopback_http_url(&file_or_url)? {
                 return Err(MeasurementFormatError::InsecureHttpNotLoopback(file_or_url));
             }
