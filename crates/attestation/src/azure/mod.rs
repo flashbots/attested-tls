@@ -1,6 +1,8 @@
 //! Microsoft Azure vTPM attestation evidence generation and verification
 mod ak_certificate;
 mod nv_index;
+use std::time::Duration;
+
 use ak_certificate::{read_ak_certificate_from_tpm, verify_ak_cert_with_azure_roots};
 use az_tdx_vtpm::{hcl, imds, vtpm};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
@@ -8,11 +10,15 @@ use dcap_qvl::QuoteCollateralV3;
 use num_bigint::BigUint;
 use openssl::{error::ErrorStack, pkey::PKey};
 use pccs::Pccs;
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use x509_parser::prelude::*;
 
 use crate::{dcap::verify_dcap_attestation_with_given_timestamp, measurements::MultiMeasurements};
+
+/// Used in attestation type detection to check if we are on Azure
+const AZURE_METADATA_API: &str = "http://169.254.169.254/metadata/instance";
 
 /// The attestation evidence payload that gets sent over the channel
 #[derive(Debug, Serialize, Deserialize)]
@@ -276,6 +282,54 @@ impl RsaPubKey {
     }
 }
 
+/// Detect whether we are on Azure and can make an Azure vTPM attestation
+pub async fn detect_azure_cvm() -> Result<bool, MaaError> {
+    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build()?;
+
+    let response = match client.get(AZURE_METADATA_API).header("Metadata", "true").send().await {
+        Ok(response) => response,
+        Err(err) => {
+            tracing::debug!("Azure CVM detection failed: Azure metadata API request failed: {err}");
+            return Ok(false);
+        }
+    };
+
+    if !response.status().is_success() {
+        tracing::debug!(
+            "Azure CVM detection failed: metadata API returned non-success status: {}",
+            response.status()
+        );
+        return Ok(false);
+    }
+
+    // Ensure the response has a JSON content type
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .map(|value| value.to_str().map(str::to_owned))
+        .transpose()
+        .map_err(|_| MaaError::AzureMetadataApiNonJsonResponse { content_type: None })?;
+
+    if !content_type
+        .as_deref()
+        .is_some_and(|value| value.to_lowercase().starts_with("application/json"))
+    {
+        return Err(MaaError::AzureMetadataApiNonJsonResponse { content_type });
+    }
+
+    match az_tdx_vtpm::is_tdx_cvm() {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            tracing::debug!("Azure CVM detection failed: platform is not an Azure TDX CVM");
+            Ok(false)
+        }
+        Err(err) => {
+            tracing::debug!("Azure CVM detection failed: Azure TDX CVM probe failed: {err}");
+            Ok(false)
+        }
+    }
+}
+
 /// An error when generating or verifying a Microsoft Azure vTPM attestation
 #[derive(Error, Debug)]
 pub enum MaaError {
@@ -289,6 +343,8 @@ pub enum MaaError {
     Hcl(#[from] hcl::HclError),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("HTTP client: {0}")]
+    Reqwest(#[from] reqwest::Error),
     #[error("vTPM quote: {0}")]
     VtpmQuote(#[from] vtpm::QuoteError),
     #[error("AK public key: {0}")]
@@ -337,6 +393,10 @@ pub enum MaaError {
     ClaimsUserDataInputMismatch,
     #[error("DCAP verification: {0}")]
     DcapVerification(#[from] crate::dcap::DcapVerificationError),
+    #[error(
+        "Azure metadata API returned a successful response with non-JSON content-type: {content_type:?}"
+    )]
+    AzureMetadataApiNonJsonResponse { content_type: Option<String> },
 }
 
 #[cfg(test)]

@@ -107,7 +107,7 @@ impl AttestationType {
         // First attempt azure, if the feature is present
         #[cfg(feature = "azure")]
         {
-            if azure::create_azure_attestation([0; 64]).is_ok() {
+            if azure::detect_azure_cvm().await? {
                 return Ok(AttestationType::AzureTdx);
             }
         }
