@@ -13,6 +13,7 @@ use std::{
 
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
+use pccs::Pccs;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -36,6 +37,39 @@ impl AttestationExchangeMessage {
     /// in a non-confidential environment
     pub fn without_attestation() -> Self {
         Self { attestation_type: AttestationType::None, attestation: Vec::new() }
+    }
+
+    /// Extract the measurements from the attestation, if present, but do
+    /// not verify
+    pub fn get_measurements(&self) -> Result<Option<MultiMeasurements>, AttestationError> {
+        match self.attestation_type {
+            AttestationType::None => Ok(None),
+            AttestationType::AzureTdx => {
+                #[cfg(feature = "azure")]
+                {
+                    Ok(Some(azure::get_measurements(&self.attestation)?))
+                }
+                #[cfg(not(feature = "azure"))]
+                {
+                    Err(AttestationError::AttestationTypeNotSupported)
+                }
+            }
+            _ => {
+                #[cfg(any(test, feature = "mock"))]
+                {
+                    let quote = tdx_quote::Quote::from_bytes(&self.attestation)
+                        .map_err(DcapVerificationError::from)?;
+                    Ok(Some(MultiMeasurements::from_tdx_quote(&quote)))
+                }
+
+                #[cfg(not(any(test, feature = "mock")))]
+                {
+                    let quote = dcap_qvl::verify::Quote::parse(&self.attestation)
+                        .map_err(DcapVerificationError::from)?;
+                    Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
+                }
+            }
+        }
     }
 }
 
@@ -253,9 +287,26 @@ pub struct AttestationVerifier {
     ///
     /// This provides a workaround for a known outdated FMSPC used by Azure
     pub override_azure_outdated_tcb: bool,
+    /// Internal cache for collateral
+    pub internal_pccs: Option<Pccs>,
 }
 
 impl AttestationVerifier {
+    pub fn new(
+        measurement_policy: MeasurementPolicy,
+        pccs_url: Option<String>,
+        dump_dcap_quotes: bool,
+        override_azure_outdated_tcb: bool,
+    ) -> Self {
+        Self {
+            measurement_policy,
+            pccs_url: pccs_url.clone(),
+            dump_dcap_quotes,
+            override_azure_outdated_tcb,
+            internal_pccs: Some(Pccs::new(pccs_url)),
+        }
+    }
+
     /// Create an [AttestationVerifier] which will only allow no attestation
     /// and will reject if one is given
     pub fn expect_none() -> Self {
@@ -264,6 +315,7 @@ impl AttestationVerifier {
             pccs_url: None,
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
+            internal_pccs: None,
         }
     }
 
@@ -275,6 +327,7 @@ impl AttestationVerifier {
             pccs_url: None,
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
+            internal_pccs: None,
         }
     }
 
@@ -309,7 +362,7 @@ impl AttestationVerifier {
                     azure::verify_azure_attestation(
                         attestation_exchange_message.attestation,
                         expected_input_data,
-                        self.pccs_url.clone(),
+                        self.internal_pccs.clone(),
                         self.override_azure_outdated_tcb,
                     )
                     .await?
@@ -323,7 +376,7 @@ impl AttestationVerifier {
                 dcap::verify_dcap_attestation(
                     attestation_exchange_message.attestation,
                     expected_input_data,
-                    self.pccs_url.clone(),
+                    self.internal_pccs.clone(),
                 )
                 .await?
             }

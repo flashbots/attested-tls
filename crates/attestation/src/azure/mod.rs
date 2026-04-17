@@ -9,6 +9,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
 use dcap_qvl::QuoteCollateralV3;
 use num_bigint::BigUint;
 use openssl::{error::ErrorStack, pkey::PKey};
+use pccs::Pccs;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -86,7 +87,7 @@ pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaErro
 pub async fn verify_azure_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs_url: Option<String>,
+    pccs: Option<Pccs>,
     override_azure_outdated_tcb: bool,
 ) -> Result<super::measurements::MultiMeasurements, MaaError> {
     let now = std::time::SystemTime::now()
@@ -97,7 +98,7 @@ pub async fn verify_azure_attestation(
     verify_azure_attestation_with_given_timestamp(
         input,
         expected_input_data,
-        pccs_url,
+        pccs,
         None,
         now,
         override_azure_outdated_tcb,
@@ -111,7 +112,7 @@ pub async fn verify_azure_attestation(
 async fn verify_azure_attestation_with_given_timestamp(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs_url: Option<String>,
+    pccs: Option<Pccs>,
     collateral: Option<QuoteCollateralV3>,
     now: u64,
     override_azure_outdated_tcb: bool,
@@ -133,7 +134,7 @@ async fn verify_azure_attestation_with_given_timestamp(
     let _dcap_measurements = verify_dcap_attestation_with_given_timestamp(
         tdx_quote_bytes,
         expected_tdx_input_data,
-        pccs_url,
+        pccs,
         collateral,
         now,
         override_azure_outdated_tcb,
@@ -202,6 +203,15 @@ async fn verify_azure_attestation_with_given_timestamp(
     // Verify the AK certificate against microsoft root cert
     verify_ak_cert_with_azure_roots(ak_certificate_der_without_trailing_data, now)?;
 
+    Ok(MultiMeasurements::from_pcrs(pcrs))
+}
+
+/// Extract the measurements from the attestation, but do not verify
+/// anything
+pub fn get_measurements(input: &[u8]) -> Result<MultiMeasurements, MaaError> {
+    let attestation_document: AttestationDocument = serde_json::from_slice(input)?;
+    let vtpm_quote = attestation_document.tpm_attestation.quote;
+    let pcrs = vtpm_quote.pcrs_sha256();
     Ok(MultiMeasurements::from_pcrs(pcrs))
 }
 
