@@ -31,15 +31,41 @@ pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, Attestat
 /// Only compiled under `cfg(all(target_os = "linux", feature = "sgx"))` —
 /// non-Linux consumers and consumers that don't opt into SGX don't pay
 /// for the file I/O surface.
+///
+/// # Concurrency
+///
+/// Gramine's attestation interface is a two-step protocol on shared
+/// enclave-global pseudo-files: a caller writes to
+/// `/dev/attestation/user_report_data` and then reads
+/// `/dev/attestation/quote`, which returns a quote binding whichever
+/// user-report-data was most recently written. Two concurrent callers
+/// would race — thread A writes URD_a, thread B writes URD_b, thread A
+/// reads and gets a quote over URD_b. This function serializes the
+/// write+read pair through a process-global [`std::sync::Mutex`] so
+/// individual callers always receive a quote bound to the input_data
+/// they supplied. Callers therefore do **not** need to add their own
+/// synchronisation.
 #[cfg(all(target_os = "linux", feature = "sgx"))]
 pub fn create_sgx_gramine_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
     use std::{
         fs::{File, OpenOptions},
         io::{Read, Write},
+        sync::{Mutex, MutexGuard, PoisonError},
     };
 
     const USER_REPORT_DATA_PATH: &str = "/dev/attestation/user_report_data";
     const QUOTE_PATH: &str = "/dev/attestation/quote";
+
+    /// Serializes Gramine's write-URD → read-quote two-step so
+    /// concurrent callers don't read each other's URDs.
+    static GRAMINE_QUOTE_LOCK: Mutex<()> = Mutex::new(());
+
+    // Poisoning here is benign: the inner `()` carries no state, and a
+    // prior panic in the critical section leaves /dev/attestation/* in
+    // whatever state the kernel sees, not a corrupted shared value. We
+    // treat a poisoned lock as still-acquirable.
+    let _guard: MutexGuard<'_, ()> =
+        GRAMINE_QUOTE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
 
     // Gramine's interface: writing user_report_data is the "prepare the
     // quote" trigger; the subsequent read of /dev/attestation/quote yields
