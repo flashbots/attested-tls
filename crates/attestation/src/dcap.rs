@@ -7,6 +7,8 @@ use dcap_qvl::{
     quote::{Quote, Report},
     tcb_info::TcbInfo,
 };
+#[cfg(any(test, feature = "mock"))]
+use mock_tdx::{generate_mock_tdx_quote, load_mock_tdx_material};
 use pccs::{Pccs, PccsError};
 use thiserror::Error;
 
@@ -130,26 +132,31 @@ pub async fn verify_dcap_attestation(
     expected_input_data: [u8; 64],
     _pccs: Option<Pccs>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
-    // In tests we use mock quotes which will fail to verify
-    let quote = tdx_quote::Quote::from_bytes(&input)?;
-    if quote.report_input_data() != expected_input_data {
+    let quote = Quote::parse(&input)?;
+    let material = load_mock_tdx_material().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let verifier = dcap_qvl::verify::QuoteVerifier::new(
+        material.root_ca_der,
+        dcap_qvl::verify::rustcrypto::backend(),
+    );
+    verifier.verify(&input, &material.collateral, now)?;
+
+    let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
+    if get_quote_input_data(quote.report) != expected_input_data {
         return Err(DcapVerificationError::InputMismatch);
     }
-    Ok(MultiMeasurements::from_tdx_quote(&quote))
+
+    Ok(measurements)
 }
 
 /// Create a mock quote for testing on non-confidential hardware
 #[cfg(any(test, feature = "mock"))]
 fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, QuoteGenerationError> {
-    let attestation_key = tdx_quote::SigningKey::random(&mut rand_core::OsRng);
-    let provisioning_certification_key = tdx_quote::SigningKey::random(&mut rand_core::OsRng);
-    Ok(tdx_quote::Quote::mock(
-        attestation_key.clone(),
-        provisioning_certification_key.clone(),
-        input,
-        b"Mock cert chain".to_vec(),
-    )
-    .as_bytes())
+    generate_mock_tdx_quote(input).map_err(|error| {
+        QuoteGenerationError::IO(std::io::Error::other(format!(
+            "mock-tdx quote generation: {error}"
+        )))
+    })
 }
 
 /// Create a quote
@@ -178,9 +185,6 @@ pub enum DcapVerificationError {
     SystemTime(#[from] std::time::SystemTimeError),
     #[error("DCAP quote verification: {0}")]
     DcapQvl(#[from] anyhow::Error),
-    #[cfg(any(test, feature = "mock"))]
-    #[error("Quote parse: {0}")]
-    QuoteParse(#[from] tdx_quote::QuoteParseError),
     #[error("PCCS: {0}")]
     Pccs(#[from] PccsError),
     #[error("Timestamp exceeds i64 range")]

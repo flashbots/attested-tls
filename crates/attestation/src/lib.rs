@@ -55,19 +55,9 @@ impl AttestationExchangeMessage {
                 }
             }
             _ => {
-                #[cfg(any(test, feature = "mock"))]
-                {
-                    let quote = tdx_quote::Quote::from_bytes(&self.attestation)
-                        .map_err(DcapVerificationError::from)?;
-                    Ok(Some(MultiMeasurements::from_tdx_quote(&quote)))
-                }
-
-                #[cfg(not(any(test, feature = "mock")))]
-                {
-                    let quote = dcap_qvl::verify::Quote::parse(&self.attestation)
-                        .map_err(DcapVerificationError::from)?;
-                    Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
-                }
+                let quote = dcap_qvl::verify::Quote::parse(&self.attestation)
+                    .map_err(DcapVerificationError::from)?;
+                Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
             }
         }
     }

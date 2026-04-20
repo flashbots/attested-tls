@@ -1,0 +1,28 @@
+{
+  "fmspc": "00906EA10000",
+  "pce_id_hex": "0000",
+  "pce_svn": 13,
+  "cpu_svn_hex": "0B0B0202FF0100000000000000000000",
+  "ppid_hex": "D04EC06D4E6D92DC90D0AD3CF5EE2DDF",
+  "qe_isvsvn": 11,
+  "issuer_common_names": {
+    "root_ca": "Mock Intel Root CA",
+    "tcb_signing_ca": "Mock Intel TCB Signing CA",
+    "tcb_signer": "Mock Intel TCB Signer",
+    "pck": "Mock Intel PCK"
+  },
+  "files": {
+    "collateral": "mock-dcap-collateral.yaml",
+    "manifest": "mock-dcap-manifest.json",
+    "root_ca_der": "mock-root-ca.der",
+    "root_ca_pem": "mock-root-ca.pem",
+    "root_ca_key_pem": "mock-root-ca-key.pem",
+    "tcb_signer_chain_pem": "mock-tcb-signer-chain.pem",
+    "pck_chain_pem": "mock-pck-chain.pem",
+    "pck_key_pem": "mock-pck-key.pem",
+    "root_crl_der": "mock-root-ca.crl.der",
+    "pck_crl_der": "mock-pck.crl.der",
+    "tcb_info_json": "mock-tcb-info.json",
+    "qe_identity_json": "mock-qe-identity.json"
+  }
+}

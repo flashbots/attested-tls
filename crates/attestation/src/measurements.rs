@@ -217,31 +217,20 @@ impl MultiMeasurements {
         ])))
     }
 
-    #[cfg(any(test, feature = "mock"))]
-    pub fn from_tdx_quote(quote: &tdx_quote::Quote) -> Self {
-        Self::Dcap(HashMap::from([
-            (DcapMeasurementRegister::MRTD, quote.mrtd()),
-            (DcapMeasurementRegister::RTMR0, quote.rtmr0()),
-            (DcapMeasurementRegister::RTMR1, quote.rtmr1()),
-            (DcapMeasurementRegister::RTMR2, quote.rtmr2()),
-            (DcapMeasurementRegister::RTMR3, quote.rtmr3()),
-        ]))
-    }
-
     pub fn from_pcrs<'a>(pcrs: impl Iterator<Item = &'a [u8; 32]>) -> Self {
         Self::Azure(pcrs.copied().enumerate().map(|(index, value)| (index as u32, value)).collect())
     }
 }
 
-/// All-zero measurement values used in some tests
+/// Mock TDX measurement values used in tests
 #[cfg(any(test, feature = "mock"))]
 pub fn mock_dcap_measurements() -> MultiMeasurements {
     MultiMeasurements::Dcap(HashMap::from([
-        (DcapMeasurementRegister::MRTD, [0u8; 48]),
-        (DcapMeasurementRegister::RTMR0, [0u8; 48]),
-        (DcapMeasurementRegister::RTMR1, [0u8; 48]),
-        (DcapMeasurementRegister::RTMR2, [0u8; 48]),
-        (DcapMeasurementRegister::RTMR3, [0u8; 48]),
+        (DcapMeasurementRegister::MRTD, mock_tdx::MOCK_MRTD),
+        (DcapMeasurementRegister::RTMR0, mock_tdx::MOCK_RTMR0),
+        (DcapMeasurementRegister::RTMR1, mock_tdx::MOCK_RTMR1),
+        (DcapMeasurementRegister::RTMR2, mock_tdx::MOCK_RTMR2),
+        (DcapMeasurementRegister::RTMR3, mock_tdx::MOCK_RTMR3),
     ]))
 }
 
@@ -369,11 +358,11 @@ impl MeasurementPolicy {
             accepted_measurements: vec![MeasurementRecord {
                 measurement_id: "test".to_string(),
                 measurements: ExpectedMeasurements::Dcap(HashMap::from([
-                    (DcapMeasurementRegister::MRTD, vec![[0; 48]]),
-                    (DcapMeasurementRegister::RTMR0, vec![[0; 48]]),
-                    (DcapMeasurementRegister::RTMR1, vec![[0; 48]]),
-                    (DcapMeasurementRegister::RTMR2, vec![[0; 48]]),
-                    (DcapMeasurementRegister::RTMR3, vec![[0; 48]]),
+                    (DcapMeasurementRegister::MRTD, vec![mock_tdx::MOCK_MRTD]),
+                    (DcapMeasurementRegister::RTMR0, vec![mock_tdx::MOCK_RTMR0]),
+                    (DcapMeasurementRegister::RTMR1, vec![mock_tdx::MOCK_RTMR1]),
+                    (DcapMeasurementRegister::RTMR2, vec![mock_tdx::MOCK_RTMR2]),
+                    (DcapMeasurementRegister::RTMR3, vec![mock_tdx::MOCK_RTMR3]),
                 ])),
             }],
         }
