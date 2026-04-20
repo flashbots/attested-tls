@@ -21,6 +21,46 @@ pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, Attestat
     Ok(quote)
 }
 
+/// DCAP SGX quote generation via Gramine's `/dev/attestation/*` interface.
+///
+/// Write `input_data` to `/dev/attestation/user_report_data`, then read
+/// `/dev/attestation/quote`. This matches the exact protocol documented
+/// at <https://gramine.readthedocs.io/en/stable/attestation.html> and
+/// mirrors `gramine-sealing-key-provider`'s reference implementation.
+///
+/// Only compiled under `cfg(all(target_os = "linux", feature = "sgx"))` —
+/// non-Linux consumers and consumers that don't opt into SGX don't pay
+/// for the file I/O surface.
+#[cfg(all(target_os = "linux", feature = "sgx"))]
+pub fn create_sgx_gramine_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
+    use std::{
+        fs::{File, OpenOptions},
+        io::{Read, Write},
+    };
+
+    const USER_REPORT_DATA_PATH: &str = "/dev/attestation/user_report_data";
+    const QUOTE_PATH: &str = "/dev/attestation/quote";
+
+    // Gramine's interface: writing user_report_data is the "prepare the
+    // quote" trigger; the subsequent read of /dev/attestation/quote yields
+    // a fresh quote binding the user_report_data we just wrote.
+    let mut urd_file = OpenOptions::new()
+        .write(true)
+        .open(USER_REPORT_DATA_PATH)
+        .map_err(AttestationError::SgxGramineIo)?;
+    urd_file.write_all(&input_data).map_err(AttestationError::SgxGramineIo)?;
+    drop(urd_file);
+
+    let mut quote = Vec::new();
+    File::open(QUOTE_PATH)
+        .map_err(AttestationError::SgxGramineIo)?
+        .read_to_end(&mut quote)
+        .map_err(AttestationError::SgxGramineIo)?;
+
+    tracing::info!("Generated SGX (Gramine) DCAP quote of {} bytes", quote.len());
+    Ok(quote)
+}
+
 /// Verify a DCAP TDX quote, and return the measurement values
 #[cfg(not(any(test, feature = "mock")))]
 pub async fn verify_dcap_attestation(

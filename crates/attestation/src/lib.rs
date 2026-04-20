@@ -89,6 +89,12 @@ pub enum AttestationType {
     QemuTdx,
     /// DCAP TDX
     DcapTdx,
+    /// DCAP SGX under Gramine (quote generated via `/dev/attestation/*`).
+    ///
+    /// Detection and generation are feature-gated under `sgx` + Linux;
+    /// verification of incoming SGX quotes works unconditionally via
+    /// `MultiMeasurements::from_dcap_qvl_quote` regardless of the feature.
+    SgxGramineDcap,
 }
 
 impl AttestationType {
@@ -100,11 +106,25 @@ impl AttestationType {
             AttestationType::QemuTdx => "qemu-tdx",
             AttestationType::GcpTdx => "gcp-tdx",
             AttestationType::DcapTdx => "dcap-tdx",
+            AttestationType::SgxGramineDcap => "sgx-gramine-dcap",
         }
     }
 
     /// Detect what platform we are on by attempting an attestation
     pub async fn detect() -> Result<Self, AttestationError> {
+        // Probe for Gramine-SGX first. Under Gramine, the attestation type is
+        // exposed as a plain-text file; outside Gramine the path does not
+        // exist and we fall through. Feature-gated because the sgx path is
+        // only ever reachable under Linux + Gramine, and consumers that don't
+        // care about SGX needn't compile this probe.
+        #[cfg(all(target_os = "linux", feature = "sgx"))]
+        {
+            if let Ok(s) = tokio::fs::read_to_string("/dev/attestation/attestation_type").await &&
+                s.trim() == "dcap"
+            {
+                return Ok(AttestationType::SgxGramineDcap);
+            }
+        }
         // First attempt azure, if the feature is present
         #[cfg(feature = "azure")]
         {
@@ -238,6 +258,20 @@ impl AttestationGenerator {
                 {
                     tracing::error!(
                         "Attempted to generate an azure attestation but the `azure` feature not enabled"
+                    );
+                    Err(AttestationError::AttestationTypeNotSupported)
+                }
+            }
+            AttestationType::SgxGramineDcap => {
+                #[cfg(all(target_os = "linux", feature = "sgx"))]
+                {
+                    dcap::create_sgx_gramine_attestation(input_data)
+                }
+                #[cfg(not(all(target_os = "linux", feature = "sgx")))]
+                {
+                    tracing::error!(
+                        "Attempted to generate an SGX Gramine attestation but the `sgx` \
+                         feature is not enabled (or we are not on Linux)"
                     );
                     Err(AttestationError::AttestationTypeNotSupported)
                 }
@@ -488,6 +522,9 @@ pub enum AttestationError {
     AttestationGivenWhenNoneExpected,
     #[error("Configfs-tsm quote generation: {0}")]
     QuoteGeneration(#[from] configfs_tsm::QuoteGenerationError),
+    #[cfg(all(target_os = "linux", feature = "sgx"))]
+    #[error("SGX (Gramine) I/O during quote generation: {0}")]
+    SgxGramineIo(std::io::Error),
     #[error("DCAP verification: {0}")]
     DcapVerification(#[from] DcapVerificationError),
     #[error("Attestation type not supported")]

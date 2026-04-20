@@ -67,6 +67,14 @@ mock = ["tdx-quote"]
 # that don't ship rustls directly.
 rustls-exporter = ["rustls"]
 
+# Enables local detection and generation of SGX (Gramine / DCAP) quotes via
+# /dev/attestation/*. Off by default — consumers that only need to verify
+# incoming SGX quotes (via MultiMeasurements::from_dcap_qvl_quote) do not
+# need this feature. Required only on hosts that produce their own SGX
+# quotes under Gramine. Effective only on Linux; the underlying file
+# interface does not exist on other OSes.
+sgx = []
+
 # `azure-tcb-override` — stub feature reserved for the day Phala-Network's
 # `dcap-qvl` crate publishes a crates.io release that exposes the Azure TCB
 # override API they have already merged on their main branch. Enabling this
