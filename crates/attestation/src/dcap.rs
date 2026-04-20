@@ -84,7 +84,15 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
     // The azure-tcb-override feature gates the workaround for a known outdated FMSPC on Azure.
     // Without the feature (the default) the standard verify() is used — correct for SGX/Intel
     // deployments.  See attested-oss/tasks/phase-1d.md Task 3 for context.
-    let _ = override_azure_outdated_tcb; // only meaningful when azure-tcb-override is active
+    #[cfg(not(feature = "azure-tcb-override"))]
+    let _ = override_azure_outdated_tcb;
+
+    #[cfg(feature = "azure-tcb-override")]
+    compile_error!(
+        "the `azure-tcb-override` feature is not yet wired to crates.io dcap-qvl; \
+         see dcap.rs and Cargo.toml — re-wire once Phala ships the Azure override \
+         in a crates.io release"
+    );
     let verified_report = dcap_qvl::verify::verify(&input, &collateral, now)?;
 
     if verified_report.status != "UpToDate" {
