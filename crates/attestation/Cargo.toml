@@ -56,9 +56,11 @@ azure = ["tss-esapi", "az-tdx-vtpm", "openssl"]
 # Allows mock quotes used in tests and exposes related functions for testing
 mock = ["tdx-quote"]
 
-# Enables the Azure TCB-override workaround for a known outdated FMSPC on Azure.
-# Inactive by default; requires the Phala-Network dcap-qvl fork instead of crates.io 0.3.12.
-# See attested-oss/tasks/phase-1d.md Task 3 for context.
+# `azure-tcb-override` — stub feature reserved for the day Phala-Network's
+# `dcap-qvl` crate publishes a crates.io release that exposes the Azure TCB
+# override API they have already merged on their main branch. Enabling this
+# feature today has no effect; re-wiring lives behind a later dcap-qvl bump.
+# See dcap.rs::verify_dcap_attestation_with_given_timestamp for the footgun note.
 azure-tcb-override = []
 
 [lints]

@@ -38,6 +38,20 @@ pub async fn verify_dcap_attestation(
 ///
 /// If collateral is given, it is used instead of contacting PCCS (used in
 /// tests)
+///
+/// # Note: `override_azure_outdated_tcb` parameter is a stub
+///
+/// The `override_azure_outdated_tcb` parameter only has an effect when the
+/// crate is built with the `azure-tcb-override` feature. That feature is
+/// currently a stub (see `Cargo.toml`); enabling it today has no effect on
+/// verification behavior.
+///
+/// Callers passing `true` under the default feature set will silently receive
+/// standard verification behavior. This is a footgun—once Phala-Network's
+/// upstream `dcap-qvl` crate publishes a crates.io release that exposes the
+/// Azure TCB override API they have already merged on their main branch, this
+/// stub will be wired up and the parameter will take effect. Until then,
+/// prefer `false` and rely on proper TCB hygiene.
 pub async fn verify_dcap_attestation_with_given_timestamp(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
