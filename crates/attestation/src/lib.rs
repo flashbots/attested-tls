@@ -4,6 +4,7 @@
 pub mod azure;
 pub mod dcap;
 pub mod measurements;
+pub mod session_exporter;
 
 use std::{
     fmt::{self, Display, Formatter},

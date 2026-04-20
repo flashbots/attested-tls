@@ -41,11 +41,16 @@ openssl = { version = "0.10.75", optional = true }
 # Used by test helpers
 tdx-quote = { version = "0.0.5", features = ["mock"], optional = true }
 
+# Direct rustls dep — only pulled in by the optional `rustls-exporter` feature
+# below. The crate otherwise reaches rustls through tokio-rustls' re-export.
+rustls = { workspace = true, optional = true }
+
 [dev-dependencies]
 tempfile = "3.23.0"
 tdx-quote = { version = "0.0.5", features = ["mock"] }
 tokio-rustls = { workspace = true, default-features = true }
 serde-saphyr = "0.0.22"
+rcgen = "0.14.7"
 
 [features]
 default = []
@@ -55,6 +60,12 @@ azure = ["tss-esapi", "az-tdx-vtpm", "openssl"]
 
 # Allows mock quotes used in tests and exposes related functions for testing
 mock = ["tdx-quote"]
+
+# Exposes a rustls-backed `SessionExporter` implementation so callers can
+# bind attestation `user_report_data` to a live TLS session's RFC 5705
+# exporter output. Off by default to keep `attestation` usable by consumers
+# that don't ship rustls directly.
+rustls-exporter = ["rustls"]
 
 # `azure-tcb-override` — stub feature reserved for the day Phala-Network's
 # `dcap-qvl` crate publishes a crates.io release that exposes the Azure TCB
