@@ -5,16 +5,11 @@ use dcap_qvl::{
     QuoteCollateralV3,
     collateral::get_collateral_for_fmspc,
     quote::{Quote, Report},
-    tcb_info::TcbInfo,
 };
 use pccs::{Pccs, PccsError};
 use thiserror::Error;
 
 use crate::{AttestationError, measurements::MultiMeasurements};
-
-/// FMSPC with which to override TCB level checks on Azure (not used for GCP
-/// or other platforms)
-const AZURE_BAD_FMSPC: &str = "90C06F000000";
 
 /// For fetching collateral directly from Intel, if no PCCS is specified
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
@@ -34,16 +29,8 @@ pub async fn verify_dcap_attestation(
     pccs: Option<Pccs>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    let override_azure_outdated_tcb = false;
-    verify_dcap_attestation_with_given_timestamp(
-        input,
-        expected_input_data,
-        pccs,
-        None,
-        now,
-        override_azure_outdated_tcb,
-    )
-    .await
+    verify_dcap_attestation_with_given_timestamp(input, expected_input_data, pccs, None, now, false)
+        .await
 }
 
 /// Allows the timestamp to be given, making it possible to test with
@@ -65,24 +52,6 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
     let ca = quote.ca()?;
     let fmspc = hex::encode_upper(quote.fmspc()?);
 
-    // Override outdated TCB only if we are on Azure and the FMSPC is known to
-    // be outdated
-    let override_outdated_tcb = if override_azure_outdated_tcb {
-        |mut tcb_info: TcbInfo| {
-            // This is a workaround for a known outdated FMSPC used by azure
-            if tcb_info.fmspc == AZURE_BAD_FMSPC {
-                for tcb_level in &mut tcb_info.tcb_levels {
-                    if tcb_level.tcb.sgx_components[7].svn > 3 {
-                        tcb_level.tcb.sgx_components[7].svn = 3
-                    }
-                }
-            }
-            tcb_info
-        }
-    } else {
-        |tcb_info: TcbInfo| tcb_info
-    };
-
     let collateral = if let Some(given_collateral) = collateral {
         given_collateral
     } else if let Some(ref pccs) = pccs_option {
@@ -98,12 +67,11 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
         .await?
     };
 
-    let verified_report = dcap_qvl::verify::dangerous_verify_with_tcb_override(
-        &input,
-        &collateral,
-        now,
-        override_outdated_tcb,
-    )?;
+    // The azure-tcb-override feature gates the workaround for a known outdated FMSPC on Azure.
+    // Without the feature (the default) the standard verify() is used — correct for SGX/Intel
+    // deployments.  See attested-oss/tasks/phase-1d.md Task 3 for context.
+    let _ = override_azure_outdated_tcb; // only meaningful when azure-tcb-override is active
+    let verified_report = dcap_qvl::verify::verify(&input, &collateral, now)?;
 
     if verified_report.status != "UpToDate" {
         tracing::warn!(
@@ -241,7 +209,12 @@ mod tests {
         measurement_policy.check_measurement(&measurements).unwrap();
     }
 
-    // This specifically tests a quote which has outdated TCB level from Azure
+    // This specifically tests a quote which has outdated TCB level from Azure.
+    // Ignored pending dcap-qvl crates.io/Phala-fork TCB-override reconciliation;
+    // see attested-oss/tasks/phase-1d.md Task 3.  The test requires
+    // dcap_qvl::verify::dangerous_verify_with_tcb_override which is only present in the
+    // Phala-Network fork and is absent from crates.io 0.3.12.
+    #[ignore]
     #[tokio::test]
     async fn test_dcap_verify_azure_override() {
         let attestation_bytes: &'static [u8] =

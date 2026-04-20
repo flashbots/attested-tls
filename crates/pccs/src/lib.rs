@@ -1,14 +1,13 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
-        Weak,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use dcap_qvl::{QuoteCollateralV3, collateral::get_collateral_for_fmspc, tcb_info::TcbInfo};
+use dcap_qvl::{QuoteCollateralV3, collateral::get_collateral_for_fmspc};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
@@ -121,8 +120,8 @@ impl Pccs {
         let next_update = extract_next_update(&collateral, now)?;
 
         let mut cache = self.cache.write().await;
-        if let Some(existing) = cache.get(&cache_key) &&
-            now < existing.next_update
+        if let Some(existing) = cache.get(&cache_key)
+            && now < existing.next_update
         {
             return Ok((existing.collateral.clone(), false));
         }
@@ -329,7 +328,7 @@ async fn fetch_collateral(
 /// - The root CA certificate revocation list
 /// - The PCK certificate revocation list
 fn extract_next_update(collateral: &QuoteCollateralV3, now: i64) -> Result<i64, PccsError> {
-    let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).map_err(|e| {
+    let tcb_info: TcbInfoNextUpdate = serde_json::from_str(&collateral.tcb_info).map_err(|e| {
         PccsError::PccsCollateralParse(format!("Failed to parse TCB info JSON: {e}"))
     })?;
     let qe_identity: QeIdentityNextUpdate =
@@ -537,6 +536,14 @@ struct CacheEntry {
     collateral: QuoteCollateralV3,
     next_update: i64,
     refresh_task: Option<JoinHandle<()>>,
+}
+
+/// Minimal TCB info shape needed to read nextUpdate.
+/// `dcap_qvl::tcb_info::TcbInfo` is a private module in crates.io 0.3.12.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TcbInfoNextUpdate {
+    next_update: String,
 }
 
 /// Minimal QE identity shape needed to read nextUpdate

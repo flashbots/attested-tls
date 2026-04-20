@@ -298,7 +298,7 @@ dependencies = [
  "az-tdx-vtpm",
  "base64 0.22.1",
  "configfs-tsm",
- "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
+ "dcap-qvl",
  "hex",
  "http 1.4.0",
  "num-bigint",
@@ -1128,42 +1128,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dcap-qvl"
-version = "0.3.12"
-source = "git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1#f1dcc65371e941a7b83e3234833d23a1fb232ab1"
-dependencies = [
- "anyhow",
- "asn1_der",
- "base64 0.22.1",
- "borsh",
- "byteorder",
- "chrono",
- "const-oid",
- "dcap-qvl-webpki",
- "der",
- "derive_more 2.1.1",
- "futures",
- "hex",
- "log",
- "p256",
- "parity-scale-codec",
- "pem",
- "reqwest",
- "ring",
- "rustls-pki-types",
- "scale-info",
- "serde",
- "serde-human-bytes",
- "serde_json",
- "sha2",
- "signature",
- "tracing",
- "urlencoding",
- "wasm-bindgen-futures",
- "x509-cert",
-]
-
-[[package]]
 name = "dcap-qvl-webpki"
 version = "0.103.4+dcap.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1336,7 +1300,7 @@ source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da03
 dependencies = [
  "anyhow",
  "cc-eventlog",
- "dcap-qvl 0.3.12 (registry+https://github.com/rust-lang/crates.io-index)",
+ "dcap-qvl",
  "dstack-types",
  "errify",
  "ez-hash",
@@ -2819,7 +2783,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
- "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
+ "dcap-qvl",
  "hex",
  "rcgen 0.14.7",
  "reqwest",
@@ -3125,7 +3089,7 @@ dependencies = [
  "anyhow",
  "bon",
  "cc-eventlog",
- "dcap-qvl 0.3.12 (registry+https://github.com/rust-lang/crates.io-index)",
+ "dcap-qvl",
  "dstack-attest",
  "dstack-types",
  "elliptic-curve",

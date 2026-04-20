@@ -423,7 +423,7 @@ mod tests {
 
         let hcl_report = hcl::HclReport::new(hcl_bytes.to_vec()).unwrap();
         let hcl_var_data = hcl_report.var_data();
-        let var_data_values: serde_json::Value = serde_json::from_slice(&hcl_var_data).unwrap();
+        let var_data_values: serde_json::Value = serde_json::from_slice(hcl_var_data).unwrap();
 
         // Check that it contains 64 byte user data
         assert_eq!(hex::decode(var_data_values["user-data"].as_str().unwrap()).unwrap().len(), 64);
