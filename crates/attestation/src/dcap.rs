@@ -46,12 +46,12 @@ pub async fn verify_dcap_attestation(
 /// currently a stub (see `Cargo.toml`); enabling it today has no effect on
 /// verification behavior.
 ///
-/// Callers passing `true` under the default feature set will silently receive
-/// standard verification behavior. This is a footgun—once Phala-Network's
-/// upstream `dcap-qvl` crate publishes a crates.io release that exposes the
-/// Azure TCB override API they have already merged on their main branch, this
-/// stub will be wired up and the parameter will take effect. Until then,
-/// prefer `false` and rely on proper TCB hygiene.
+/// Callers passing `true` under the default feature set will silently
+/// receive standard verification behavior. This is a footgun—once
+/// Phala-Network's upstream `dcap-qvl` crate publishes a crates.io release
+/// that exposes the Azure TCB override API they have already merged on
+/// their main branch, this stub will be wired up and the parameter will
+/// take effect. Until then, prefer `false` and rely on proper TCB hygiene.
 pub async fn verify_dcap_attestation_with_given_timestamp(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
@@ -81,9 +81,10 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
         .await?
     };
 
-    // The azure-tcb-override feature gates the workaround for a known outdated FMSPC on Azure.
-    // Without the feature (the default) the standard verify() is used — correct for SGX/Intel
-    // deployments.  See attested-oss/tasks/phase-1d.md Task 3 for context.
+    // The azure-tcb-override feature gates the workaround for a known outdated
+    // FMSPC on Azure. Without the feature (the default) the standard
+    // verify() is used — correct for SGX/Intel deployments.  See
+    // attested-oss/tasks/phase-1d.md Task 3 for context.
     #[cfg(not(feature = "azure-tcb-override"))]
     let _ = override_azure_outdated_tcb;
 
@@ -232,10 +233,11 @@ mod tests {
     }
 
     // This specifically tests a quote which has outdated TCB level from Azure.
-    // Ignored pending dcap-qvl crates.io/Phala-fork TCB-override reconciliation;
-    // see attested-oss/tasks/phase-1d.md Task 3.  The test requires
-    // dcap_qvl::verify::dangerous_verify_with_tcb_override which is only present in the
-    // Phala-Network fork and is absent from crates.io 0.3.12.
+    // Ignored pending dcap-qvl crates.io/Phala-fork TCB-override
+    // reconciliation; see attested-oss/tasks/phase-1d.md Task 3.  The test
+    // requires dcap_qvl::verify::dangerous_verify_with_tcb_override which
+    // is only present in the Phala-Network fork and is absent from
+    // crates.io 0.3.12.
     #[ignore]
     #[tokio::test]
     async fn test_dcap_verify_azure_override() {

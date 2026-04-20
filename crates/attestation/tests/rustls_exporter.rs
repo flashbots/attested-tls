@@ -1,28 +1,33 @@
 //! Integration test for the rustls-backed `SessionExporter`.
 //!
-//! Drives a rustls client + server handshake in-memory (no tokio, no sockets),
-//! then asserts that both sides emit byte-identical output when calling
-//! `export_keying_material` with the same (label, context, len). This is the
-//! cryptographic property consumers rely on when binding attestation to a
-//! TLS session.
+//! Drives a rustls client + server handshake in-memory (no tokio, no
+//! sockets), then asserts that both sides emit byte-identical output when
+//! calling `export_keying_material` with the same (label, context, len).
+//! This is the cryptographic property consumers rely on when binding
+//! attestation to a TLS session.
 
 #![cfg(feature = "rustls-exporter")]
 
-use std::io::Cursor;
-use std::sync::Arc;
+use std::{io::Cursor, sync::Arc};
 
 use attestation::session_exporter::{RustlsExporter, SessionExporter};
 use rcgen::{CertificateParams, KeyPair};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::{aws_lc_rs, CryptoProvider};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{
-    ClientConfig, ClientConnection, DigitallySignedStruct, Error as RustlsError, ServerConfig,
-    ServerConnection, SignatureScheme,
+    ClientConfig,
+    ClientConnection,
+    DigitallySignedStruct,
+    Error as RustlsError,
+    ServerConfig,
+    ServerConnection,
+    SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::{CryptoProvider, aws_lc_rs},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
 };
 
-/// Permissive verifier — the test cert is self-signed and we don't care about
-/// trust, only that the exporter produces matching bytes on both sides.
+/// Permissive verifier — the test cert is self-signed and we don't care
+/// about trust, only that the exporter produces matching bytes on both
+/// sides.
 #[derive(Debug)]
 struct AcceptAnyCert;
 
@@ -145,12 +150,8 @@ fn client_and_server_observe_identical_exporter_bytes() {
     let mut client_out = [0u8; 32];
     let mut server_out = [0u8; 32];
 
-    RustlsExporter::new(&client)
-        .export_keying_material(label, None, &mut client_out)
-        .unwrap();
-    RustlsExporter::new(&server)
-        .export_keying_material(label, None, &mut server_out)
-        .unwrap();
+    RustlsExporter::new(&client).export_keying_material(label, None, &mut client_out).unwrap();
+    RustlsExporter::new(&server).export_keying_material(label, None, &mut server_out).unwrap();
 
     assert_eq!(
         client_out, server_out,
@@ -183,10 +184,7 @@ fn exporter_before_handshake_returns_handshake_incomplete() {
         .export_keying_material(b"label", None, &mut out)
         .expect_err("exporter must fail before handshake");
     assert!(
-        matches!(
-            err,
-            attestation::session_exporter::ExportError::HandshakeIncomplete
-        ),
+        matches!(err, attestation::session_exporter::ExportError::HandshakeIncomplete),
         "expected HandshakeIncomplete, got {err:?}"
     );
 }
@@ -197,12 +195,8 @@ fn distinct_labels_produce_distinct_exporter_output() {
 
     let mut out_a = [0u8; 32];
     let mut out_b = [0u8; 32];
-    RustlsExporter::new(&client)
-        .export_keying_material(b"label-a", None, &mut out_a)
-        .unwrap();
-    RustlsExporter::new(&client)
-        .export_keying_material(b"label-b", None, &mut out_b)
-        .unwrap();
+    RustlsExporter::new(&client).export_keying_material(b"label-a", None, &mut out_a).unwrap();
+    RustlsExporter::new(&client).export_keying_material(b"label-b", None, &mut out_b).unwrap();
 
     assert_ne!(out_a, out_b, "distinct labels must yield distinct EKM bytes");
 }

@@ -1,8 +1,8 @@
 //! Exercises the SessionExporter trait against a deterministic test double.
 //!
-//! This test locks in the trait shape only — the rustls-backed implementation
-//! lives behind the `rustls-exporter` feature and has its own test
-//! (`rustls_exporter.rs`).
+//! This test locks in the trait shape only — the rustls-backed
+//! implementation lives behind the `rustls-exporter` feature and has its
+//! own test (`rustls_exporter.rs`).
 
 use std::sync::Mutex;
 
@@ -54,9 +54,7 @@ fn exporter_propagates_context_argument() {
         fill_byte: 0x00,
     };
     let mut out = [0u8; 16];
-    exporter
-        .export_keying_material(b"label", Some(b"context-bytes"), &mut out)
-        .unwrap();
+    exporter.export_keying_material(b"label", Some(b"context-bytes"), &mut out).unwrap();
     assert_eq!(
         exporter.context_seen.lock().unwrap().as_ref().unwrap().as_deref(),
         Some(b"context-bytes".as_ref())

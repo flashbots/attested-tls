@@ -1,7 +1,8 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Weak,
+        Arc,
+        Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -120,8 +121,8 @@ impl Pccs {
         let next_update = extract_next_update(&collateral, now)?;
 
         let mut cache = self.cache.write().await;
-        if let Some(existing) = cache.get(&cache_key)
-            && now < existing.next_update
+        if let Some(existing) = cache.get(&cache_key) &&
+            now < existing.next_update
         {
             return Ok((existing.collateral.clone(), false));
         }
