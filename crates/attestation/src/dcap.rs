@@ -163,8 +163,6 @@ pub fn get_quote_input_data(report: Report) -> [u8; 64] {
 pub enum DcapVerificationError {
     #[error("Quote input is not as expected")]
     InputMismatch,
-    #[error("SGX quote given when TDX quote expected")]
-    SgxNotSupported,
     #[error("System Time: {0}")]
     SystemTime(#[from] std::time::SystemTimeError),
     #[error("DCAP quote verification: {0}")]

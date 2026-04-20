@@ -75,13 +75,49 @@ fn parse_azure_pcr_index(value: &str) -> Result<u32, MeasurementFormatError> {
     Ok(index)
 }
 
+/// Intel SGX enclave identity fields extracted from a DCAP SGX quote.
+///
+/// Unlike TDX — where each measurement register is a 48-byte SHA-384 digest
+/// and the field set is homogeneous — an SGX quote carries two 32-byte
+/// SHA-256 hashes (MRENCLAVE, MRSIGNER) plus two 16-bit version counters
+/// (ISV_PROD_ID, ISV_SVN). We surface them as a dedicated struct rather
+/// than forcing the TDX hash-map shape.
+///
+/// See `dcap-qvl` 0.3.12's `EnclaveReport` for the source-of-truth layout.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SgxMeasurements {
+    /// SHA-256 digest of the enclave's initial memory layout (pinned per
+    /// release to identify exact code / manifest / signing inputs).
+    pub mrenclave: [u8; 32],
+    /// SHA-256 digest of the Intel-signed signing key that endorsed this
+    /// enclave. Groups all releases signed by the same key — useful for
+    /// policy gating on vendor identity.
+    pub mrsigner: [u8; 32],
+    /// Enclave-defined product identifier.
+    pub isv_prod_id: u16,
+    /// Enclave-defined security version number; allows policy to require a
+    /// minimum SVN without re-pinning MRENCLAVE across every release.
+    pub isv_svn: u16,
+}
+
 /// Represents a set of measurements values for one of the supported CVM
 /// platforms
 #[derive(Clone, PartialEq)]
 pub enum MultiMeasurements {
     Dcap(HashMap<DcapMeasurementRegister, [u8; 48]>),
+    Sgx(SgxMeasurements),
     Azure(HashMap<u32, [u8; 32]>),
     NoAttestation,
+}
+
+impl MultiMeasurements {
+    /// Return the inner SGX identity if this value represents an SGX quote.
+    pub fn as_sgx(&self) -> Option<&SgxMeasurements> {
+        match self {
+            MultiMeasurements::Sgx(sgx) => Some(sgx),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Debug for MultiMeasurements {
@@ -90,6 +126,13 @@ impl fmt::Debug for MultiMeasurements {
             Self::Dcap(measurements) => {
                 f.debug_tuple("DCAP").field(&DcapHexDebug(measurements)).finish()
             }
+            Self::Sgx(sgx) => f
+                .debug_struct("SGX")
+                .field("mrenclave", &hex::encode(sgx.mrenclave))
+                .field("mrsigner", &hex::encode(sgx.mrsigner))
+                .field("isv_prod_id", &sgx.isv_prod_id)
+                .field("isv_svn", &sgx.isv_svn)
+                .finish(),
             Self::Azure(measurements) => {
                 f.debug_tuple("Azure").field(&AzureHexDebug(measurements)).finish()
             }
@@ -148,6 +191,12 @@ impl MultiMeasurements {
                 .iter()
                 .map(|(register, value)| ((register.clone() as u8).to_string(), hex::encode(value)))
                 .collect(),
+            MultiMeasurements::Sgx(sgx) => HashMap::from([
+                ("mrenclave".to_string(), hex::encode(sgx.mrenclave)),
+                ("mrsigner".to_string(), hex::encode(sgx.mrsigner)),
+                ("isv_prod_id".to_string(), sgx.isv_prod_id.to_string()),
+                ("isv_svn".to_string(), sgx.isv_svn.to_string()),
+            ]),
             MultiMeasurements::Azure(azure_measurements) => azure_measurements
                 .iter()
                 .map(|(index, value)| (index.to_string(), hex::encode(value)))
@@ -204,8 +253,13 @@ impl MultiMeasurements {
         let report = match quote.report {
             Report::TD10(report) => report,
             Report::TD15(report) => report.base,
-            Report::SgxEnclave(_) => {
-                return Err(DcapVerificationError::SgxNotSupported);
+            Report::SgxEnclave(report) => {
+                return Ok(Self::Sgx(SgxMeasurements {
+                    mrenclave: report.mr_enclave,
+                    mrsigner: report.mr_signer,
+                    isv_prod_id: report.isv_prod_id,
+                    isv_svn: report.isv_svn,
+                }));
             }
         };
         Ok(Self::Dcap(HashMap::from([
@@ -409,6 +463,15 @@ impl MeasurementPolicy {
                     }
                     return true;
                 }
+                false
+            }
+            MultiMeasurements::Sgx(_) => {
+                // SGX policy matching is not yet wired. This arm intentionally
+                // returns `false`, so every SGX quote fails policy enforcement
+                // until a paired `ExpectedMeasurements::Sgx(...)` variant +
+                // matching rule lands. The quote itself parses and extracts
+                // cleanly via `as_sgx()` for callers that enforce identity
+                // outside this policy engine (e.g., pinned-MRENCLAVE hex check).
                 false
             }
             MultiMeasurements::NoAttestation => {
