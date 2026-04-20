@@ -46,8 +46,8 @@ pub async fn verify_dcap_attestation(
     .await
 }
 
-/// Synchonous version - Verify a DCAP TDX quote, and return the measurement
-/// values
+/// Synchronous version - Verify a DCAP TDX quote, and return the
+/// measurement values
 ///
 /// This relies on having DCAP collateral already present in the cache
 ///

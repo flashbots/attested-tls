@@ -224,7 +224,7 @@ fn verify_azure_attestation_with_given_timestamp_sync(
 /// Parses the attestation during verification
 fn prepare_azure_attestation(input: Vec<u8>) -> Result<PreparedAzureAttestation, MaaError> {
     let attestation_document: AttestationDocument = serde_json::from_slice(&input)?;
-    tracing::info!("Attempting to verifiy azure attestation: {attestation_document:?}");
+    tracing::info!("Attempting to verify azure attestation: {attestation_document:?}");
 
     let AttestationDocument { tdx_quote_base64, hcl_report_base64, tpm_attestation } =
         attestation_document;
