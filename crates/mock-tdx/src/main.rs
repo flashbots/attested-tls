@@ -29,7 +29,7 @@ use rcgen::{
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 /// Default output directory for generated mock DCAP fixtures
-const OUTPUT_DIR: &str = "crates/mock-tdx/test-assets/generated-dcap";
+const OUTPUT_DIR: &str = "crates/mock-tdx/assets";
 /// Serialized collateral fixture filename
 const COLLATERAL_BASENAME: &str = "mock-dcap-collateral.yaml";
 /// Root CA DER filename

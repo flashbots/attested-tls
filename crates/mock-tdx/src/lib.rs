@@ -25,16 +25,13 @@ use scale::Encode;
 use sha2::Digest;
 
 /// Embedded collateral fixture contents
-const EMBEDDED_COLLATERAL_YAML: &str =
-    include_str!("../test-assets/generated-dcap/mock-dcap-collateral.yaml");
+const EMBEDDED_COLLATERAL_YAML: &str = include_str!("../assets/mock-dcap-collateral.yaml");
 /// Embedded root CA DER contents
-const EMBEDDED_ROOT_CA_DER: &[u8] =
-    include_bytes!("../test-assets/generated-dcap/mock-root-ca.der");
+const EMBEDDED_ROOT_CA_DER: &[u8] = include_bytes!("../assets/mock-root-ca.der");
 /// Embedded PCK private key PEM contents
-const EMBEDDED_PCK_KEY_PEM: &str = include_str!("../test-assets/generated-dcap/mock-pck-key.pem");
+const EMBEDDED_PCK_KEY_PEM: &str = include_str!("../assets/mock-pck-key.pem");
 /// Embedded PCK chain PEM contents
-const EMBEDDED_PCK_CHAIN_PEM: &str =
-    include_str!("../test-assets/generated-dcap/mock-pck-chain.pem");
+const EMBEDDED_PCK_CHAIN_PEM: &str = include_str!("../assets/mock-pck-chain.pem");
 
 /// Deterministic attestation secret key bytes
 const ATTESTATION_SK: [u8; 32] = [0x55; 32];
