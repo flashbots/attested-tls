@@ -1,15 +1,17 @@
 # mock-tdx
 
 `mock-tdx` generates deterministic mock TDX DCAP artifacts for tests and
-development on non-TDX hardware.
+development on non-TDX hardware. It plays the role of Intel so we can 
+mock the complete DCAP workflow.
 
 It provides:
 
-- a small fixture generator for a mock DCAP trust chain and collateral
-- a quote generator that emits mock TDX DCAP quotes with caller-supplied
+- A small fixture generator for a mock DCAP trust chain and collateral
+- A quote generator that emits mock TDX DCAP quotes with caller-supplied
   `report_data`
-- checked-in mock collateral, root certificates, CRLs, and signing material
+- Checked-in mock collateral, root certificates, CRLs, and signing material
   under `test-assets/generated-dcap`
+- A mock PCS server
 
 The generated quotes are shaped so they can be parsed and verified with
 `dcap-qvl` using the mock root of trust bundled with this crate.

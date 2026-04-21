@@ -200,9 +200,10 @@ pub enum DcapVerificationError {
 
 #[cfg(test)]
 mod tests {
+    use mock_tdx::{MockPcsConfig, spawn_mock_pcs_server};
+
     use super::*;
     use crate::measurements::MeasurementPolicy;
-    use mock_tdx::{MockPcsConfig, spawn_mock_pcs_server};
 
     #[tokio::test]
     async fn test_dcap_verify() {
@@ -293,7 +294,9 @@ mod tests {
         let attestation_bytes = create_dcap_attestation(expected_input_data).unwrap();
 
         let measurements =
-            verify_dcap_attestation(attestation_bytes, expected_input_data, Some(pccs)).await.unwrap();
+            verify_dcap_attestation(attestation_bytes, expected_input_data, Some(pccs))
+                .await
+                .unwrap();
 
         assert_eq!(measurements, crate::measurements::mock_dcap_measurements());
         assert_eq!(mock_pcs.tcb_call_count(), 1);

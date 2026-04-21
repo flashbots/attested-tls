@@ -8,7 +8,8 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Json,
+    Router,
     extract::{Query, State},
     response::IntoResponse,
     routing::get,

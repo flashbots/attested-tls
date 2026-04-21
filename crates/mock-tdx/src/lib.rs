@@ -3,10 +3,19 @@ mod mock_pcs;
 use dcap_qvl::{
     QuoteCollateralV3,
     quote::{
-        AuthData, AuthDataV4, CertificationData, Data, EnclaveReport, Header,
-        QEReportCertificationData, Quote, Report, TDReport10,
+        AuthData,
+        AuthDataV4,
+        CertificationData,
+        Data,
+        EnclaveReport,
+        Header,
+        QEReportCertificationData,
+        Quote,
+        Report,
+        TDReport10,
     },
 };
+pub use mock_pcs::{MockPcsConfig, MockPcsServer, spawn_mock_pcs_server};
 use p256::{
     ecdsa::{Signature, SigningKey, signature::Signer},
     pkcs8::DecodePrivateKey,
@@ -14,8 +23,6 @@ use p256::{
 use scale::Encode;
 use serde::Serialize;
 use sha2::Digest;
-
-pub use mock_pcs::{MockPcsConfig, MockPcsServer, spawn_mock_pcs_server};
 
 /// Embedded collateral fixture contents
 const EMBEDDED_COLLATERAL_YAML: &str =
