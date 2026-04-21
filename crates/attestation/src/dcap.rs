@@ -202,7 +202,7 @@ pub enum DcapVerificationError {
 mod tests {
     use super::*;
     use crate::measurements::MeasurementPolicy;
-    use mock_tdx::{MockPcsConfig, load_mock_tdx_material, spawn_mock_pcs_server};
+    use mock_tdx::{MockPcsConfig, spawn_mock_pcs_server};
 
     #[tokio::test]
     async fn test_dcap_verify() {
@@ -287,19 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_dcap_verify_uses_pccs_when_provided() {
-        let material = load_mock_tdx_material().unwrap();
-        let tcb_info: serde_json::Value = serde_json::from_str(&material.collateral.tcb_info).unwrap();
-        let qe_identity: serde_json::Value =
-            serde_json::from_str(&material.collateral.qe_identity).unwrap();
-        let mock_pcs = spawn_mock_pcs_server(MockPcsConfig {
-            include_fmspcs_listing: false,
-            tcb_next_update: tcb_info["nextUpdate"].as_str().unwrap().to_string(),
-            qe_next_update: qe_identity["nextUpdate"].as_str().unwrap().to_string(),
-            refreshed_tcb_next_update: None,
-            refreshed_qe_next_update: None,
-        })
-        .await
-        .unwrap();
+        let mock_pcs = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
         let pccs = Pccs::new(Some(mock_pcs.base_url.clone()));
         let expected_input_data = [0xA5; 64];
         let attestation_bytes = create_dcap_attestation(expected_input_data).unwrap();

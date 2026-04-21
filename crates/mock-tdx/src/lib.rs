@@ -105,7 +105,7 @@ pub fn load_mock_tdx_material() -> Result<MockTdxMaterial, Box<dyn std::error::E
     let pck_chain_pem = EMBEDDED_PCK_CHAIN_PEM.to_string();
     let manifest: FixtureManifest = serde_json::from_str(EMBEDDED_MANIFEST_JSON)?;
 
-    MockTdxMaterial { collateral, root_ca_der, pck_signing_key, pck_chain_pem, manifest }
+    Ok(MockTdxMaterial { collateral, root_ca_der, pck_signing_key, pck_chain_pem, manifest })
 }
 
 /// Construct a p256 signing key from deterministic secret key bytes

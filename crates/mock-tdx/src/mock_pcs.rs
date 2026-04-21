@@ -28,6 +28,22 @@ pub struct MockPcsConfig {
     pub refreshed_qe_next_update: Option<String>,
 }
 
+impl Default for MockPcsConfig {
+    fn default() -> Self {
+        let material = load_mock_tdx_material().unwrap();
+        let tcb_info: Value = serde_json::from_str(&material.collateral.tcb_info).unwrap();
+        let qe_identity: Value = serde_json::from_str(&material.collateral.qe_identity).unwrap();
+
+        Self {
+            include_fmspcs_listing: false,
+            tcb_next_update: tcb_info["nextUpdate"].as_str().unwrap().to_string(),
+            qe_next_update: qe_identity["nextUpdate"].as_str().unwrap().to_string(),
+            refreshed_tcb_next_update: None,
+            refreshed_qe_next_update: None,
+        }
+    }
+}
+
 pub struct MockPcsServer {
     pub base_url: String,
     _task: JoinHandle<()>,
