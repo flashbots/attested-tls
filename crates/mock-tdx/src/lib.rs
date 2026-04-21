@@ -1,3 +1,5 @@
+mod mock_pcs;
+
 use dcap_qvl::{
     QuoteCollateralV3,
     quote::{
@@ -12,6 +14,8 @@ use p256::{
 use scale::Encode;
 use serde::Serialize;
 use sha2::Digest;
+
+pub use mock_pcs::{MockPcsConfig, MockPcsServer, spawn_mock_pcs_server};
 
 /// Embedded collateral fixture contents
 const EMBEDDED_COLLATERAL_YAML: &str =
@@ -101,7 +105,7 @@ pub fn load_mock_tdx_material() -> Result<MockTdxMaterial, Box<dyn std::error::E
     let pck_chain_pem = EMBEDDED_PCK_CHAIN_PEM.to_string();
     let manifest: FixtureManifest = serde_json::from_str(EMBEDDED_MANIFEST_JSON)?;
 
-    Ok(MockTdxMaterial { collateral, root_ca_der, pck_signing_key, pck_chain_pem, manifest })
+    MockTdxMaterial { collateral, root_ca_der, pck_signing_key, pck_chain_pem, manifest }
 }
 
 /// Construct a p256 signing key from deterministic secret key bytes

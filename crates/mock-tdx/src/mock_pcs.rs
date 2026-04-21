@@ -1,4 +1,3 @@
-//! A mock PCS server used for testing
 use std::{
     collections::HashMap as StdHashMap,
     net::SocketAddr,
@@ -9,40 +8,28 @@ use std::{
 };
 
 use axum::{
-    Json,
-    Router,
+    Json, Router,
     extract::{Query, State},
     response::IntoResponse,
     routing::get,
 };
 use dcap_qvl::QuoteCollateralV3;
-use rcgen::{
-    BasicConstraints,
-    CertificateParams,
-    CertificateRevocationListParams,
-    IsCa,
-    Issuer,
-    KeyPair,
-    KeyUsagePurpose,
-    SerialNumber,
-};
 use serde_json::{Value, json};
-use time::{Duration, OffsetDateTime};
 use tokio::{net::TcpListener, task::JoinHandle};
 
+use crate::load_mock_tdx_material;
+
 #[derive(Clone)]
-pub(super) struct MockPcsConfig {
-    pub(super) fmspc: String,
-    pub(super) include_fmspcs_listing: bool,
-    pub(super) tcb_next_update: String,
-    pub(super) qe_next_update: String,
-    pub(super) refreshed_tcb_next_update: Option<String>,
-    pub(super) refreshed_qe_next_update: Option<String>,
+pub struct MockPcsConfig {
+    pub include_fmspcs_listing: bool,
+    pub tcb_next_update: String,
+    pub qe_next_update: String,
+    pub refreshed_tcb_next_update: Option<String>,
+    pub refreshed_qe_next_update: Option<String>,
 }
 
-/// A mock PCS server so we can run tests without using the Intel PCS.
-pub(super) struct MockPcsServer {
-    pub(super) base_url: String,
+pub struct MockPcsServer {
+    pub base_url: String,
     _task: JoinHandle<()>,
     tcb_calls: Arc<AtomicUsize>,
     qe_calls: Arc<AtomicUsize>,
@@ -55,11 +42,11 @@ impl Drop for MockPcsServer {
 }
 
 impl MockPcsServer {
-    pub(super) fn tcb_call_count(&self) -> usize {
+    pub fn tcb_call_count(&self) -> usize {
         self.tcb_calls.load(Ordering::SeqCst)
     }
 
-    pub(super) fn qe_call_count(&self) -> usize {
+    pub fn qe_call_count(&self) -> usize {
         self.qe_calls.load(Ordering::SeqCst)
     }
 }
@@ -85,24 +72,22 @@ struct MockPcsState {
     qe_calls: Arc<AtomicUsize>,
 }
 
-pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServer {
-    let base_collateral: QuoteCollateralV3 = serde_saphyr::from_slice(include_bytes!(
-        "../../attestation/test-assets/dcap-quote-collateral-00.yaml"
-    ))
-    .unwrap();
-    let now = OffsetDateTime::now_utc();
-    let fresh_crl = generate_mock_crl_der(now, now + Duration::days(365));
+pub async fn spawn_mock_pcs_server(
+    config: MockPcsConfig,
+) -> Result<MockPcsServer, Box<dyn std::error::Error>> {
+    let material = load_mock_tdx_material()?;
+    let base_collateral: QuoteCollateralV3 = material.collateral;
 
-    let mut tcb_info: Value = serde_json::from_str(&base_collateral.tcb_info).unwrap();
+    let mut tcb_info: Value = serde_json::from_str(&base_collateral.tcb_info)?;
     tcb_info["nextUpdate"] = Value::String(config.tcb_next_update.clone());
 
-    let mut qe_identity: Value = serde_json::from_str(&base_collateral.qe_identity).unwrap();
+    let mut qe_identity: Value = serde_json::from_str(&base_collateral.qe_identity)?;
     qe_identity["nextUpdate"] = Value::String(config.qe_next_update.clone());
 
     let tcb_calls = Arc::new(AtomicUsize::new(0));
     let qe_calls = Arc::new(AtomicUsize::new(0));
     let state = Arc::new(MockPcsState {
-        fmspc: config.fmspc,
+        fmspc: material.manifest.fmspc,
         include_fmspcs_listing: config.include_fmspcs_listing,
         base_tcb_info: tcb_info,
         base_qe_identity: qe_identity,
@@ -112,11 +97,11 @@ pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServe
         qe_next_update: config.qe_next_update,
         refreshed_tcb_next_update: config.refreshed_tcb_next_update,
         refreshed_qe_next_update: config.refreshed_qe_next_update,
-        pck_crl: fresh_crl.clone(),
-        pck_crl_issuer_chain: "mock-pck-crl-issuer-chain".to_string(),
-        tcb_issuer_chain: "mock-tcb-info-issuer-chain".to_string(),
-        qe_issuer_chain: "mock-qe-issuer-chain".to_string(),
-        root_ca_crl_hex: hex::encode(fresh_crl),
+        pck_crl: base_collateral.pck_crl,
+        pck_crl_issuer_chain: urlencoding::encode(&base_collateral.pck_crl_issuer_chain).into(),
+        tcb_issuer_chain: urlencoding::encode(&base_collateral.tcb_info_issuer_chain).into(),
+        qe_issuer_chain: urlencoding::encode(&base_collateral.qe_identity_issuer_chain).into(),
+        root_ca_crl_hex: hex::encode(base_collateral.root_ca_crl),
         tcb_calls: tcb_calls.clone(),
         qe_calls: qe_calls.clone(),
     });
@@ -129,13 +114,13 @@ pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServe
         .route("/sgx/certification/v4/rootcacrl", get(mock_root_ca_crl_handler))
         .with_state(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr: SocketAddr = listener.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr: SocketAddr = listener.local_addr()?;
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
-    MockPcsServer { base_url: format!("http://{addr}"), _task: task, tcb_calls, qe_calls }
+    Ok(MockPcsServer { base_url: format!("http://{addr}"), _task: task, tcb_calls, qe_calls })
 }
 
 async fn mock_pck_crl_handler(
@@ -207,30 +192,4 @@ async fn mock_qe_identity_handler(
 
 async fn mock_root_ca_crl_handler(State(state): State<Arc<MockPcsState>>) -> impl IntoResponse {
     state.root_ca_crl_hex.clone()
-}
-
-/// Create a mock certificate revocation list
-fn generate_mock_crl_der(this_update: OffsetDateTime, next_update: OffsetDateTime) -> Vec<u8> {
-    let mut issuer_params = CertificateParams::new(Vec::new()).unwrap();
-    issuer_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    issuer_params.key_usages = vec![
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::CrlSign,
-    ];
-    let issuer_key = KeyPair::generate().unwrap();
-    let issuer = Issuer::new(issuer_params, issuer_key);
-
-    CertificateRevocationListParams {
-        this_update,
-        next_update,
-        crl_number: SerialNumber::from(1_u64),
-        issuing_distribution_point: None,
-        revoked_certs: Vec::new(),
-        key_identifier_method: rcgen::KeyIdMethod::Sha256,
-    }
-    .signed_by(&issuer)
-    .unwrap()
-    .der()
-    .to_vec()
 }

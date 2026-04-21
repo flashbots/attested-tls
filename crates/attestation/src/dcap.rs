@@ -126,20 +126,27 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
 }
 
 #[cfg(any(test, feature = "mock"))]
-#[allow(clippy::unused_async)]
 pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    _pccs: Option<Pccs>,
+    pccs: Option<Pccs>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let quote = Quote::parse(&input)?;
     let material = load_mock_tdx_material().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let ca = quote.ca()?;
+    let fmspc = hex::encode_upper(quote.fmspc()?);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let collateral = if let Some(ref pccs) = pccs {
+        let (collateral, _is_fresh) = pccs.get_collateral(fmspc, ca, now).await?;
+        collateral
+    } else {
+        material.collateral
+    };
     let verifier = dcap_qvl::verify::QuoteVerifier::new(
         material.root_ca_der,
         dcap_qvl::verify::rustcrypto::backend(),
     );
-    verifier.verify(&input, &material.collateral, now)?;
+    verifier.verify(&input, &collateral, now)?;
 
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
     if get_quote_input_data(quote.report) != expected_input_data {
@@ -195,6 +202,8 @@ pub enum DcapVerificationError {
 mod tests {
     use super::*;
     use crate::measurements::MeasurementPolicy;
+    use mock_tdx::{MockPcsConfig, load_mock_tdx_material, spawn_mock_pcs_server};
+
     #[tokio::test]
     async fn test_dcap_verify() {
         let attestation_bytes: &'static [u8] =
@@ -274,5 +283,32 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mock_dcap_verify_uses_pccs_when_provided() {
+        let material = load_mock_tdx_material().unwrap();
+        let tcb_info: serde_json::Value = serde_json::from_str(&material.collateral.tcb_info).unwrap();
+        let qe_identity: serde_json::Value =
+            serde_json::from_str(&material.collateral.qe_identity).unwrap();
+        let mock_pcs = spawn_mock_pcs_server(MockPcsConfig {
+            include_fmspcs_listing: false,
+            tcb_next_update: tcb_info["nextUpdate"].as_str().unwrap().to_string(),
+            qe_next_update: qe_identity["nextUpdate"].as_str().unwrap().to_string(),
+            refreshed_tcb_next_update: None,
+            refreshed_qe_next_update: None,
+        })
+        .await
+        .unwrap();
+        let pccs = Pccs::new(Some(mock_pcs.base_url.clone()));
+        let expected_input_data = [0xA5; 64];
+        let attestation_bytes = create_dcap_attestation(expected_input_data).unwrap();
+
+        let measurements =
+            verify_dcap_attestation(attestation_bytes, expected_input_data, Some(pccs)).await.unwrap();
+
+        assert_eq!(measurements, crate::measurements::mock_dcap_measurements());
+        assert_eq!(mock_pcs.tcb_call_count(), 1);
+        assert_eq!(mock_pcs.qe_call_count(), 1);
     }
 }

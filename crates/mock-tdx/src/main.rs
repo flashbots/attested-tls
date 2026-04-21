@@ -1,23 +1,31 @@
-use mock_tdx::{FixtureManifest, IssuerNames, OutputFiles};
+use std::{
+    fs::{self, write},
+    path::PathBuf,
+};
 
 use dcap_qvl::{
     QuoteCollateralV3,
     intel::{PckExtension, parse_pck_extension},
     tcb_info::{Tcb, TcbComponents, TcbInfo, TcbLevel, TcbStatus},
 };
+use mock_tdx::{FixtureManifest, IssuerNames, OutputFiles};
 use p256::{
     SecretKey,
     ecdsa::{Signature, SigningKey, signature::Signer},
     pkcs8::EncodePrivateKey,
 };
-
 use rcgen::{
-    BasicConstraints, CertificateParams, CertificateRevocationListParams, CertifiedIssuer,
-    CustomExtension, DnType, IsCa, KeyIdMethod, KeyPair, KeyUsagePurpose, SerialNumber,
-};
-use std::{
-    fs::{self, write},
-    path::PathBuf,
+    BasicConstraints,
+    CertificateParams,
+    CertificateRevocationListParams,
+    CertifiedIssuer,
+    CustomExtension,
+    DnType,
+    IsCa,
+    KeyIdMethod,
+    KeyPair,
+    KeyUsagePurpose,
+    SerialNumber,
 };
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 

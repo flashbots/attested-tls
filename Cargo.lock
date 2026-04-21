@@ -2467,6 +2467,7 @@ dependencies = [
 name = "mock-tdx"
 version = "0.0.1"
 dependencies = [
+ "axum",
  "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
  "hex",
  "p256",
@@ -2478,6 +2479,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "time",
+ "tokio",
+ "urlencoding",
  "x509-parser 0.18.1",
  "yasna 0.5.2",
 ]
@@ -2812,9 +2815,9 @@ name = "pccs"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "axum",
  "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
  "hex",
+ "mock-tdx",
  "rcgen 0.14.7",
  "reqwest",
  "serde",
