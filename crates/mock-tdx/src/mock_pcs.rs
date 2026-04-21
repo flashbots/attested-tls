@@ -18,22 +18,29 @@ use dcap_qvl::QuoteCollateralV3;
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 
-use crate::load_mock_tdx_material;
+use crate::mock_collateral;
 
+/// Configuration for a mock PCS server backed by `mock-tdx` collateral
 #[derive(Clone)]
 pub struct MockPcsConfig {
+    /// Whether the `/fmspcs` endpoint should advertise the mock FMSPC
     pub include_fmspcs_listing: bool,
+    /// `nextUpdate` value returned by the first TCB info response
     pub tcb_next_update: String,
+    /// `nextUpdate` value returned by the first QE identity response
     pub qe_next_update: String,
+    /// Optional `nextUpdate` value returned by later TCB info responses
     pub refreshed_tcb_next_update: Option<String>,
+    /// Optional `nextUpdate` value returned by later QE identity responses
     pub refreshed_qe_next_update: Option<String>,
 }
 
 impl Default for MockPcsConfig {
+    /// Builds a fixture-consistent config from the embedded mock collateral
     fn default() -> Self {
-        let material = load_mock_tdx_material().unwrap();
-        let tcb_info: Value = serde_json::from_str(&material.collateral.tcb_info).unwrap();
-        let qe_identity: Value = serde_json::from_str(&material.collateral.qe_identity).unwrap();
+        let collateral = mock_collateral();
+        let tcb_info: Value = serde_json::from_str(&collateral.tcb_info).unwrap();
+        let qe_identity: Value = serde_json::from_str(&collateral.qe_identity).unwrap();
 
         Self {
             include_fmspcs_listing: false,
@@ -45,7 +52,9 @@ impl Default for MockPcsConfig {
     }
 }
 
+/// Handle to a running mock PCS server
 pub struct MockPcsServer {
+    /// Base URL for the spawned server
     pub base_url: String,
     _task: JoinHandle<()>,
     tcb_calls: Arc<AtomicUsize>,
@@ -59,15 +68,18 @@ impl Drop for MockPcsServer {
 }
 
 impl MockPcsServer {
+    /// Returns how many times the TCB info endpoint has been called
     pub fn tcb_call_count(&self) -> usize {
         self.tcb_calls.load(Ordering::SeqCst)
     }
 
+    /// Returns how many times the QE identity endpoint has been called
     pub fn qe_call_count(&self) -> usize {
         self.qe_calls.load(Ordering::SeqCst)
     }
 }
 
+/// Shared state served by the mock PCS routes
 #[derive(Clone)]
 struct MockPcsState {
     fmspc: String,
@@ -89,11 +101,11 @@ struct MockPcsState {
     qe_calls: Arc<AtomicUsize>,
 }
 
+/// Spawns a local mock PCS server using the embedded `mock-tdx` collateral
 pub async fn spawn_mock_pcs_server(
     config: MockPcsConfig,
 ) -> Result<MockPcsServer, Box<dyn std::error::Error>> {
-    let material = load_mock_tdx_material()?;
-    let base_collateral: QuoteCollateralV3 = material.collateral;
+    let base_collateral: QuoteCollateralV3 = mock_collateral();
 
     let mut tcb_info: Value = serde_json::from_str(&base_collateral.tcb_info)?;
     tcb_info["nextUpdate"] = Value::String(config.tcb_next_update.clone());
@@ -104,7 +116,7 @@ pub async fn spawn_mock_pcs_server(
     let tcb_calls = Arc::new(AtomicUsize::new(0));
     let qe_calls = Arc::new(AtomicUsize::new(0));
     let state = Arc::new(MockPcsState {
-        fmspc: material.manifest.fmspc,
+        fmspc: tcb_info["fmspc"].as_str().ok_or("mock collateral missing fmspc")?.to_string(),
         include_fmspcs_listing: config.include_fmspcs_listing,
         base_tcb_info: tcb_info,
         base_qe_identity: qe_identity,
@@ -140,6 +152,7 @@ pub async fn spawn_mock_pcs_server(
     Ok(MockPcsServer { base_url: format!("http://{addr}"), _task: task, tcb_calls, qe_calls })
 }
 
+/// Serves the mock PCK CRL and issuer chain
 async fn mock_pck_crl_handler(
     State(state): State<Arc<MockPcsState>>,
     Query(params): Query<StdHashMap<String, String>>,
@@ -152,6 +165,7 @@ async fn mock_pck_crl_handler(
     ([("SGX-PCK-CRL-Issuer-Chain", state.pck_crl_issuer_chain.clone())], state.pck_crl.clone())
 }
 
+/// Serves the optional FMSPC listing used by PCCS prewarm tests
 async fn mock_fmspcs_handler(State(state): State<Arc<MockPcsState>>) -> impl IntoResponse {
     if state.include_fmspcs_listing {
         Json(json!([{
@@ -163,6 +177,7 @@ async fn mock_fmspcs_handler(State(state): State<Arc<MockPcsState>>) -> impl Int
     }
 }
 
+/// Serves signed TCB info with configurable refresh behavior
 async fn mock_tcb_handler(
     State(state): State<Arc<MockPcsState>>,
     Query(params): Query<StdHashMap<String, String>>,
@@ -185,6 +200,7 @@ async fn mock_tcb_handler(
     )
 }
 
+/// Serves signed QE identity collateral with configurable refresh behavior
 async fn mock_qe_identity_handler(
     State(state): State<Arc<MockPcsState>>,
     Query(params): Query<StdHashMap<String, String>>,
@@ -207,6 +223,7 @@ async fn mock_qe_identity_handler(
     )
 }
 
+/// Serves the root CA CRL expected by the PCS client
 async fn mock_root_ca_crl_handler(State(state): State<Arc<MockPcsState>>) -> impl IntoResponse {
     state.root_ca_crl_hex.clone()
 }

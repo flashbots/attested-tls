@@ -599,13 +599,15 @@ pub enum PccsError {
 
 #[cfg(test)]
 mod tests {
-    use mock_tdx::{MockPcsConfig, load_mock_tdx_material, spawn_mock_pcs_server};
+    use mock_tdx::{MockPcsConfig, mock_collateral, spawn_mock_pcs_server};
     use tokio::time::Duration;
 
     use super::*;
 
     fn mock_tdx_fmspc() -> String {
-        load_mock_tdx_material().unwrap().manifest.fmspc
+        let collateral = mock_collateral();
+        let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).unwrap();
+        tcb_info.fmspc
     }
 
     #[tokio::test]
@@ -629,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_extract_next_update_includes_crl_expiry() {
-        let mut collateral: QuoteCollateralV3 = load_mock_tdx_material().unwrap().collateral;
+        let mut collateral: QuoteCollateralV3 = mock_collateral();
 
         let mut tcb_info: serde_json::Value = serde_json::from_str(&collateral.tcb_info).unwrap();
         tcb_info["nextUpdate"] = serde_json::Value::String("2999-01-01T00:00:00Z".to_string());

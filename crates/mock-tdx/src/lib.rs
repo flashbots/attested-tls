@@ -14,6 +14,7 @@ use dcap_qvl::{
         Report,
         TDReport10,
     },
+    tcb_info::TcbInfo,
 };
 pub use mock_pcs::{MockPcsConfig, MockPcsServer, spawn_mock_pcs_server};
 use p256::{
@@ -21,15 +22,11 @@ use p256::{
     pkcs8::DecodePrivateKey,
 };
 use scale::Encode;
-use serde::Serialize;
 use sha2::Digest;
 
 /// Embedded collateral fixture contents
 const EMBEDDED_COLLATERAL_YAML: &str =
     include_str!("../test-assets/generated-dcap/mock-dcap-collateral.yaml");
-/// Embedded manifest fixture contents
-const EMBEDDED_MANIFEST_JSON: &str =
-    include_str!("../test-assets/generated-dcap/mock-dcap-manifest.json");
 /// Embedded root CA DER contents
 const EMBEDDED_ROOT_CA_DER: &[u8] =
     include_bytes!("../test-assets/generated-dcap/mock-root-ca.der");
@@ -89,30 +86,17 @@ pub const MOCK_RTMR2: [u8; 48] = [0x70; 48];
 /// Mock RTMR3 value used in generated mock TDX quotes
 pub const MOCK_RTMR3: [u8; 48] = [0x80; 48];
 
-/// Mock TDX material loaded from generated assets
-pub struct MockTdxMaterial {
-    /// Quote collateral used to verify generated mock quotes
-    pub collateral: QuoteCollateralV3,
-    /// Mock root CA in DER form
-    pub root_ca_der: Vec<u8>,
-    /// Mock PCK signing key
-    pub pck_signing_key: SigningKey,
-    /// Mock PCK certificate chain in PEM form
-    pub pck_chain_pem: String,
-    /// Manifest describing the generated mock platform
-    pub manifest: FixtureManifest,
+/// Get a DCAP quote verifier with the mock PCK root-of-trust
+pub fn mock_dcap_verifier() -> dcap_qvl::verify::QuoteVerifier {
+    dcap_qvl::verify::QuoteVerifier::new(
+        EMBEDDED_ROOT_CA_DER.to_vec(),
+        dcap_qvl::verify::rustcrypto::backend(),
+    )
 }
 
-/// Load the generated mock TDX material from the workspace fixture
-/// directory
-pub fn load_mock_tdx_material() -> Result<MockTdxMaterial, Box<dyn std::error::Error>> {
-    let collateral: QuoteCollateralV3 = serde_saphyr::from_str(EMBEDDED_COLLATERAL_YAML)?;
-    let root_ca_der = EMBEDDED_ROOT_CA_DER.to_vec();
-    let pck_signing_key = SigningKey::from_pkcs8_pem(EMBEDDED_PCK_KEY_PEM)?;
-    let pck_chain_pem = EMBEDDED_PCK_CHAIN_PEM.to_string();
-    let manifest: FixtureManifest = serde_json::from_str(EMBEDDED_MANIFEST_JSON)?;
-
-    Ok(MockTdxMaterial { collateral, root_ca_der, pck_signing_key, pck_chain_pem, manifest })
+/// Get mock collateral for verifying generated mock quotes
+pub fn mock_collateral() -> QuoteCollateralV3 {
+    serde_saphyr::from_str(EMBEDDED_COLLATERAL_YAML).unwrap()
 }
 
 /// Construct a p256 signing key from deterministic secret key bytes
@@ -126,26 +110,29 @@ pub(crate) fn signing_key_from_secret(
 pub fn generate_mock_tdx_quote(
     report_data: [u8; 64],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let material = load_mock_tdx_material()?;
-    generate_mock_tdx_quote_from_material(&material, report_data)
+    let collateral = mock_collateral();
+    generate_mock_tdx_quote_with_collateral(&collateral, report_data)
 }
 
 /// Generate a mock TDX DCAP quote from a specific loaded material set
-pub fn generate_mock_tdx_quote_from_material(
-    material: &MockTdxMaterial,
+pub fn generate_mock_tdx_quote_with_collateral(
+    collateral: &QuoteCollateralV3,
     report_data: [u8; 64],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let attestation_key = signing_key_from_secret(ATTESTATION_SK)?;
     let attestation_pubkey = raw_public_key(&attestation_key);
 
     let qe_report = build_qe_report(&attestation_pubkey)?;
-    let qe_report_signature = sign_fixed_p256(&material.pck_signing_key, &qe_report);
+
+    let pck_signing_key = SigningKey::from_pkcs8_pem(EMBEDDED_PCK_KEY_PEM)?;
+    let qe_report_signature = sign_fixed_p256(&pck_signing_key, &qe_report);
 
     let outer_certification_data =
         CertificationData { cert_type: QE_REPORT_CERT, body: Data::new(Vec::new()) };
+
     let inner_certification_data = CertificationData {
         cert_type: PCK_CERT_CHAIN,
-        body: Data::new(material.pck_chain_pem.as_bytes().to_vec()),
+        body: Data::new(EMBEDDED_PCK_CHAIN_PEM.as_bytes().to_vec()),
     };
 
     let auth_data = AuthData::V4(AuthDataV4 {
@@ -160,13 +147,16 @@ pub fn generate_mock_tdx_quote_from_material(
         },
     });
 
+    let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info)?;
+    let tcb_level = tcb_info.tcb_levels.first().ok_or("mock TDX collateral missing TCB level")?;
+
     let mut quote = Quote {
         header: Header {
             version: QUOTE_VERSION,
             attestation_key_type: ATTESTATION_KEY_TYPE_ECDSA256_WITH_P256_CURVE,
             tee_type: TEE_TYPE_TDX,
             qe_svn: QE_ISVSVN,
-            pce_svn: material.manifest.pce_svn,
+            pce_svn: tcb_level.tcb.pce_svn,
             qe_vendor_id: INTEL_QE_VENDOR_ID,
             user_data: [0; 20],
         },
@@ -253,69 +243,6 @@ fn signed_quote_scope(quote: &Quote) -> Vec<u8> {
     encoded
 }
 
-/// Summary manifest written alongside generated fixture files
-#[derive(Serialize, serde::Deserialize)]
-pub struct FixtureManifest {
-    /// Mock platform FMSPC encoded as uppercase hex
-    pub fmspc: String,
-    /// Mock platform PCE ID encoded as uppercase hex
-    pub pce_id_hex: String,
-    /// Mock platform PCE SVN
-    pub pce_svn: u16,
-    /// Mock platform CPU SVN encoded as uppercase hex
-    pub cpu_svn_hex: String,
-    /// Mock platform PPID encoded as uppercase hex
-    pub ppid_hex: String,
-    /// Mock QE ISV SVN
-    pub qe_isvsvn: u16,
-    /// Human-readable issuer names embedded in the generated certificates
-    pub issuer_common_names: IssuerNames,
-    /// Generated fixture filenames
-    pub files: OutputFiles,
-}
-
-/// Human-readable issuer names captured in the manifest
-#[derive(Serialize, serde::Deserialize)]
-pub struct IssuerNames {
-    /// Root CA common name
-    pub root_ca: String,
-    /// TCB signing CA common name
-    pub tcb_signing_ca: String,
-    /// TCB signer common name
-    pub tcb_signer: String,
-    /// PCK certificate common name
-    pub pck: String,
-}
-
-/// File inventory for the generated fixture set
-#[derive(Serialize, serde::Deserialize)]
-pub struct OutputFiles {
-    /// Quote collateral fixture filename
-    pub collateral: String,
-    /// Manifest filename
-    pub manifest: String,
-    /// Root CA DER filename
-    pub root_ca_der: String,
-    /// Root CA PEM filename
-    pub root_ca_pem: String,
-    /// Root CA private key PEM filename
-    pub root_ca_key_pem: String,
-    /// TCB signer chain PEM filename
-    pub tcb_signer_chain_pem: String,
-    /// PCK chain PEM filename
-    pub pck_chain_pem: String,
-    /// PCK private key PEM filename
-    pub pck_key_pem: String,
-    /// Root CA CRL DER filename
-    pub root_crl_der: String,
-    /// PCK CRL DER filename
-    pub pck_crl_der: String,
-    /// TCB info JSON filename
-    pub tcb_info_json: String,
-    /// QE identity JSON filename
-    pub qe_identity_json: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,21 +251,20 @@ mod tests {
 
     #[test]
     fn builds_quote_that_parses_and_verifies() {
-        let material = load_mock_tdx_material().unwrap();
         let report_data = [0xAB; 64];
 
-        let quote_bytes = generate_mock_tdx_quote_from_material(&material, report_data).unwrap();
+        let quote_bytes = generate_mock_tdx_quote(report_data).unwrap();
         let quote = Quote::parse(&quote_bytes).unwrap();
         assert_eq!(quote.header.version, QUOTE_VERSION);
         assert_eq!(quote.header.tee_type, TEE_TYPE_TDX);
-        assert_eq!(hex::encode_upper(quote.fmspc().unwrap()), material.manifest.fmspc);
+
+        let collateral = mock_collateral();
+        let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).unwrap();
+        assert_eq!(hex::encode_upper(quote.fmspc().unwrap()), tcb_info.fmspc);
         assert_eq!(quote.ca().unwrap(), "processor");
 
-        let verifier = dcap_qvl::verify::QuoteVerifier::new(
-            material.root_ca_der.clone(),
-            dcap_qvl::verify::rustcrypto::backend(),
-        );
-        let verified = verifier.verify(&quote_bytes, &material.collateral, FIXTURE_TIME).unwrap();
+        let verifier = mock_dcap_verifier();
+        let verified = verifier.verify(&quote_bytes, &collateral, FIXTURE_TIME).unwrap();
         let dcap_qvl::quote::Report::TD10(report) = verified.report else {
             panic!("expected TD10 report");
         };
@@ -353,15 +279,12 @@ mod tests {
         const TD_REPORT10_BYTE_LEN: usize = 584;
         const AUTH_DATA_SIZE_BYTE_LEN: usize = 4;
 
-        let material = load_mock_tdx_material().unwrap();
-        let mut quote_bytes = generate_mock_tdx_quote_from_material(&material, [0xCD; 64]).unwrap();
+        let mut quote_bytes = generate_mock_tdx_quote([0xCD; 64]).unwrap();
         let signature_offset = HEADER_BYTE_LEN + TD_REPORT10_BYTE_LEN + AUTH_DATA_SIZE_BYTE_LEN;
         quote_bytes[signature_offset] ^= 0x01;
 
-        let verifier = dcap_qvl::verify::QuoteVerifier::new(
-            material.root_ca_der.clone(),
-            dcap_qvl::verify::rustcrypto::backend(),
-        );
-        assert!(verifier.verify(&quote_bytes, &material.collateral, FIXTURE_TIME).is_err());
+        let verifier = mock_dcap_verifier();
+        let collateral = mock_collateral();
+        assert!(verifier.verify(&quote_bytes, &collateral, FIXTURE_TIME).is_err());
     }
 }

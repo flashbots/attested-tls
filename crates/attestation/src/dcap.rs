@@ -8,7 +8,7 @@ use dcap_qvl::{
     tcb_info::TcbInfo,
 };
 #[cfg(any(test, feature = "mock"))]
-use mock_tdx::{generate_mock_tdx_quote, load_mock_tdx_material};
+use mock_tdx::generate_mock_tdx_quote;
 use pccs::{Pccs, PccsError};
 use thiserror::Error;
 
@@ -132,7 +132,6 @@ pub async fn verify_dcap_attestation(
     pccs: Option<Pccs>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let quote = Quote::parse(&input)?;
-    let material = load_mock_tdx_material().map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let ca = quote.ca()?;
     let fmspc = hex::encode_upper(quote.fmspc()?);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
@@ -140,12 +139,9 @@ pub async fn verify_dcap_attestation(
         let (collateral, _is_fresh) = pccs.get_collateral(fmspc, ca, now).await?;
         collateral
     } else {
-        material.collateral
+        mock_tdx::mock_collateral()
     };
-    let verifier = dcap_qvl::verify::QuoteVerifier::new(
-        material.root_ca_der,
-        dcap_qvl::verify::rustcrypto::backend(),
-    );
+    let verifier = mock_tdx::mock_dcap_verifier();
     verifier.verify(&input, &collateral, now)?;
 
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;

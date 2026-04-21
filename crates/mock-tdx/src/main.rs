@@ -8,7 +8,6 @@ use dcap_qvl::{
     intel::{PckExtension, parse_pck_extension},
     tcb_info::{Tcb, TcbComponents, TcbInfo, TcbLevel, TcbStatus},
 };
-use mock_tdx::{FixtureManifest, IssuerNames, OutputFiles};
 use p256::{
     SecretKey,
     ecdsa::{Signature, SigningKey, signature::Signer},
@@ -33,28 +32,12 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 const OUTPUT_DIR: &str = "crates/mock-tdx/test-assets/generated-dcap";
 /// Serialized collateral fixture filename
 const COLLATERAL_BASENAME: &str = "mock-dcap-collateral.yaml";
-/// Mock platform manifest filename
-const MANIFEST_BASENAME: &str = "mock-dcap-manifest.json";
 /// Root CA DER filename
 const ROOT_CA_DER_BASENAME: &str = "mock-root-ca.der";
-/// Root CA PEM filename
-const ROOT_CA_PEM_BASENAME: &str = "mock-root-ca.pem";
-/// Root CA private key PEM filename
-const ROOT_CA_KEY_BASENAME: &str = "mock-root-ca-key.pem";
-/// TCB signer issuer chain PEM filename
-const TCB_SIGNER_CHAIN_BASENAME: &str = "mock-tcb-signer-chain.pem";
 /// PCK chain PEM filename
 const PCK_CHAIN_BASENAME: &str = "mock-pck-chain.pem";
 /// PCK private key PEM filename
 const PCK_KEY_BASENAME: &str = "mock-pck-key.pem";
-/// Root CA CRL DER filename
-const ROOT_CRL_DER_BASENAME: &str = "mock-root-ca.crl.der";
-/// PCK CRL DER filename
-const PCK_CRL_DER_BASENAME: &str = "mock-pck.crl.der";
-/// TCB info JSON filename
-const TCB_INFO_JSON_BASENAME: &str = "mock-tcb-info.json";
-/// QE identity JSON filename
-const QE_IDENTITY_JSON_BASENAME: &str = "mock-qe-identity.json";
 
 /// Deterministic PCK secret key bytes
 const PCK_SK: [u8; 32] = [0x44; 32];
@@ -137,7 +120,22 @@ fn sign_raw_p256(signing_key: &SigningKey, bytes: &[u8]) -> Vec<u8> {
 /// This blob was copied from `dcap-qvl`'s `tests/generate_test_certs.sh`
 /// where it is embedded as the OpenSSL DER payload for OID
 /// `1.2.840.113741.1.13.1`
-const VALID_PCK_EXTENSION_HEX: &str = "308201C1301E060A2A864886F84D010D01010410D04EC06D4E6D92DC90D0AD3CF5EE2DDF30820164060A2A864886F84D010D0102308201543010060B2A864886F84D010D01020102010B3010060B2A864886F84D010D01020202010B3010060B2A864886F84D010D0102030201023010060B2A864886F84D010D0102040201023011060B2A864886F84D010D010205020200FF3010060B2A864886F84D010D0102060201013010060B2A864886F84D010D0102070201003010060B2A864886F84D010D0102080201003010060B2A864886F84D010D0102090201003010060B2A864886F84D010D01020A0201003010060B2A864886F84D010D01020B0201003010060B2A864886F84D010D01020C0201003010060B2A864886F84D010D01020D0201003010060B2A864886F84D010D01020E0201003010060B2A864886F84D010D01020F0201003010060B2A864886F84D010D0102100201003010060B2A864886F84D010D01021102010D301F060B2A864886F84D010D01021204100B0B0202FF01000000000000000000003010060A2A864886F84D010D0103040200003014060A2A864886F84D010D0104040600906EA10000300F060A2A864886F84D010D01050A0100";
+const VALID_PCK_EXTENSION_HEX: &str = concat!(
+    "308201C1301E060A2A864886F84D010D01010410D04EC06D4E6D92DC90D0AD3CF5EE2DDF",
+    "30820164060A2A864886F84D010D0102308201543010060B2A864886F84D010D0102010201",
+    "0B3010060B2A864886F84D010D01020202010B3010060B2A864886F84D010D010203020102",
+    "3010060B2A864886F84D010D0102040201023011060B2A864886F84D010D010205020200FF",
+    "3010060B2A864886F84D010D0102060201013010060B2A864886F84D010D01020702010030",
+    "10060B2A864886F84D010D0102080201003010060B2A864886F84D010D0102090201003010",
+    "060B2A864886F84D010D01020A0201003010060B2A864886F84D010D01020B020100301006",
+    "0B2A864886F84D010D01020C0201003010060B2A864886F84D010D01020D0201003010060B",
+    "2A864886F84D010D01020E0201003010060B2A864886F84D010D01020F0201003010060B2A",
+    "864886F84D010D0102100201003010060B2A864886F84D010D01021102010D301F060B2A86",
+    "4886F84D010D01021204100B0B0202FF01000000000000000000003010060A2A864886F84D",
+    "010D0103040200003014060A2A864886F84D010D0104040600906EA10000300F060A2A8648",
+    "86F84D010D01050A0100",
+);
+
 /// Return a known-good Intel SGX extension DER payload for the mock
 /// PCK cert
 fn intel_sgx_extension_der() -> Vec<u8> {
@@ -224,53 +222,28 @@ fn refresh_dcap_fixtures() -> Result<(), Box<dyn std::error::Error>> {
         &pck_extension,
     )?;
 
-    let manifest = FixtureManifest {
-        fmspc: hex::encode_upper(pck_extension.fmspc),
-        pce_id_hex: hex::encode_upper(&pck_extension.pce_id),
-        pce_svn: pck_extension.pce_svn,
-        cpu_svn_hex: hex::encode_upper(pck_extension.cpu_svn),
-        ppid_hex: hex::encode_upper(&pck_extension.ppid),
-        qe_isvsvn: QE_ISVSVN,
-        issuer_common_names: IssuerNames {
-            root_ca: ROOT_CA_CN.to_string(),
-            tcb_signing_ca: TCB_CA_CN.to_string(),
-            tcb_signer: TCB_SIGNER_CN.to_string(),
-            pck: PCK_CN.to_string(),
-        },
-        files: OutputFiles {
-            collateral: COLLATERAL_BASENAME.to_string(),
-            manifest: MANIFEST_BASENAME.to_string(),
-            root_ca_der: ROOT_CA_DER_BASENAME.to_string(),
-            root_ca_pem: ROOT_CA_PEM_BASENAME.to_string(),
-            root_ca_key_pem: ROOT_CA_KEY_BASENAME.to_string(),
-            tcb_signer_chain_pem: TCB_SIGNER_CHAIN_BASENAME.to_string(),
-            pck_chain_pem: PCK_CHAIN_BASENAME.to_string(),
-            pck_key_pem: PCK_KEY_BASENAME.to_string(),
-            root_crl_der: ROOT_CRL_DER_BASENAME.to_string(),
-            pck_crl_der: PCK_CRL_DER_BASENAME.to_string(),
-            tcb_info_json: TCB_INFO_JSON_BASENAME.to_string(),
-            qe_identity_json: QE_IDENTITY_JSON_BASENAME.to_string(),
-        },
-    };
-
     write(output_dir.join(COLLATERAL_BASENAME), serde_saphyr::to_string(&collateral)?)?;
-    write(output_dir.join(MANIFEST_BASENAME), serde_json::to_string_pretty(&manifest)?)?;
     write(output_dir.join(ROOT_CA_DER_BASENAME), root.der().as_ref())?;
-    write(output_dir.join(ROOT_CA_PEM_BASENAME), root.pem())?;
-    write(
-        output_dir.join(ROOT_CA_KEY_BASENAME),
-        key_pair_from_secret(ROOT_CA_SK)?.serialize_pem(),
-    )?;
-    write(output_dir.join(TCB_SIGNER_CHAIN_BASENAME), tcb_signer_chain_pem)?;
     write(output_dir.join(PCK_CHAIN_BASENAME), pck_chain_pem)?;
     write(
         output_dir.join(PCK_KEY_BASENAME),
         SecretKey::from_slice(&PCK_SK)?.to_pkcs8_pem(Default::default())?,
     )?;
-    write(output_dir.join(ROOT_CRL_DER_BASENAME), root_crl.der().as_ref())?;
-    write(output_dir.join(PCK_CRL_DER_BASENAME), pck_crl.der().as_ref())?;
-    write(output_dir.join(TCB_INFO_JSON_BASENAME), format!("{tcb_info_json}\n"))?;
-    write(output_dir.join(QE_IDENTITY_JSON_BASENAME), format!("{qe_identity_json}\n"))?;
+    for basename in [
+        "mock-root-ca.pem",
+        "mock-root-ca-key.pem",
+        "mock-tcb-signer-chain.pem",
+        "mock-root-ca.crl.der",
+        "mock-pck.crl.der",
+        "mock-tcb-info.json",
+        "mock-qe-identity.json",
+    ] {
+        match fs::remove_file(output_dir.join(basename)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
 
     Ok(())
 }
