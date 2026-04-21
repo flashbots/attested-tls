@@ -284,4 +284,21 @@ mod tests {
         let collateral = mock_collateral();
         assert!(verifier.verify(&quote_bytes, &collateral, FIXTURE_TIME).is_err());
     }
+
+    #[test]
+    fn embedded_assets_are_semantically_self_consistent() {
+        let collateral = mock_collateral();
+        let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).unwrap();
+        let verifier = mock_dcap_verifier();
+
+        assert!(!EMBEDDED_ROOT_CA_DER.is_empty());
+        assert!(collateral.pck_certificate_chain.is_some());
+
+        let quote_bytes = generate_mock_tdx_quote([0xEF; 64]).unwrap();
+        let quote = Quote::parse(&quote_bytes).unwrap();
+        assert_eq!(hex::encode_upper(quote.fmspc().unwrap()), tcb_info.fmspc);
+        assert_eq!(quote.header.pce_svn, tcb_info.tcb_levels[0].tcb.pce_svn);
+
+        verifier.verify(&quote_bytes, &collateral, FIXTURE_TIME).unwrap();
+    }
 }
