@@ -360,8 +360,7 @@ async fn fetch_collateral(
     }
 
     // PCK CRL — shared endpoint (SGX path regardless of TEE flavour).
-    let pck_crl_url =
-        format!("{base_url}/sgx/certification/v4/pckcrl?ca={ca}&encoding=der");
+    let pck_crl_url = format!("{base_url}/sgx/certification/v4/pckcrl?ca={ca}&encoding=der");
     let resp = checked_get(&client, &pck_crl_url).await?;
     let pck_crl_issuer_chain = required_header(&resp, "SGX-PCK-CRL-Issuer-Chain")?;
     let pck_crl = resp.bytes().await?.to_vec();
@@ -376,15 +375,15 @@ async fn fetch_collateral(
     let raw_tcb_info = resp.text().await?;
 
     // QE identity — TDX path.
-    let qe_identity_url =
-        format!("{base_url}/tdx/certification/v4/qe/identity?update=standard");
+    let qe_identity_url = format!("{base_url}/tdx/certification/v4/qe/identity?update=standard");
     let resp = checked_get(&client, &qe_identity_url).await?;
     let qe_identity_issuer_chain = required_header(&resp, "SGX-Enclave-Identity-Issuer-Chain")?;
     let raw_qe_identity = resp.text().await?;
 
-    // Root CA CRL — PCCS exposes it directly at /sgx/certification/v4/rootcacrl.
-    // Phala's convention is hex-encoded, so best-effort decode; if the body
-    // already parses as DER we keep it raw.
+    // Root CA CRL — PCCS exposes it directly at
+    // /sgx/certification/v4/rootcacrl. Phala's convention is hex-encoded,
+    // so best-effort decode; if the body already parses as DER we keep it
+    // raw.
     let root_ca_crl_url = format!("{base_url}/sgx/certification/v4/rootcacrl");
     let resp = checked_get(&client, &root_ca_crl_url).await?;
     let root_ca_crl_bytes = resp.bytes().await?.to_vec();
@@ -412,18 +411,15 @@ async fn fetch_collateral(
         signature: String,
     }
 
-    let tcb_resp: TcbInfoResponse<'_> = serde_json::from_str(&raw_tcb_info).map_err(|e| {
-        PccsError::PccsCollateralParse(format!("TCB info response JSON: {e}"))
-    })?;
+    let tcb_resp: TcbInfoResponse<'_> = serde_json::from_str(&raw_tcb_info)
+        .map_err(|e| PccsError::PccsCollateralParse(format!("TCB info response JSON: {e}")))?;
     let tcb_info = tcb_resp.tcb_info.get().to_owned();
     let tcb_info_signature = hex::decode(&tcb_resp.signature).map_err(|_| {
         PccsError::PccsCollateralParse("TCB info signature is not valid hex".to_string())
     })?;
 
-    let qe_resp: QeIdentityResponse<'_> =
-        serde_json::from_str(&raw_qe_identity).map_err(|e| {
-            PccsError::PccsCollateralParse(format!("QE identity response JSON: {e}"))
-        })?;
+    let qe_resp: QeIdentityResponse<'_> = serde_json::from_str(&raw_qe_identity)
+        .map_err(|e| PccsError::PccsCollateralParse(format!("QE identity response JSON: {e}")))?;
     let qe_identity = qe_resp.enclave_identity.get().to_owned();
     let qe_identity_signature = hex::decode(&qe_resp.signature).map_err(|_| {
         PccsError::PccsCollateralParse("QE identity signature is not valid hex".to_string())
