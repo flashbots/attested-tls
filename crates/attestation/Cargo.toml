@@ -76,12 +76,12 @@ rustls-exporter = ["rustls"]
 sgx = []
 
 # Chains to `dcap-qvl/danger-allow-tcb-override`, exposing the upstream
-# `dangerous_verify_with_tcb_override(..., |tcb_info| tcb_info)` entry point.
-# Enabling this feature makes `override_azure_outdated_tcb = true` on
-# `verify_dcap_attestation_with_given_timestamp` invoke that entry point
-# with a pass-through closure — no TCB levels are actually downgraded
-# today; callers who want a real Azure TCB-downgrade policy should treat
-# this as a seam and supply their own closure-based variant (future work).
+# `dangerous_verify_with_tcb_override` entry point. Enabling this feature
+# activates the Azure outdated-FMSPC (`90C06F000000`) workaround inside
+# `verify_dcap_attestation_with_given_timestamp`: when the caller passes
+# `override_azure_outdated_tcb = true`, a closure caps `sgx_components[7].svn`
+# at 3 for that one FMSPC so the quote verifies as UpToDate. SGX/Intel
+# deployments should leave both the feature and the flag off.
 azure-tcb-override = ["dcap-qvl/danger-allow-tcb-override"]
 
 [lints]
