@@ -367,7 +367,7 @@ fn parse_next_update(field: &str, value: &str) -> Result<i64, PccsError> {
         .map(|parsed| parsed.unix_timestamp())
 }
 
-/// Parse a certifcate revocation list and extract the timestamp for next
+/// Parse a certificate revocation list and extract the timestamp for next
 /// update
 fn parse_crl_next_update(field: &str, crl_der: &[u8]) -> Result<i64, PccsError> {
     let (_, crl) = CertificateRevocationList::from_der(crl_der).map_err(|e| {
