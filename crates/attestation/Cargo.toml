@@ -75,12 +75,14 @@ rustls-exporter = ["rustls"]
 # interface does not exist on other OSes.
 sgx = []
 
-# `azure-tcb-override` — stub feature reserved for the day Phala-Network's
-# `dcap-qvl` crate publishes a crates.io release that exposes the Azure TCB
-# override API they have already merged on their main branch. Enabling this
-# feature today has no effect; re-wiring lives behind a later dcap-qvl bump.
-# See dcap.rs::verify_dcap_attestation_with_given_timestamp for the footgun note.
-azure-tcb-override = []
+# Chains to `dcap-qvl/danger-allow-tcb-override`, exposing the upstream
+# `dangerous_verify_with_tcb_override(..., |tcb_info| tcb_info)` entry point.
+# Enabling this feature makes `override_azure_outdated_tcb = true` on
+# `verify_dcap_attestation_with_given_timestamp` invoke that entry point
+# with a pass-through closure — no TCB levels are actually downgraded
+# today; callers who want a real Azure TCB-downgrade policy should treat
+# this as a seam and supply their own closure-based variant (future work).
+azure-tcb-override = ["dcap-qvl/danger-allow-tcb-override"]
 
 [lints]
 workspace = true

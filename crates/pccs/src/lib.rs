@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use dcap_qvl::{QuoteCollateralV3, collateral::get_collateral_for_fmspc};
+use dcap_qvl::QuoteCollateralV3;
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
@@ -308,17 +308,139 @@ impl PccsInput {
     }
 }
 
-/// Fetches collateral from PCCS for a given FMSPC and CA
+/// Fetches TDX collateral from a PCCS endpoint for a given FMSPC and CA.
+///
+/// `dcap-qvl` 0.4 funneled its public collateral API through
+/// `CollateralClient::fetch(&quote)` — quote-first. The fmspc-based
+/// equivalent (`fetch_for_fmspc`) was demoted to `pub(crate)`, so we
+/// cannot call it. This cache layer is keyed on `(fmspc, ca)` without
+/// a quote on hand during startup pre-warm or background refresh, so
+/// we reimplement the PCCS HTTP protocol locally. Mirrors the well-
+/// known PCCS endpoints (RFC-free, but standardised across Intel PCS,
+/// Phala, and every PCCS compatible cache in the wild).
 async fn fetch_collateral(
     url: &str,
     fmspc: String,
     ca: &'static str,
 ) -> Result<QuoteCollateralV3, PccsError> {
-    get_collateral_for_fmspc(
-        url, fmspc, ca, false, // Indicates not SGX
-    )
-    .await
-    .map_err(Into::into)
+    let base_url = url
+        .trim_end_matches('/')
+        .trim_end_matches("/sgx/certification/v4")
+        .trim_end_matches("/tdx/certification/v4")
+        .to_owned();
+
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
+
+    async fn checked_get(
+        client: &reqwest::Client,
+        url: &str,
+    ) -> Result<reqwest::Response, PccsError> {
+        let resp = client.get(url).send().await?;
+        if !resp.status().is_success() {
+            return Err(PccsError::PccsCollateralParse(format!(
+                "HTTP {} from {url}",
+                resp.status()
+            )));
+        }
+        Ok(resp)
+    }
+
+    fn required_header(resp: &reqwest::Response, name: &str) -> Result<String, PccsError> {
+        let raw = resp.headers().get(name).ok_or_else(|| {
+            PccsError::PccsCollateralParse(format!("missing header {name} on PCCS response"))
+        })?;
+        let s = raw.to_str().map_err(|_| {
+            PccsError::PccsCollateralParse(format!("header {name} is not valid UTF-8"))
+        })?;
+        Ok(urlencoding::decode(s)
+            .map_err(|_| {
+                PccsError::PccsCollateralParse(format!("header {name} is not url-encoded UTF-8"))
+            })?
+            .into_owned())
+    }
+
+    // PCK CRL — shared endpoint (SGX path regardless of TEE flavour).
+    let pck_crl_url =
+        format!("{base_url}/sgx/certification/v4/pckcrl?ca={ca}&encoding=der");
+    let resp = checked_get(&client, &pck_crl_url).await?;
+    let pck_crl_issuer_chain = required_header(&resp, "SGX-PCK-CRL-Issuer-Chain")?;
+    let pck_crl = resp.bytes().await?.to_vec();
+
+    // TCB info — TDX path (this cache is TDX-only; callers pass `is_sgx=false`
+    // in all current sites. If/when SGX callers appear, pass a `for_sgx`
+    // flag and flip the path segment here.)
+    let tcb_url = format!("{base_url}/tdx/certification/v4/tcb?fmspc={fmspc}");
+    let resp = checked_get(&client, &tcb_url).await?;
+    let tcb_info_issuer_chain = required_header(&resp, "SGX-TCB-Info-Issuer-Chain")
+        .or_else(|_| required_header(&resp, "TCB-Info-Issuer-Chain"))?;
+    let raw_tcb_info = resp.text().await?;
+
+    // QE identity — TDX path.
+    let qe_identity_url =
+        format!("{base_url}/tdx/certification/v4/qe/identity?update=standard");
+    let resp = checked_get(&client, &qe_identity_url).await?;
+    let qe_identity_issuer_chain = required_header(&resp, "SGX-Enclave-Identity-Issuer-Chain")?;
+    let raw_qe_identity = resp.text().await?;
+
+    // Root CA CRL — PCCS exposes it directly at /sgx/certification/v4/rootcacrl.
+    // Phala's convention is hex-encoded, so best-effort decode; if the body
+    // already parses as DER we keep it raw.
+    let root_ca_crl_url = format!("{base_url}/sgx/certification/v4/rootcacrl");
+    let resp = checked_get(&client, &root_ca_crl_url).await?;
+    let root_ca_crl_bytes = resp.bytes().await?.to_vec();
+    let root_ca_crl = match core::str::from_utf8(&root_ca_crl_bytes)
+        .ok()
+        .and_then(|s| hex::decode(s.trim()).ok())
+    {
+        Some(decoded) => decoded,
+        None => root_ca_crl_bytes,
+    };
+
+    // Preserve the tcbInfo / enclaveIdentity byte representations via
+    // serde_json::value::RawValue so the signatures still verify against
+    // the exact bytes that PCCS signed.
+    #[derive(serde::Deserialize)]
+    struct TcbInfoResponse<'a> {
+        #[serde(rename = "tcbInfo", borrow)]
+        tcb_info: &'a serde_json::value::RawValue,
+        signature: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct QeIdentityResponse<'a> {
+        #[serde(rename = "enclaveIdentity", borrow)]
+        enclave_identity: &'a serde_json::value::RawValue,
+        signature: String,
+    }
+
+    let tcb_resp: TcbInfoResponse<'_> = serde_json::from_str(&raw_tcb_info).map_err(|e| {
+        PccsError::PccsCollateralParse(format!("TCB info response JSON: {e}"))
+    })?;
+    let tcb_info = tcb_resp.tcb_info.get().to_owned();
+    let tcb_info_signature = hex::decode(&tcb_resp.signature).map_err(|_| {
+        PccsError::PccsCollateralParse("TCB info signature is not valid hex".to_string())
+    })?;
+
+    let qe_resp: QeIdentityResponse<'_> =
+        serde_json::from_str(&raw_qe_identity).map_err(|e| {
+            PccsError::PccsCollateralParse(format!("QE identity response JSON: {e}"))
+        })?;
+    let qe_identity = qe_resp.enclave_identity.get().to_owned();
+    let qe_identity_signature = hex::decode(&qe_resp.signature).map_err(|_| {
+        PccsError::PccsCollateralParse("QE identity signature is not valid hex".to_string())
+    })?;
+
+    Ok(QuoteCollateralV3 {
+        pck_crl_issuer_chain,
+        root_ca_crl,
+        pck_crl,
+        tcb_info_issuer_chain,
+        tcb_info,
+        tcb_info_signature,
+        qe_identity_issuer_chain,
+        qe_identity,
+        qe_identity_signature,
+        pck_certificate_chain: None,
+    })
 }
 
 /// Extracts the earliest next update timestamp from collateral metadata

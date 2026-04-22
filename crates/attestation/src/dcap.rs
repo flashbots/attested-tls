@@ -3,7 +3,8 @@
 use configfs_tsm::QuoteGenerationError;
 use dcap_qvl::{
     QuoteCollateralV3,
-    collateral::get_collateral_for_fmspc,
+    collateral::CollateralClient,
+    intel::{quote_ca, quote_fmspc},
     quote::{Quote, Report},
 };
 use pccs::{Pccs, PccsError};
@@ -105,19 +106,19 @@ pub async fn verify_dcap_attestation(
 /// If collateral is given, it is used instead of contacting PCCS (used in
 /// tests)
 ///
-/// # Note: `override_azure_outdated_tcb` parameter is a stub
+/// # `override_azure_outdated_tcb`
 ///
-/// The `override_azure_outdated_tcb` parameter only has an effect when the
-/// crate is built with the `azure-tcb-override` feature. That feature is
-/// currently a stub (see `Cargo.toml`); enabling it today has no effect on
-/// verification behavior.
+/// Gated behind the `azure-tcb-override` feature (which chains to
+/// `dcap-qvl/danger-allow-tcb-override`, upstreamed in dcap-qvl 0.4).
+/// When both the feature AND the parameter are set, verification runs
+/// via `dangerous_verify_with_tcb_override` with a pass-through closure
+/// — i.e. the mechanism is wired but no TCB levels are downgraded today.
 ///
-/// Callers passing `true` under the default feature set will silently
-/// receive standard verification behavior. This is a footgun—once
-/// Phala-Network's upstream `dcap-qvl` crate publishes a crates.io release
-/// that exposes the Azure TCB override API they have already merged on
-/// their main branch, this stub will be wired up and the parameter will
-/// take effect. Until then, prefer `false` and rely on proper TCB hygiene.
+/// Callers that need a real Azure TCB-downgrade policy should introduce
+/// a closure-based overload upstream of this call site. The bool here is
+/// deliberately conservative so behaviour never silently differs from
+/// plain `verify()`; turning the override into an actual policy is a
+/// seam, not a feature completion.
 pub async fn verify_dcap_attestation_with_given_timestamp(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
@@ -129,8 +130,8 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
     let quote = Quote::parse(&input)?;
     tracing::info!("Verifying DCAP attestation: {quote:?}");
 
-    let ca = quote.ca()?;
-    let fmspc = hex::encode_upper(quote.fmspc()?);
+    let ca = quote_ca(&quote)?;
+    let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
 
     let collateral = if let Some(given_collateral) = collateral {
         given_collateral
@@ -138,29 +139,46 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
         let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
         collateral
     } else {
-        get_collateral_for_fmspc(
-            PCS_URL,
-            fmspc.clone(),
-            ca,
-            false, // Indicates not SGX
-        )
-        .await?
+        // No PCCS cache configured: fetch collateral directly from Intel's
+        // public PCS via dcap-qvl 0.4's CollateralClient, which derives
+        // fmspc/ca from the quote's PCK chain itself.
+        CollateralClient::with_default_http(PCS_URL)
+            .map_err(DcapVerificationError::from)?
+            .fetch(&input)
+            .await?
     };
 
-    // The azure-tcb-override feature gates the workaround for a known outdated
-    // FMSPC on Azure. Without the feature (the default) the standard
-    // verify() is used — correct for SGX/Intel deployments.  See
-    // attested-oss/tasks/phase-1d.md Task 3 for context.
-    #[cfg(not(feature = "azure-tcb-override"))]
-    let _ = override_azure_outdated_tcb;
-
-    #[cfg(feature = "azure-tcb-override")]
-    compile_error!(
-        "the `azure-tcb-override` feature is not yet wired to crates.io dcap-qvl; \
-         see dcap.rs and Cargo.toml — re-wire once Phala ships the Azure override \
-         in a crates.io release"
-    );
-    let verified_report = dcap_qvl::verify::verify(&input, &collateral, now)?;
+    // When `azure-tcb-override` is enabled (which chains to
+    // `dcap-qvl/danger-allow-tcb-override`) AND the caller passes
+    // `override_azure_outdated_tcb = true`, use
+    // `dangerous_verify_with_tcb_override` with a pass-through closure.
+    //
+    // The pass-through is intentional for now: it makes the feature
+    // wiring real (no more `compile_error!` stub) without silently
+    // baking a specific Azure TCB-downgrade policy into the library.
+    // Real Azure policies belong to the caller — a follow-up can accept
+    // a closure parameter instead of the bool, or the call site can be
+    // specialised per platform.
+    let verified_report = {
+        #[cfg(feature = "azure-tcb-override")]
+        {
+            if override_azure_outdated_tcb {
+                dcap_qvl::verify::dangerous_verify_with_tcb_override(
+                    &input,
+                    &collateral,
+                    now,
+                    |tcb_info| tcb_info,
+                )?
+            } else {
+                dcap_qvl::verify::verify(&input, &collateral, now)?
+            }
+        }
+        #[cfg(not(feature = "azure-tcb-override"))]
+        {
+            let _ = override_azure_outdated_tcb;
+            dcap_qvl::verify::verify(&input, &collateral, now)?
+        }
+    };
 
     if verified_report.status != "UpToDate" {
         tracing::warn!(
