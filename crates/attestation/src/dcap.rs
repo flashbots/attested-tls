@@ -3,7 +3,8 @@
 use configfs_tsm::QuoteGenerationError;
 use dcap_qvl::{
     QuoteCollateralV3,
-    collateral::get_collateral_for_fmspc,
+    collateral::CollateralClient,
+    intel::{quote_ca, quote_fmspc},
     quote::{Quote, Report},
     tcb_info::TcbInfo,
 };
@@ -62,8 +63,8 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
     let quote = Quote::parse(&input)?;
     tracing::info!("Verifying DCAP attestation: {quote:?}");
 
-    let ca = quote.ca()?;
-    let fmspc = hex::encode_upper(quote.fmspc()?);
+    let ca = quote_ca(&quote)?;
+    let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
 
     // Override outdated TCB only if we are on Azure and the FMSPC is known to
     // be outdated
@@ -89,13 +90,7 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
         let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
         collateral
     } else {
-        get_collateral_for_fmspc(
-            PCS_URL,
-            fmspc.clone(),
-            ca,
-            false, // Indicates not SGX
-        )
-        .await?
+        CollateralClient::with_default_http(PCS_URL)?.fetch(&input).await?
     };
 
     let verified_report = dcap_qvl::verify::dangerous_verify_with_tcb_override(
