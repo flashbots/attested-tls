@@ -1,14 +1,14 @@
 //! Data Center Attestation Primitives (DCAP) evidence generation and
 //! verification
 use configfs_tsm::QuoteGenerationError;
+#[cfg(feature = "azure-tcb-override")]
+use dcap_qvl::tcb_info::TcbInfo;
 use dcap_qvl::{
     QuoteCollateralV3,
     collateral::CollateralClient,
     intel::{quote_ca, quote_fmspc},
     quote::{Quote, Report},
 };
-#[cfg(feature = "azure-tcb-override")]
-use dcap_qvl::tcb_info::TcbInfo;
 use pccs::{Pccs, PccsError};
 use thiserror::Error;
 
