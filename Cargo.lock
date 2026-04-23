@@ -298,7 +298,7 @@ dependencies = [
  "az-tdx-vtpm",
  "base64 0.22.1",
  "configfs-tsm",
- "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
+ "dcap-qvl 0.4.0",
  "hex",
  "http 1.4.0",
  "num-bigint",
@@ -1129,8 +1129,9 @@ dependencies = [
 
 [[package]]
 name = "dcap-qvl"
-version = "0.3.12"
-source = "git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1#f1dcc65371e941a7b83e3234833d23a1fb232ab1"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cd80641b0f720cfa2dccadba84c80f11873b98f4d32fbb6f78c230b4a35f3a4"
 dependencies = [
  "anyhow",
  "asn1_der",
@@ -1336,7 +1337,7 @@ source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da03
 dependencies = [
  "anyhow",
  "cc-eventlog",
- "dcap-qvl 0.3.12 (registry+https://github.com/rust-lang/crates.io-index)",
+ "dcap-qvl 0.3.12",
  "dstack-types",
  "errify",
  "ez-hash",
@@ -2817,9 +2818,8 @@ dependencies = [
 name = "pccs"
 version = "0.0.1"
 dependencies = [
- "anyhow",
  "axum",
- "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
+ "dcap-qvl 0.4.0",
  "hex",
  "rcgen 0.14.7",
  "reqwest",
@@ -2831,6 +2831,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "urlencoding",
  "x509-parser 0.18.1",
 ]
 
@@ -3125,7 +3126,7 @@ dependencies = [
  "anyhow",
  "bon",
  "cc-eventlog",
- "dcap-qvl 0.3.12 (registry+https://github.com/rust-lang/crates.io-index)",
+ "dcap-qvl 0.3.12",
  "dstack-attest",
  "dstack-types",
  "elliptic-curve",

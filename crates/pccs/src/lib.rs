@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use dcap_qvl::{QuoteCollateralV3, collateral::get_collateral_for_fmspc, tcb_info::TcbInfo};
+use dcap_qvl::{QuoteCollateralV3, quote::EncryptedPpidParams, tcb_info::TcbInfo};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
@@ -19,12 +19,17 @@ use tokio::{
 use tracing::debug;
 use x509_parser::{prelude::FromDer, revocation_list::CertificateRevocationList};
 
+mod fetch;
+use fetch::{fetch_collateral, fetch_pck_certificate};
+
 /// For fetching collateral directly from Intel
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 /// How long before expiry to refresh collateral
 const REFRESH_MARGIN_SECS: i64 = 300;
 /// How long to wait before retrying when failing to fetch collateral
 const REFRESH_RETRY_SECS: u64 = 60;
+/// Timeout applied to outbound PCCS/PCS HTTP requests
+const HTTP_TIMEOUT_SECS: u64 = 15;
 /// How many collateral fetches to perform concurrently during initial
 /// pre-warm
 const STARTUP_PREWARM_CONCURRENCY: usize = 8;
@@ -34,6 +39,8 @@ const STARTUP_PREWARM_CONCURRENCY: usize = 8;
 pub struct Pccs {
     /// The URL of the service used to fetch collateral (PCS / PCCS)
     url: String,
+    /// Shared HTTP client for PCCS/PCS requests
+    client: reqwest::Client,
     /// The internal cache
     cache: Arc<RwLock<HashMap<PccsInput, CacheEntry>>>,
     /// The state of the initial pre-warm fetch
@@ -54,10 +61,15 @@ impl Pccs {
     /// Creates a new PCCS cache using the provided URL or Intel PCS default
     pub fn new(url: Option<String>) -> Self {
         let url = url.unwrap_or(PCS_URL.to_string()).trim_end_matches('/').to_string();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .build()
+            .expect("failed to build PCCS HTTP client");
 
         let (prewarm_outcome_tx, _) = watch::channel(None);
         let pccs = Self {
             url,
+            client,
             cache: RwLock::new(HashMap::new()).into(),
             prewarm_stats: Arc::new(PrewarmStats::default()),
             prewarm_outcome_tx,
@@ -117,7 +129,7 @@ impl Pccs {
             }
         }
 
-        let collateral = fetch_collateral(&self.url, fmspc.clone(), ca).await?;
+        let collateral = fetch_collateral(&self.client, &self.url, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
 
         let mut cache = self.cache.write().await;
@@ -133,6 +145,16 @@ impl Pccs {
         Ok((collateral, true))
     }
 
+    /// Fetches a quote-specific PCK certificate chain for non-embedded cert
+    /// types
+    pub async fn fetch_pck_certificate(
+        &self,
+        qeid: &[u8],
+        params: &EncryptedPpidParams,
+    ) -> Result<String, PccsError> {
+        fetch_pck_certificate(&self.client, &self.url, qeid, params).await
+    }
+
     /// Fetches fresh collateral, overwrites cache, and ensures proactive
     /// refresh is scheduled
     async fn refresh_collateral(
@@ -141,7 +163,7 @@ impl Pccs {
         ca: &'static str,
         now: i64,
     ) -> Result<QuoteCollateralV3, PccsError> {
-        let collateral = fetch_collateral(&self.url, fmspc.clone(), ca).await?;
+        let collateral = fetch_collateral(&self.client, &self.url, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
         let cache_key = PccsInput::new(fmspc, ca);
 
@@ -166,9 +188,10 @@ impl Pccs {
 
         let weak_cache = Arc::downgrade(&self.cache);
         let key = cache_key.clone();
+        let client = self.client.clone();
         let url = self.url.clone();
         entry.refresh_task = Some(tokio::spawn(async move {
-            refresh_loop(weak_cache, url, key).await;
+            refresh_loop(weak_cache, client, url, key).await;
         }));
     }
 
@@ -268,8 +291,7 @@ impl Pccs {
     /// Fetches available FMSPC entries from configured PCCS/PCS endpoint
     async fn fetch_fmspcs(&self) -> Result<Vec<FmspcEntry>, PccsError> {
         let url = format!("{}/sgx/certification/v4/fmspcs", self.url);
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?;
-        let response = client.get(&url).send().await?;
+        let response = self.client.get(&url).send().await?;
         if !response.status().is_success() {
             return Err(PccsError::FmspcFetch(response.status()));
         }
@@ -306,19 +328,6 @@ impl PccsInput {
     fn new(fmspc: String, ca: &'static str) -> Self {
         Self { fmspc, ca: ca.to_string() }
     }
-}
-
-/// Fetches collateral from PCCS for a given FMSPC and CA
-async fn fetch_collateral(
-    url: &str,
-    fmspc: String,
-    ca: &'static str,
-) -> Result<QuoteCollateralV3, PccsError> {
-    get_collateral_for_fmspc(
-        url, fmspc, ca, false, // Indicates not SGX
-    )
-    .await
-    .map_err(Into::into)
 }
 
 /// Extracts the earliest next update timestamp from collateral metadata
@@ -421,6 +430,7 @@ fn ca_as_static(ca: &str) -> Option<&'static str> {
 /// Background loop that refreshes collateral for a single cache key
 async fn refresh_loop(
     weak_cache: Weak<RwLock<HashMap<PccsInput, CacheEntry>>>,
+    client: reqwest::Client,
     pccs_url: String,
     key: PccsInput,
 ) {
@@ -477,7 +487,7 @@ async fn refresh_loop(
             continue;
         }
 
-        match fetch_collateral(&pccs_url, key.fmspc.clone(), ca_static).await {
+        match fetch_collateral(&client, &pccs_url, key.fmspc.clone(), ca_static).await {
             Ok(collateral) => {
                 let validate_now = match unix_now() {
                     Ok(timestamp) => timestamp,
@@ -575,10 +585,10 @@ impl PrewarmStats {
 
 #[derive(Error, Debug)]
 pub enum PccsError {
-    #[error("DCAP quote verification: {0}")]
-    DcapQvl(#[from] anyhow::Error),
     #[error("PCCS collateral parse error: {0}")]
     PccsCollateralParse(String),
+    #[error("PCCS fetch error: {0}")]
+    PccsFetch(String),
     #[error("PCCS collateral expired: {0}")]
     PccsCollateralExpired(String),
     #[error("System Time: {0}")]
@@ -618,6 +628,8 @@ mod tests {
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
+            raw_tcb_info_json: None,
+            raw_qe_identity_json: None,
         })
         .await;
 
@@ -652,6 +664,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_collateral_preserves_raw_signed_json_payloads() {
+        let base_collateral: QuoteCollateralV3 = serde_saphyr::from_slice(include_bytes!(
+            "../../attestation/test-assets/dcap-quote-collateral-00.yaml"
+        ))
+        .unwrap();
+        let raw_tcb_info = serde_json::to_string_pretty(
+            &serde_json::from_str::<serde_json::Value>(&base_collateral.tcb_info).unwrap(),
+        )
+        .unwrap();
+        let raw_qe_identity = serde_json::to_string_pretty(
+            &serde_json::from_str::<serde_json::Value>(&base_collateral.qe_identity).unwrap(),
+        )
+        .unwrap();
+
+        let mock = spawn_mock_pcs_server(MockPcsConfig {
+            fmspc: "00806F050000".to_string(),
+            include_fmspcs_listing: false,
+            tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
+            qe_next_update: "2999-01-01T00:00:00Z".to_string(),
+            refreshed_tcb_next_update: None,
+            refreshed_qe_next_update: None,
+            raw_tcb_info_json: Some(raw_tcb_info.clone()),
+            raw_qe_identity_json: Some(raw_qe_identity.clone()),
+        })
+        .await;
+
+        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let (collateral, is_fresh) = pccs
+            .get_collateral("00806F050000".to_string(), "processor", 1_700_000_000)
+            .await
+            .unwrap();
+
+        assert!(is_fresh);
+        assert_eq!(collateral.tcb_info, raw_tcb_info);
+        assert_eq!(collateral.qe_identity, raw_qe_identity);
+        assert!(!collateral.tcb_info_signature.is_empty());
+        assert!(!collateral.qe_identity_signature.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_proactive_refresh_updates_cached_entry() {
         let initial_now = unix_now().unwrap();
         let initial_next_update =
@@ -668,6 +720,8 @@ mod tests {
             qe_next_update: initial_next_update,
             refreshed_tcb_next_update: Some(refreshed_next_update.clone()),
             refreshed_qe_next_update: Some(refreshed_next_update),
+            raw_tcb_info_json: None,
+            raw_qe_identity_json: None,
         })
         .await;
 
@@ -717,6 +771,8 @@ mod tests {
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
+            raw_tcb_info_json: None,
+            raw_qe_identity_json: None,
         })
         .await;
         let pccs = Pccs::new(Some(mock.base_url.clone()));
@@ -752,6 +808,8 @@ mod tests {
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
+            raw_tcb_info_json: None,
+            raw_qe_identity_json: None,
         })
         .await;
         let pccs = Pccs::new(Some(mock.base_url.clone()));
