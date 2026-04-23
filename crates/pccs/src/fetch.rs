@@ -6,17 +6,15 @@
 //! pre-warm and background refresh), so we reimplement the well-known PCCS
 //! HTTP protocol locally.
 //!
-//! The `tcbInfo` and `enclaveIdentity` fields are deserialised through
-//! [`serde_json::value::RawValue`] so the exact bytes Intel signed survive
-//! into [`QuoteCollateralV3`] regardless of which serde_json `Map` backing
-//! ends up selected. Phala's upstream fetcher uses a plain
-//! [`serde_json::Value`] and relies on the `preserve_order` feature being
-//! enabled on `serde_json` (which dcap-qvl requests, and Cargo feature
-//! unification then extends to every dependent crate). `RawValue` removes
-//! that dependency on workspace-level feature flags.
+//! `tcbInfo` and `enclaveIdentity` are round-tripped via
+//! [`serde_json::Value`] — same pattern Phala's upstream fetcher uses.
+//! Correctness relies on `serde_json/preserve_order` being active in the
+//! build graph (dcap-qvl requests it, and Cargo feature unification extends
+//! it to every crate in the workspace), which keeps `Value::Object` backed
+//! by an insertion-order `IndexMap` so the exact bytes Intel signed survive
+//! the round-trip.
 
 use dcap_qvl::{QuoteCollateralV3, quote::EncryptedPpidParams};
-use serde_json::value::RawValue;
 use x509_parser::{
     certificate::X509Certificate,
     extensions::{DistributionPointName, GeneralName, ParsedExtension},
@@ -51,16 +49,16 @@ pub(super) async fn fetch_collateral(
 
     let root_ca_crl = fetch_root_ca_crl(client, &endpoints, &qe_identity_issuer_chain).await?;
 
-    let tcb_resp: TcbInfoResponse<'_> = serde_json::from_str(&raw_tcb_info)
+    let tcb_resp: TcbInfoResponse = serde_json::from_str(&raw_tcb_info)
         .map_err(|e| PccsError::PccsCollateralParse(format!("TCB info response JSON: {e}")))?;
-    let tcb_info = tcb_resp.tcb_info.get().to_owned();
+    let tcb_info = tcb_resp.tcb_info.to_string();
     let tcb_info_signature = hex::decode(&tcb_resp.signature).map_err(|e| {
         PccsError::PccsCollateralParse(format!("TCB info signature is not valid hex: {e}"))
     })?;
 
-    let qe_resp: QeIdentityResponse<'_> = serde_json::from_str(&raw_qe_identity)
+    let qe_resp: QeIdentityResponse = serde_json::from_str(&raw_qe_identity)
         .map_err(|e| PccsError::PccsCollateralParse(format!("QE identity response JSON: {e}")))?;
-    let qe_identity = qe_resp.enclave_identity.get().to_owned();
+    let qe_identity = qe_resp.enclave_identity.to_string();
     let qe_identity_signature = hex::decode(&qe_resp.signature).map_err(|e| {
         PccsError::PccsCollateralParse(format!("QE identity signature is not valid hex: {e}"))
     })?;
@@ -138,21 +136,17 @@ pub(super) async fn fetch_pck_certificate(
     Ok(format!("{pck_cert}\n{pck_cert_chain}"))
 }
 
-/// TCB info envelope. `tcb_info` is borrowed as [`RawValue`] so the exact
-/// bytes Intel signed round-trip into [`QuoteCollateralV3::tcb_info`].
 #[derive(serde::Deserialize)]
-struct TcbInfoResponse<'a> {
-    #[serde(rename = "tcbInfo", borrow)]
-    tcb_info: &'a RawValue,
+struct TcbInfoResponse {
+    #[serde(rename = "tcbInfo")]
+    tcb_info: serde_json::Value,
     signature: String,
 }
 
-/// QE identity envelope. Same byte-preservation constraint as
-/// [`TcbInfoResponse`].
 #[derive(serde::Deserialize)]
-struct QeIdentityResponse<'a> {
-    #[serde(rename = "enclaveIdentity", borrow)]
-    enclave_identity: &'a RawValue,
+struct QeIdentityResponse {
+    #[serde(rename = "enclaveIdentity")]
+    enclave_identity: serde_json::Value,
     signature: String,
 }
 

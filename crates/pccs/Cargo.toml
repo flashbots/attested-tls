@@ -13,7 +13,7 @@ dcap-qvl = { workspace = true }
 tracing = "0.1.41"
 thiserror = "2.0.17"
 serde = "1.0.228"
-serde_json = { version = "1.0.145", features = ["raw_value"] }
+serde_json = "1.0.145"
 hex = "0.4.3"
 reqwest = { version = "0.12.23", default-features = false, features = [
   "rustls-tls-webpki-roots-no-provider",
