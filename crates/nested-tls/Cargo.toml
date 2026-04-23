@@ -21,7 +21,7 @@ actix = [
 ]
 
 [dependencies]
-actix-http = { version = "3.12.0", optional = true }
+actix-http = { version = "3.12.1", optional = true }
 actix-rt = { version = "2.11.0", optional = true }
 actix-service = { version = "2.0.3", optional = true }
 actix-tls = { version = "3.5.0", optional = true }
