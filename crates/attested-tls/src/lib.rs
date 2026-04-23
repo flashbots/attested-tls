@@ -19,8 +19,10 @@ use ra_tls::{
 };
 pub use ra_tls::{cert::CaCert, rcgen};
 use rustls::{
+    CertificateError,
     DigitallySignedStruct,
     DistinguishedName,
+    Error::InvalidCertificate,
     RootCertStore,
     SignatureScheme,
     client::{
@@ -455,32 +457,60 @@ fn create_report_data(
 /// Verifies attested TLS server or client certificates during TLS handshake
 #[derive(Debug)]
 pub struct AttestedCertificateVerifier {
-    /// Underlying verifier when used with a private CA rather than
-    /// self-signed
-    server_verifier: Option<Arc<WebPkiServerVerifier>>,
-    /// Underlying client verifier when used with a private CA rather than
-    /// self-signed
-    client_verifier: Option<Arc<dyn ClientCertVerifier>>,
+    /// Underlying server certificates verifier
+    server_verifier: Arc<WebPkiServerVerifier>,
+    /// Underlying client certificates verifier (when used with a private CA
+    /// rather than self-signed)
+    client_verifier: Arc<dyn ClientCertVerifier>,
     /// Underlying cryptography provider
     crypto_provider: Arc<CryptoProvider>,
     /// Configured for verifying attestations
     attestation_verifier: AttestationVerifier,
     /// Report data of pre-trusted certificates with cache expiry time
-    trusted_certificates: Arc<RwLock<HashMap<[u8; 64], UnixTime>>>,
+    trusted_certs: Arc<RwLock<HashMap<[u8; 64], UnixTime>>>,
+    /// Whether self-signed certificates should be accepted
+    accept_self_signed_certs: bool,
+    /// SHA512 hashes of ASN.1 DER representations of public keys allowed
+    /// for leaf certificates
+    ///
+    /// Note: `None` means default behaviour, that is any public key for
+    ///       leaf certificates is acceptable as long as the certificate
+    ///       and its embedded attestation are valid
+    allowed_leaf_cert_pubkeys: Option<Arc<Vec<[u8; 64]>>>,
 }
 
 impl AttestedCertificateVerifier {
-    /// Create a default TLS certificate verifier wrapping given attestation
+    /// Create default TLS certificate verifier wrapping given attestation
     /// verifier
     pub fn try_default(
         attestation_verifier: AttestationVerifier,
     ) -> Result<Self, AttestedTlsError> {
+        let crypto_provider = default_crypto_provider()?;
+
+        let server_verifier = WebPkiServerVerifier::builder(Arc::new({
+            let mut root_cert_store = rustls::RootCertStore::empty();
+            root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_owned());
+            root_cert_store
+        }))
+        .build()
+        .map_err(AttestedTlsError::VerifierBuilder)?;
+
+        let client_verifier = WebPkiClientVerifier::builder(Arc::new({
+            let mut root_cert_store = rustls::RootCertStore::empty();
+            root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_owned());
+            root_cert_store
+        }))
+        .build()
+        .map_err(AttestedTlsError::VerifierBuilder)?;
+
         Ok(Self {
-            server_verifier: None,
-            client_verifier: None,
-            crypto_provider: default_crypto_provider()?,
+            server_verifier,
+            client_verifier,
+            crypto_provider,
             attestation_verifier,
-            trusted_certificates: Default::default(),
+            trusted_certs: Default::default(),
+            accept_self_signed_certs: true,
+            allowed_leaf_cert_pubkeys: None,
         })
     }
 
@@ -491,14 +521,16 @@ impl AttestedCertificateVerifier {
             root_cert_store: None,
             crypto_provider: None,
             attestation_verifier,
+            accept_self_signed_certs: false,
+            allowed_leaf_cert_pubkeys: None,
         }
     }
 
     /// Given a TLS certificate, return the embedded attestation
     pub fn extract_custom_attestation_from_cert(
-        cert: &CertificateDer<'_>,
+        cert: &X509Certificate<'_>,
     ) -> Result<AttestationExchangeMessage, rustls::Error> {
-        if let Ok(Some(attestation)) = ra_tls::attestation::from_der(cert.as_ref()) &&
+        if let Ok(Some(attestation)) = ra_tls::attestation::from_cert(cert) &&
             let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote
         {
             if let Ok(message) =
@@ -514,9 +546,8 @@ impl AttestedCertificateVerifier {
         }
 
         // If that fails, extract and parse the extension
-        let cert = Self::parse_x509_certificate(cert)?;
         let oid = Oid::from(ra_tls::oids::PHALA_RATLS_TDX_QUOTE)
-            .map_err(|err| rustls::Error::General(format!("invalid attestation OID: {err}")))?;
+            .map_err(|err| rustls::Error::General(format!("invalid attestation OID: {err:?}")))?;
         let ext = cert
             .get_extension_unique(&oid)
             .map_err(|err| Self::bad_encoding(format!("invalid attestation extension: {err}")))?
@@ -529,8 +560,9 @@ impl AttestedCertificateVerifier {
 
     /// Given a certificate, return the attestation report input data based
     /// on public key and expiry, as well as the expiry time
-    fn cert_binding_data(cert: &CertificateDer<'_>) -> Result<([u8; 64], UnixTime), rustls::Error> {
-        let cert = Self::parse_x509_certificate(cert)?;
+    fn cert_binding_data(
+        cert: &X509Certificate<'_>,
+    ) -> Result<([u8; 64], UnixTime), rustls::Error> {
         let not_before: u64 = cert
             .validity()
             .not_before
@@ -543,7 +575,7 @@ impl AttestedCertificateVerifier {
             .timestamp()
             .try_into()
             .map_err(|_| rustls::Error::General("invalid certificate not_after".into()))?;
-        let hostname = Self::hostname_from_cert(&cert)?;
+        let hostname = Self::hostname_from_cert(cert)?;
         let expected_input_data = create_report_data(
             cert.public_key().raw.to_vec(),
             SystemTime::UNIX_EPOCH + Duration::from_secs(not_before),
@@ -556,19 +588,9 @@ impl AttestedCertificateVerifier {
         Ok((expected_input_data, not_after))
     }
 
-    /// Given a certificate and the current time, check if it is currently
-    /// valid
-    fn verify_cert_time_validity(
-        cert: &CertificateDer<'_>,
-        now: UnixTime,
-    ) -> Result<(), rustls::Error> {
-        let cert = Self::parse_x509_certificate(cert)?;
-        Self::verify_cert_time_validity_parsed(&cert, now)
-    }
-
     /// Given a parsed certificate and the current time, check if it is
     /// currently valid
-    fn verify_cert_time_validity_parsed(
+    fn verify_cert_time_validity(
         cert: &X509Certificate<'_>,
         now: UnixTime,
     ) -> Result<(), rustls::Error> {
@@ -587,60 +609,67 @@ impl AttestedCertificateVerifier {
             .map_err(|_| rustls::Error::General("invalid certificate not_after".into()))?;
 
         if now < not_before {
-            return Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::NotValidYetContext {
-                    time: UnixTime::since_unix_epoch(Duration::from_secs(now)),
-                    not_before: UnixTime::since_unix_epoch(Duration::from_secs(not_before)),
-                },
-            ));
+            return Err(InvalidCertificate(CertificateError::NotValidYetContext {
+                time: UnixTime::since_unix_epoch(Duration::from_secs(now)),
+                not_before: UnixTime::since_unix_epoch(Duration::from_secs(not_before)),
+            }));
         }
 
         if now > not_after {
-            return Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::ExpiredContext {
-                    time: UnixTime::since_unix_epoch(Duration::from_secs(now)),
-                    not_after: UnixTime::since_unix_epoch(Duration::from_secs(not_after)),
-                },
-            ));
+            return Err(InvalidCertificate(CertificateError::ExpiredContext {
+                time: UnixTime::since_unix_epoch(Duration::from_secs(now)),
+                not_after: UnixTime::since_unix_epoch(Duration::from_secs(not_after)),
+            }));
         }
 
         Ok(())
     }
 
-    /// Verify server name and time validity for self-signed certs
-    fn verify_server_cert_constraints(
-        cert: &CertificateDer<'_>,
-        server_name: &ServerName<'_>,
+    /// Check if the certificate is self-signed and verify it if it is
+    fn try_verifying_self_signed_cert(
+        &self,
+        cert: &X509Certificate<'_>,
         now: UnixTime,
     ) -> Result<(), rustls::Error> {
-        let parsed = ParsedCertificate::try_from(cert)?;
-        let cert = Self::parse_x509_certificate(cert)?;
-        Self::verify_cert_time_validity_parsed(&cert, now)?;
-        verify_server_name(&parsed, server_name)
+        if cert.subject() != cert.issuer() {
+            // issuer != subject means it's not a self-signed cert, so we just return
+            // the error as-is
+            return Err(InvalidCertificate(CertificateError::UnknownIssuer));
+        }
+
+        // verify the signature
+        cert.verify_signature(None)
+            .inspect_err(|err| tracing::warn!("invalid self-signed certificate signature: {err:?}"))
+            .map_err(|_| CertificateError::BadSignature)?;
+
+        // verify cert-time
+        Self::verify_cert_time_validity(cert, now)?;
+
+        Ok(())
     }
 
     /// Given a certificate with embedded attestation, verify the
     /// attestation if it has not already been verified
     fn verify_attestation_binding(
         &self,
-        end_entity: &CertificateDer<'_>,
+        cert: &X509Certificate<'_>,
         now: UnixTime,
     ) -> Result<(), rustls::Error> {
-        let (expected_input_data, expiry) = Self::cert_binding_data(end_entity)?;
+        let (expected_input_data, expiry) = Self::cert_binding_data(cert)?;
 
         // First check if we have already successfully verified the attestation
         // associated with this certificate
         {
-            let trusted_certificates = self.trusted_certificates.read().map_err(|_| {
+            let trusted_certs = self.trusted_certs.read().map_err(|_| {
                 rustls::Error::General("Trusted certificate cache lock poisoned".into())
             })?;
-            if trusted_certificates.get(&expected_input_data).is_some_and(|expiry| *expiry >= now) {
+            if trusted_certs.get(&expected_input_data).is_some_and(|expiry| *expiry >= now) {
                 tracing::debug!("Skipping attestation verification for trusted certificate");
                 return Ok(());
             }
         }
 
-        let attestation = Self::extract_custom_attestation_from_cert(end_entity)?;
+        let attestation = Self::extract_custom_attestation_from_cert(cert)?;
 
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -651,21 +680,19 @@ impl AttestedCertificateVerifier {
                         tracing::warn!(
                             "Rejecting certificate after attestation verification failure: {err}"
                         );
-                        rustls::Error::InvalidCertificate(
-                            rustls::CertificateError::ApplicationVerificationFailure,
-                        )
+                        InvalidCertificate(CertificateError::ApplicationVerificationFailure)
                     })
             })
         })?;
 
-        let mut trusted_certificates = self.trusted_certificates.write().map_err(|_| {
+        let mut trusted_certs = self.trusted_certs.write().map_err(|_| {
             rustls::Error::General("Trusted certificate cache lock poisoned".into())
         })?;
 
         // Remove any expired entries
-        trusted_certificates.retain(|_, cached_expiry| *cached_expiry >= now);
+        trusted_certs.retain(|_, cached_expiry| *cached_expiry >= now);
         // Write trusted certificate details to cache
-        trusted_certificates.insert(expected_input_data, expiry);
+        trusted_certs.insert(expected_input_data, expiry);
 
         Ok(())
     }
@@ -674,7 +701,7 @@ impl AttestedCertificateVerifier {
     fn bad_encoding(message: impl Into<String>) -> rustls::Error {
         let message = message.into();
         tracing::debug!("Rejecting malformed certificate or attestation payload: {message}");
-        rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        InvalidCertificate(CertificateError::BadEncoding)
     }
 
     /// Helper to parse a certificate and map the error for rustls
@@ -707,18 +734,34 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        if let Some(server_inner) = &self.server_verifier {
-            server_inner.verify_server_cert(
-                end_entity,
-                intermediates,
-                server_name,
-                ocsp_response,
-                now,
-            )?;
-        } else {
-            Self::verify_server_cert_constraints(end_entity, server_name, now)?;
+        let cert = Self::parse_x509_certificate(end_entity)?;
+
+        match self.server_verifier.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        ) {
+            Err(InvalidCertificate(CertificateError::UnknownIssuer)) => {
+                if !self.accept_self_signed_certs || !intermediates.is_empty() {
+                    return Err(InvalidCertificate(CertificateError::UnknownIssuer));
+                }
+                verify_server_name(&ParsedCertificate::try_from(end_entity)?, server_name)?;
+                self.try_verifying_self_signed_cert(&cert, now)?;
+            }
+            Err(err) => return Err(err),
+            Ok(_) => {}
+        };
+
+        if let Some(ref allowed_leaf_cert_pubkeys) = self.allowed_leaf_cert_pubkeys &&
+            !allowed_leaf_cert_pubkeys.contains(&Sha512::digest(cert.public_key().raw).into())
+        {
+            tracing::warn!("Rejecting leaf certificate with un-allowed public key");
+            return Err(InvalidCertificate(CertificateError::UnknownIssuer));
         }
-        self.verify_attestation_binding(end_entity, now)?;
+
+        self.verify_attestation_binding(&cert, now)?;
         Ok(ServerCertVerified::assertion())
     }
 
@@ -755,23 +798,29 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
     }
 
     fn root_hint_subjects(&self) -> Option<&[DistinguishedName]> {
-        self.server_verifier.as_ref().and_then(|server_inner| server_inner.root_hint_subjects())
+        self.server_verifier.root_hint_subjects()
     }
 }
 
 impl ClientCertVerifier for AttestedCertificateVerifier {
     fn offer_client_auth(&self) -> bool {
-        // We assume that if this certificate verifier is used for client auth,
-        // in [ServerConfig] then client auth is desired
+        // client must send its cert so that server could verify the attestation
+        // from the extension
         true
     }
 
     fn client_auth_mandatory(&self) -> bool {
+        // client must send its cert so that server could verify the attestation
+        // from the extension
         true
     }
 
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        self.client_verifier.as_ref().map_or(&[], |client_inner| client_inner.root_hint_subjects())
+        if self.accept_self_signed_certs {
+            // allow client to elect self-signed cert for auth
+            return &[];
+        }
+        self.client_verifier.as_ref().root_hint_subjects()
     }
 
     fn verify_client_cert(
@@ -780,12 +829,27 @@ impl ClientCertVerifier for AttestedCertificateVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        if let Some(client_inner) = &self.client_verifier {
-            client_inner.verify_client_cert(end_entity, intermediates, now)?;
-        } else {
-            Self::verify_cert_time_validity(end_entity, now)?;
+        let cert = Self::parse_x509_certificate(end_entity)?;
+
+        match self.client_verifier.verify_client_cert(end_entity, intermediates, now) {
+            Err(InvalidCertificate(CertificateError::UnknownIssuer)) => {
+                if !self.accept_self_signed_certs || !intermediates.is_empty() {
+                    return Err(InvalidCertificate(CertificateError::UnknownIssuer));
+                }
+                self.try_verifying_self_signed_cert(&cert, now)?;
+            }
+            Err(err) => return Err(err),
+            Ok(_) => {}
         }
-        self.verify_attestation_binding(end_entity, now)?;
+
+        if let Some(ref allowed_leaf_cert_pubkeys) = self.allowed_leaf_cert_pubkeys &&
+            !allowed_leaf_cert_pubkeys.contains(&Sha512::digest(cert.public_key().raw).into())
+        {
+            tracing::warn!("Rejecting leaf certificate with un-allowed public key");
+            return Err(InvalidCertificate(CertificateError::UnknownIssuer));
+        }
+
+        self.verify_attestation_binding(&cert, now)?;
         Ok(ClientCertVerified::assertion())
     }
 
@@ -827,54 +891,134 @@ pub struct AttestedCertificateVerifierBuilder {
     attestation_verifier: AttestationVerifier,
     /// Underlying cryptography provider
     crypto_provider: Option<Arc<CryptoProvider>>,
-    // Custom root of trust
+    /// Whether self-signed certificates should be accepted
+    accept_self_signed_certs: bool,
+    /// SHA512 hashes of ASN.1 DER representations of public keys allowed
+    /// for leaf certificates
+    ///
+    /// Note: `None` means default behaviour, that is any public key for
+    ///       leaf certificates is acceptable as long as the certificate
+    ///       and its embedded attestation are valid
+    allowed_leaf_cert_pubkeys: Option<Vec<[u8; 64]>>,
+    // Custom root-of-trust
     root_cert_store: Option<Arc<RootCertStore>>,
 }
 
 impl AttestedCertificateVerifierBuilder {
     /// Use specified crypto provider
-    pub fn with_crypto_provider(mut self, provider: Arc<CryptoProvider>) -> Self {
-        self.crypto_provider = Some(provider.clone());
+    pub fn with_crypto_provider(mut self, crypto_provider: Arc<CryptoProvider>) -> Self {
+        self.crypto_provider = Some(crypto_provider.clone());
         self
     }
 
-    /// Use specified root of trust
-    pub fn with_root_cert_store(mut self, root_store: RootCertStore) -> Self {
-        self.root_cert_store = Some(Arc::new(root_store));
+    /// Use specified root-of-trust
+    ///
+    /// Note: must not be used together with
+    ///       [`Self::with_accepting_self_signed_certs`]
+    pub fn with_root_cert_store(mut self, root_cert_store: RootCertStore) -> Self {
+        if self.accept_self_signed_certs {
+            panic!(
+                "with_root_cert_store() can not be used together with with_accepting_self_signed_certs()"
+            )
+        }
+        self.root_cert_store = Some(Arc::new(root_cert_store));
+        self
+    }
+
+    /// Accept self-signed certificates
+    ///
+    /// Note: must not be used together with
+    ///       [`Self::with_root_cert_store`]
+    pub fn with_accepting_self_signed_certs(mut self) -> Self {
+        if self.root_cert_store.is_some() {
+            panic!(
+                "with_accepting_self_signed_certs() can not be used together with with_root_cert_store()"
+            )
+        }
+        self.accept_self_signed_certs = true;
+        self
+    }
+
+    /// Allow specific public key for leaf certificates
+    ///
+    /// The input must be the DER-encoded public key bytes, such as
+    /// [`rcgen::KeyPair::public_key_der`]
+    ///
+    /// Note: if at least 1 public key is added to this allow-list of leaf
+    ///       certificate public keys, then only certificates with matching
+    ///       public keys will be accepted
+    pub fn with_allowed_leaf_cert_pubkey(mut self, pubkey_der: &[u8]) -> Self {
+        let mut allowed_leaf_cert_pubkeys = self.allowed_leaf_cert_pubkeys.unwrap_or_default();
+        allowed_leaf_cert_pubkeys.push(Sha512::digest(pubkey_der).into());
+        self.allowed_leaf_cert_pubkeys = Some(allowed_leaf_cert_pubkeys);
+        self
+    }
+
+    /// Allow multiple leaf certificate public keys
+    ///
+    /// The input should be a list of DER-encoded public key bytes, such as
+    /// `rcgen::KeyPair::public_key_der()`
+    ///
+    /// Note: if at least 1 public key is added to this allow-list of leaf
+    ///       certificate public keys, then only certificates with matching
+    ///       public keys will be accepted
+    pub fn with_allowed_leaf_cert_pubkeys<I, B>(mut self, pubkey_ders: I) -> Self
+    where
+        I: IntoIterator<Item = B>,
+        B: AsRef<[u8]>,
+    {
+        let mut allowed_self_signed_cert_pubkeys =
+            self.allowed_leaf_cert_pubkeys.unwrap_or_default();
+        allowed_self_signed_cert_pubkeys.extend(
+            pubkey_ders
+                .into_iter()
+                .map(|pubkey_der| -> [u8; 64] { Sha512::digest(pubkey_der.as_ref()).into() }),
+        );
+        self.allowed_leaf_cert_pubkeys = Some(allowed_self_signed_cert_pubkeys);
         self
     }
 
     /// Finish the build of AttestedCertificateVerifier
     pub fn finish(self) -> Result<AttestedCertificateVerifier, AttestedTlsError> {
-        let provider = match self.crypto_provider {
+        let crypto_provider = match self.crypto_provider {
             None => default_crypto_provider()?,
             Some(provider) => provider,
         };
 
-        let (server_inner, client_inner) = match self.root_cert_store {
-            Some(root_store) => {
-                let server_inner = WebPkiServerVerifier::builder_with_provider(
-                    root_store.clone(),
-                    provider.clone(),
-                )
-                .build()
-                .map_err(AttestedTlsError::VerifierBuilder)?;
-                let client_inner =
-                    WebPkiClientVerifier::builder_with_provider(root_store, provider.clone())
-                        .build()
-                        .map_err(AttestedTlsError::VerifierBuilder)?;
+        let server_verifier = WebPkiServerVerifier::builder_with_provider(
+            self.root_cert_store.clone().unwrap_or_else(|| {
+                Arc::new({
+                    let mut root_cert_store = rustls::RootCertStore::empty();
+                    root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_owned());
+                    root_cert_store
+                })
+            }),
+            crypto_provider.clone(),
+        )
+        .build()
+        .map_err(AttestedTlsError::VerifierBuilder)?;
 
-                (Some(server_inner), Some(client_inner))
-            }
-            None => (None, None),
-        };
+        let client_verifier = WebPkiClientVerifier::builder_with_provider(
+            self.root_cert_store.clone().unwrap_or_else(|| {
+                Arc::new({
+                    let mut root_cert_store = rustls::RootCertStore::empty();
+                    root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.to_owned());
+                    root_cert_store
+                })
+            }),
+            crypto_provider.clone(),
+        )
+        .build()
+        .map_err(AttestedTlsError::VerifierBuilder)?;
 
         Ok(AttestedCertificateVerifier {
-            server_verifier: server_inner,
-            client_verifier: client_inner,
-            crypto_provider: provider,
+            server_verifier,
+            client_verifier,
+            crypto_provider,
             attestation_verifier: self.attestation_verifier,
-            trusted_certificates: Default::default(),
+            trusted_certs: Default::default(),
+            accept_self_signed_certs: self.accept_self_signed_certs,
+            allowed_leaf_cert_pubkeys: self.allowed_leaf_cert_pubkeys.map(Arc::new),
         })
     }
 }
@@ -1017,6 +1161,7 @@ mod tests {
 
         let verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
             .with_crypto_provider(provider.clone())
+            .with_accepting_self_signed_certs()
             .finish()
             .unwrap();
 
@@ -1040,10 +1185,7 @@ mod tests {
 
         let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
 
-        while client.is_handshaking() || server.is_handshaking() {
-            transfer_tls_client_to_server(&mut client, &mut server);
-            transfer_tls_server_to_client(&mut server, &mut client);
-        }
+        complete_handshake_with_timeout(&mut client, &mut server).await;
 
         assert!(!client.is_handshaking());
         assert!(!server.is_handshaking());
@@ -1102,10 +1244,7 @@ mod tests {
 
         let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
 
-        while client.is_handshaking() || server.is_handshaking() {
-            transfer_tls_client_to_server(&mut client, &mut server);
-            transfer_tls_server_to_client(&mut server, &mut client);
-        }
+        complete_handshake_with_timeout(&mut client, &mut server).await;
 
         assert!(!client.is_handshaking());
         assert!(!server.is_handshaking());
@@ -1163,10 +1302,12 @@ mod tests {
 
         let server_verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
             .with_crypto_provider(provider.clone())
+            .with_accepting_self_signed_certs()
             .finish()
             .unwrap();
         let client_verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
             .with_crypto_provider(provider.clone())
+            .with_accepting_self_signed_certs()
             .finish()
             .unwrap();
 
@@ -1189,10 +1330,7 @@ mod tests {
         .unwrap();
         let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
 
-        while client.is_handshaking() || server.is_handshaking() {
-            transfer_tls_client_to_server(&mut client, &mut server);
-            transfer_tls_server_to_client(&mut server, &mut client);
-        }
+        complete_handshake_with_timeout(&mut client, &mut server).await;
 
         assert!(!client.is_handshaking());
         assert!(!server.is_handshaking());
@@ -1218,6 +1356,7 @@ mod tests {
         .unwrap();
         let verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
             .with_crypto_provider(provider.clone())
+            .with_accepting_self_signed_certs()
             .finish()
             .unwrap();
 
@@ -1240,10 +1379,7 @@ mod tests {
         .unwrap();
         let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
 
-        while client.is_handshaking() || server.is_handshaking() {
-            transfer_tls_client_to_server(&mut client, &mut server);
-            transfer_tls_server_to_client(&mut server, &mut client);
-        }
+        complete_handshake_with_timeout(&mut client, &mut server).await;
 
         assert!(!client.is_handshaking());
         assert!(!server.is_handshaking());
@@ -1287,7 +1423,7 @@ mod tests {
             UnixTime::now(),
         );
 
-        assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::BadEncoding));
+        assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::BadEncoding),);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1310,6 +1446,7 @@ mod tests {
         let verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
             .with_crypto_provider(provider)
             .with_root_cert_store(roots)
+            .with_allowed_leaf_cert_pubkey(&[0u8; 32])
             .finish()
             .unwrap();
 
@@ -1343,6 +1480,7 @@ mod tests {
         let verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
             .with_crypto_provider(provider)
             .with_root_cert_store(roots)
+            .with_allowed_leaf_cert_pubkey(&[0u8; 32])
             .finish()
             .unwrap();
 
@@ -1351,7 +1489,40 @@ mod tests {
         assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::UnknownIssuer));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
+    async fn non_self_signed_attested_certificate_with_unknown_issuer_is_rejected() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let resolver = AttestedCertificateResolver::build(
+            "foo",
+            AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+        )
+        .with_crypto_provider(provider.clone())
+        .with_key_pair(&key_pair)
+        .with_ca_cert(test_ca())
+        .with_certificate_validity(Duration::from_secs(4))
+        .finish()
+        .unwrap();
+        let verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
+            .with_crypto_provider(provider)
+            .finish()
+            .unwrap();
+        let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
+        let parsed_cert = AttestedCertificateVerifier::parse_x509_certificate(&cert).unwrap();
+
+        assert_ne!(parsed_cert.subject(), parsed_cert.issuer());
+
+        let result = verify_server_cert_direct(
+            &verifier,
+            &cert,
+            &ServerName::try_from("foo").unwrap(),
+            UnixTime::now(),
+        );
+
+        assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::UnknownIssuer));
+    }
+
+    #[tokio::test]
     async fn self_signed_attested_certificate_with_wrong_name_is_rejected() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -1366,6 +1537,7 @@ mod tests {
         .unwrap();
         let verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
             .with_crypto_provider(provider)
+            .with_accepting_self_signed_certs()
             .finish()
             .unwrap();
         let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
@@ -1380,7 +1552,68 @@ mod tests {
         assert!(matches!(
             result.unwrap_err(),
             Error::InvalidCertificate(CertificateError::NotValidForNameContext { .. })
-        ));
+        ),);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn self_signed_attested_certificate_with_allowed_pubkey_is_accepted() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let resolver = AttestedCertificateResolver::build(
+            "foo",
+            AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+        )
+        .with_crypto_provider(provider.clone())
+        .with_key_pair(&key_pair)
+        .with_certificate_validity(Duration::from_secs(4))
+        .finish()
+        .unwrap();
+        let verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
+            .with_crypto_provider(provider)
+            .with_accepting_self_signed_certs()
+            .with_allowed_leaf_cert_pubkey(&key_pair.public_key_der())
+            .finish()
+            .unwrap();
+        let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
+
+        verify_server_cert_direct(
+            &verifier,
+            &cert,
+            &ServerName::try_from("foo").unwrap(),
+            UnixTime::now(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn self_signed_attested_certificate_with_not_allowed_pubkey_is_rejected() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let trusted_key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let presented_key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let resolver = AttestedCertificateResolver::build(
+            "foo",
+            AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+        )
+        .with_crypto_provider(provider.clone())
+        .with_key_pair(&presented_key_pair)
+        .with_certificate_validity(Duration::from_secs(4))
+        .finish()
+        .unwrap();
+        let verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
+            .with_crypto_provider(provider)
+            .with_allowed_leaf_cert_pubkey(&trusted_key_pair.public_key_der())
+            .finish()
+            .unwrap();
+        let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
+
+        let result = verify_server_cert_direct(
+            &verifier,
+            &cert,
+            &ServerName::try_from("foo").unwrap(),
+            UnixTime::now(),
+        );
+
+        assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::UnknownIssuer));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1396,13 +1629,14 @@ mod tests {
         .with_certificate_validity(Duration::from_secs(4))
         .finish()
         .unwrap();
-        let original_cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
+
+        let cert = resolver.state.certificate.read().unwrap();
+        let cert =
+            AttestedCertificateVerifier::parse_x509_certificate(cert.first().unwrap()).unwrap();
         let (original_report_data, original_not_after) =
-            AttestedCertificateVerifier::cert_binding_data(&original_cert).unwrap();
-        let parsed_cert =
-            AttestedCertificateVerifier::parse_x509_certificate(&original_cert).unwrap();
-        let not_before = parsed_cert.validity().not_before.timestamp() as u64;
-        let not_after = parsed_cert.validity().not_after.timestamp() as u64;
+            AttestedCertificateVerifier::cert_binding_data(&cert).unwrap();
+        let not_before = cert.validity().not_before.timestamp() as u64;
+        let not_after = cert.validity().not_after.timestamp() as u64;
         let key_pair = KeyPair::try_from(resolver.state.key_pair_der.clone()).unwrap();
         let replay_name = "bar".to_string();
         let replay_alt_names = vec![replay_name.clone()];
@@ -1415,8 +1649,9 @@ mod tests {
             .usage_server_auth(true)
             .usage_client_auth(true)
             .build();
-        let replayed_cert: CertificateDer<'static> =
-            replayed_cert_request.self_signed().unwrap().der().to_vec().into();
+        let replayed_cert = replayed_cert_request.self_signed().unwrap();
+        let replayed_cert =
+            AttestedCertificateVerifier::parse_x509_certificate(replayed_cert.der()).unwrap();
         let (replayed_report_data, replayed_not_after) =
             AttestedCertificateVerifier::cert_binding_data(&replayed_cert).unwrap();
 
@@ -1439,6 +1674,7 @@ mod tests {
         .unwrap();
         let verifier = AttestedCertificateVerifier::build(AttestationVerifier::expect_none())
             .with_crypto_provider(provider)
+            .with_accepting_self_signed_certs()
             .finish()
             .unwrap();
         let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
@@ -1471,11 +1707,15 @@ mod tests {
         .unwrap();
         let mut verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
             .with_crypto_provider(provider)
+            .with_accepting_self_signed_certs()
             .finish()
             .unwrap();
         let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
-        let (expected_input_data, not_after) =
-            AttestedCertificateVerifier::cert_binding_data(&cert).unwrap();
+
+        let (expected_input_data, not_after) = AttestedCertificateVerifier::cert_binding_data(
+            &AttestedCertificateVerifier::parse_x509_certificate(&cert).unwrap(),
+        )
+        .unwrap();
 
         verify_server_cert_direct(
             &verifier,
@@ -1485,7 +1725,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            verifier.trusted_certificates.read().unwrap().get(&expected_input_data),
+            verifier.trusted_certs.read().unwrap().get(&expected_input_data),
             Some(&not_after)
         );
 
@@ -1515,6 +1755,22 @@ mod tests {
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let params = CertificateParams::new(vec![subject_name.to_string()]).unwrap();
         params.self_signed(&key).unwrap().der().to_vec().into()
+    }
+
+    async fn complete_handshake_with_timeout(
+        client: &mut ClientConnection,
+        server: &mut ServerConnection,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.is_handshaking() || server.is_handshaking() {
+                transfer_tls_client_to_server(client, server);
+                transfer_tls_server_to_client(server, client);
+
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("TLS handshake timed out");
     }
 
     fn transfer_tls_client_to_server(client: &mut ClientConnection, server: &mut ServerConnection) {

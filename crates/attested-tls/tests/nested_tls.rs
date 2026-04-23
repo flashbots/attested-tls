@@ -105,6 +105,7 @@ fn attested_server_config(server_name: &str, provider: Arc<CryptoProvider>) -> S
 fn attested_client_config(provider: Arc<CryptoProvider>) -> ClientConfig {
     let verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
         .with_crypto_provider(provider.clone())
+        .with_accepting_self_signed_certs()
         .finish()
         .unwrap();
 
