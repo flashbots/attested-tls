@@ -628,6 +628,8 @@ mod tests {
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
+            raw_tcb_info_json: None,
+            raw_qe_identity_json: None,
         })
         .await;
 
@@ -662,6 +664,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_collateral_preserves_raw_signed_json_payloads() {
+        let base_collateral: QuoteCollateralV3 = serde_saphyr::from_slice(include_bytes!(
+            "../../attestation/test-assets/dcap-quote-collateral-00.yaml"
+        ))
+        .unwrap();
+        let raw_tcb_info = serde_json::to_string_pretty(
+            &serde_json::from_str::<serde_json::Value>(&base_collateral.tcb_info).unwrap(),
+        )
+        .unwrap();
+        let raw_qe_identity = serde_json::to_string_pretty(
+            &serde_json::from_str::<serde_json::Value>(&base_collateral.qe_identity).unwrap(),
+        )
+        .unwrap();
+
+        let mock = spawn_mock_pcs_server(MockPcsConfig {
+            fmspc: "00806F050000".to_string(),
+            include_fmspcs_listing: false,
+            tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
+            qe_next_update: "2999-01-01T00:00:00Z".to_string(),
+            refreshed_tcb_next_update: None,
+            refreshed_qe_next_update: None,
+            raw_tcb_info_json: Some(raw_tcb_info.clone()),
+            raw_qe_identity_json: Some(raw_qe_identity.clone()),
+        })
+        .await;
+
+        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let (collateral, is_fresh) = pccs
+            .get_collateral("00806F050000".to_string(), "processor", 1_700_000_000)
+            .await
+            .unwrap();
+
+        assert!(is_fresh);
+        assert_eq!(collateral.tcb_info, raw_tcb_info);
+        assert_eq!(collateral.qe_identity, raw_qe_identity);
+        assert!(!collateral.tcb_info_signature.is_empty());
+        assert!(!collateral.qe_identity_signature.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_proactive_refresh_updates_cached_entry() {
         let initial_now = unix_now().unwrap();
         let initial_next_update =
@@ -678,6 +720,8 @@ mod tests {
             qe_next_update: initial_next_update,
             refreshed_tcb_next_update: Some(refreshed_next_update.clone()),
             refreshed_qe_next_update: Some(refreshed_next_update),
+            raw_tcb_info_json: None,
+            raw_qe_identity_json: None,
         })
         .await;
 
@@ -727,6 +771,8 @@ mod tests {
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
+            raw_tcb_info_json: None,
+            raw_qe_identity_json: None,
         })
         .await;
         let pccs = Pccs::new(Some(mock.base_url.clone()));
@@ -762,6 +808,8 @@ mod tests {
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
+            raw_tcb_info_json: None,
+            raw_qe_identity_json: None,
         })
         .await;
         let pccs = Pccs::new(Some(mock.base_url.clone()));

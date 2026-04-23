@@ -38,6 +38,8 @@ pub(super) struct MockPcsConfig {
     pub(super) qe_next_update: String,
     pub(super) refreshed_tcb_next_update: Option<String>,
     pub(super) refreshed_qe_next_update: Option<String>,
+    pub(super) raw_tcb_info_json: Option<String>,
+    pub(super) raw_qe_identity_json: Option<String>,
 }
 
 /// A mock PCS server so we can run tests without using the Intel PCS.
@@ -76,6 +78,8 @@ struct MockPcsState {
     qe_next_update: String,
     refreshed_tcb_next_update: Option<String>,
     refreshed_qe_next_update: Option<String>,
+    raw_tcb_info_json: Option<String>,
+    raw_qe_identity_json: Option<String>,
     pck_crl: Vec<u8>,
     pck_crl_issuer_chain: String,
     tcb_issuer_chain: String,
@@ -112,6 +116,8 @@ pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServe
         qe_next_update: config.qe_next_update,
         refreshed_tcb_next_update: config.refreshed_tcb_next_update,
         refreshed_qe_next_update: config.refreshed_qe_next_update,
+        raw_tcb_info_json: config.raw_tcb_info_json,
+        raw_qe_identity_json: config.raw_qe_identity_json,
         pck_crl: fresh_crl.clone(),
         pck_crl_issuer_chain: "mock-pck-crl-issuer-chain".to_string(),
         tcb_issuer_chain: "mock-tcb-info-issuer-chain".to_string(),
@@ -173,13 +179,23 @@ async fn mock_tcb_handler(
     } else {
         state.refreshed_tcb_next_update.clone().unwrap_or_else(|| state.tcb_next_update.clone())
     };
+    if let Some(raw_tcb_info_json) = &state.raw_tcb_info_json {
+        return (
+            [("SGX-TCB-Info-Issuer-Chain", state.tcb_issuer_chain.clone())],
+            format!(
+                "{{\"tcbInfo\":{raw_tcb_info_json},\"signature\":\"{}\"}}",
+                state.tcb_signature_hex
+            ),
+        );
+    }
     tcb_info["nextUpdate"] = Value::String(next_update);
     (
         [("SGX-TCB-Info-Issuer-Chain", state.tcb_issuer_chain.clone())],
-        Json(json!({
+        serde_json::to_string(&json!({
             "tcbInfo": tcb_info,
             "signature": state.tcb_signature_hex,
-        })),
+        }))
+        .unwrap(),
     )
 }
 
@@ -195,13 +211,23 @@ async fn mock_qe_identity_handler(
     } else {
         state.refreshed_qe_next_update.clone().unwrap_or_else(|| state.qe_next_update.clone())
     };
+    if let Some(raw_qe_identity_json) = &state.raw_qe_identity_json {
+        return (
+            [("SGX-Enclave-Identity-Issuer-Chain", state.qe_issuer_chain.clone())],
+            format!(
+                "{{\"enclaveIdentity\":{raw_qe_identity_json},\"signature\":\"{}\"}}",
+                state.qe_signature_hex
+            ),
+        );
+    }
     qe_identity["nextUpdate"] = Value::String(next_update);
     (
         [("SGX-Enclave-Identity-Issuer-Chain", state.qe_issuer_chain.clone())],
-        Json(json!({
+        serde_json::to_string(&json!({
             "enclaveIdentity": qe_identity,
             "signature": state.qe_signature_hex,
-        })),
+        }))
+        .unwrap(),
     )
 }
 

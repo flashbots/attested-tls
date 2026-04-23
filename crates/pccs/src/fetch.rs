@@ -1,4 +1,5 @@
 use dcap_qvl::{QuoteCollateralV3, quote::EncryptedPpidParams};
+use serde_json::value::RawValue;
 use x509_parser::{
     certificate::X509Certificate,
     extensions::{DistributionPointName, GeneralName, ParsedExtension},
@@ -52,10 +53,10 @@ pub(super) async fn fetch_collateral(
         root_ca_crl,
         pck_crl,
         tcb_info_issuer_chain,
-        tcb_info: tcb_info_resp.tcb_info.to_string(),
+        tcb_info: tcb_info_resp.tcb_info.get().to_owned(),
         tcb_info_signature,
         qe_identity_issuer_chain,
-        qe_identity: qe_identity_resp.enclave_identity.to_string(),
+        qe_identity: qe_identity_resp.enclave_identity.get().to_owned(),
         qe_identity_signature,
         pck_certificate_chain: None,
     })
@@ -124,7 +125,7 @@ pub(super) async fn fetch_pck_certificate(
 #[derive(Debug, serde::Deserialize)]
 struct TcbInfoResponse {
     #[serde(rename = "tcbInfo")]
-    tcb_info: serde_json::Value,
+    tcb_info: Box<RawValue>,
     signature: String,
 }
 
@@ -132,7 +133,7 @@ struct TcbInfoResponse {
 #[derive(Debug, serde::Deserialize)]
 struct QeIdentityResponse {
     #[serde(rename = "enclaveIdentity")]
-    enclave_identity: serde_json::Value,
+    enclave_identity: Box<RawValue>,
     signature: String,
 }
 
