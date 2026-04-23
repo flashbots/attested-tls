@@ -1,4 +1,4 @@
-use dcap_qvl::QuoteCollateralV3;
+use dcap_qvl::{QuoteCollateralV3, quote::EncryptedPpidParams};
 use x509_parser::{
     certificate::X509Certificate,
     extensions::{DistributionPointName, GeneralName, ParsedExtension},
@@ -59,6 +59,65 @@ pub(super) async fn fetch_collateral(
         qe_identity_signature,
         pck_certificate_chain: None,
     })
+}
+
+/// Fetches a PCK certificate chain from PCCS/PCS using encrypted PPID
+/// parameters
+pub(super) async fn fetch_pck_certificate(
+    client: &reqwest::Client,
+    pccs_url: &str,
+    qeid: &[u8],
+    params: &EncryptedPpidParams,
+) -> Result<String, PccsError> {
+    let qeid = hex::encode_upper(qeid);
+    let encrypted_ppid = hex::encode_upper(&params.encrypted_ppid);
+    let cpusvn = hex::encode_upper(params.cpusvn);
+    let pcesvn = hex::encode_upper(params.pcesvn.to_le_bytes());
+    let pceid = hex::encode_upper(params.pceid);
+
+    let base_url = pccs_url
+        .trim_end_matches('/')
+        .trim_end_matches("/sgx/certification/v4")
+        .trim_end_matches("/tdx/certification/v4");
+    let url = format!(
+        "{base_url}/sgx/certification/v4/pckcert?qeid={qeid}&encrypted_ppid={encrypted_ppid}&cpusvn={cpusvn}&pcesvn={pcesvn}&pceid={pceid}"
+    );
+    let response = checked_get(client, &url).await?;
+
+    if let Some(tcbm) = response.headers().get("SGX-TCBm") {
+        let tcbm_str = tcbm.to_str().map_err(|e| {
+            PccsError::PccsCollateralParse(format!(
+                "SGX-TCBm header contains invalid characters: {e}"
+            ))
+        })?;
+        let tcbm_bytes = hex::decode(tcbm_str).map_err(|e| {
+            PccsError::PccsCollateralParse(format!("SGX-TCBm header is not valid hex: {e}"))
+        })?;
+        if tcbm_bytes.len() < 18 {
+            return Err(PccsError::PccsCollateralParse(
+                "SGX-TCBm header too short: expected 18 bytes".to_string(),
+            ));
+        }
+        let matched_cpusvn = <[u8; 16]>::try_from(&tcbm_bytes[..16]).map_err(|_| {
+            PccsError::PccsCollateralParse(
+                "Failed to parse cpusvn from SGX-TCBm header".to_string(),
+            )
+        })?;
+        let matched_pcesvn = u16::from_le_bytes([tcbm_bytes[16], tcbm_bytes[17]]);
+        if matched_cpusvn != params.cpusvn || matched_pcesvn != params.pcesvn {
+            return Err(PccsError::PccsFetch(format!(
+                "TCB level mismatch: platform TCB (cpusvn={}, pcesvn={}) was matched to lower registered TCB (cpusvn={}, pcesvn={})",
+                hex::encode(params.cpusvn),
+                params.pcesvn,
+                hex::encode(matched_cpusvn),
+                matched_pcesvn
+            )));
+        }
+    }
+
+    let pck_cert_chain = get_header(&response, "SGX-PCK-Certificate-Issuer-Chain")?;
+    let pck_cert = response.text().await?;
+    Ok(format!("{pck_cert}\n{pck_cert_chain}"))
 }
 
 /// Minimal shape of a TCB info response from PCCS/PCS

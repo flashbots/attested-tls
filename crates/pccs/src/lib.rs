@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use dcap_qvl::{QuoteCollateralV3, tcb_info::TcbInfo};
+use dcap_qvl::{QuoteCollateralV3, quote::EncryptedPpidParams, tcb_info::TcbInfo};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
@@ -20,7 +20,7 @@ use tracing::debug;
 use x509_parser::{prelude::FromDer, revocation_list::CertificateRevocationList};
 
 mod fetch;
-use fetch::fetch_collateral;
+use fetch::{fetch_collateral, fetch_pck_certificate};
 
 /// For fetching collateral directly from Intel
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
@@ -143,6 +143,16 @@ impl Pccs {
         drop(cache);
         self.ensure_refresh_task(&cache_key).await;
         Ok((collateral, true))
+    }
+
+    /// Fetches a quote-specific PCK certificate chain for non-embedded cert
+    /// types
+    pub async fn fetch_pck_certificate(
+        &self,
+        qeid: &[u8],
+        params: &EncryptedPpidParams,
+    ) -> Result<String, PccsError> {
+        fetch_pck_certificate(&self.client, &self.url, qeid, params).await
     }
 
     /// Fetches fresh collateral, overwrites cache, and ensures proactive

@@ -20,6 +20,10 @@ const AZURE_BAD_FMSPC: &str = "90C06F000000";
 /// For fetching collateral directly from Intel, if no PCCS is specified
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
+pub const PCK_ID_PCK_CERT_CHAIN: u16 = 5;
+pub const PCK_ID_ENCRYPTED_PPID_2048: u16 = 2;
+pub const PCK_ID_ENCRYPTED_PPID_3072: u16 = 3;
+
 /// Quote generation using configfs_tsm
 pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
     let quote = generate_quote(input_data)?;
@@ -87,7 +91,16 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
     let collateral = if let Some(given_collateral) = collateral {
         given_collateral
     } else if let Some(ref pccs) = pccs_option {
-        let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
+        let (mut collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
+
+        collateral.pck_certificate_chain = Some(match quote.inner_cert_type() {
+            PCK_ID_PCK_CERT_CHAIN => String::from_utf8_lossy(quote.inner_cert_data()).to_string(),
+            PCK_ID_ENCRYPTED_PPID_2048 | PCK_ID_ENCRYPTED_PPID_3072 => {
+                let params = quote.encrypted_ppid_params()?;
+                pccs.fetch_pck_certificate(quote.qeid(), &params).await?
+            }
+            other => return Err(DcapVerificationError::UnsupportedCertificationDataType(other)),
+        });
         collateral
     } else {
         CollateralClient::with_default_http(PCS_URL)?.fetch(&input).await?
@@ -180,6 +193,8 @@ pub enum DcapVerificationError {
     Pccs(#[from] PccsError),
     #[error("Timestamp exceeds i64 range")]
     TimeStampExceedsI64,
+    #[error("Unsupported certification data type: {0}")]
+    UnsupportedCertificationDataType(u16),
 }
 
 #[cfg(test)]
