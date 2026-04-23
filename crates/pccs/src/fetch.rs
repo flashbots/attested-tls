@@ -6,15 +6,13 @@
 //! pre-warm and background refresh), so we reimplement the well-known PCCS
 //! HTTP protocol locally.
 //!
-//! `tcbInfo` and `enclaveIdentity` are round-tripped via
-//! [`serde_json::Value`] — same pattern Phala's upstream fetcher uses.
-//! Correctness relies on `serde_json/preserve_order` being active in the
-//! build graph (dcap-qvl requests it, and Cargo feature unification extends
-//! it to every crate in the workspace), which keeps `Value::Object` backed
-//! by an insertion-order `IndexMap` so the exact bytes Intel signed survive
-//! the round-trip.
+//! `tcbInfo` and `enclaveIdentity` are deserialised through
+//! [`Box<RawValue>`](serde_json::value::RawValue) so the exact bytes Intel
+//! signed survive the round-trip into [`QuoteCollateralV3`] — independent
+//! of which `serde_json::Map` backing ends up selected.
 
 use dcap_qvl::{QuoteCollateralV3, quote::EncryptedPpidParams};
+use serde_json::value::RawValue;
 use x509_parser::{
     certificate::X509Certificate,
     extensions::{DistributionPointName, GeneralName, ParsedExtension},
@@ -51,14 +49,14 @@ pub(super) async fn fetch_collateral(
 
     let tcb_resp: TcbInfoResponse = serde_json::from_str(&raw_tcb_info)
         .map_err(|e| PccsError::PccsCollateralParse(format!("TCB info response JSON: {e}")))?;
-    let tcb_info = tcb_resp.tcb_info.to_string();
+    let tcb_info = tcb_resp.tcb_info.get().to_owned();
     let tcb_info_signature = hex::decode(&tcb_resp.signature).map_err(|e| {
         PccsError::PccsCollateralParse(format!("TCB info signature is not valid hex: {e}"))
     })?;
 
     let qe_resp: QeIdentityResponse = serde_json::from_str(&raw_qe_identity)
         .map_err(|e| PccsError::PccsCollateralParse(format!("QE identity response JSON: {e}")))?;
-    let qe_identity = qe_resp.enclave_identity.to_string();
+    let qe_identity = qe_resp.enclave_identity.get().to_owned();
     let qe_identity_signature = hex::decode(&qe_resp.signature).map_err(|e| {
         PccsError::PccsCollateralParse(format!("QE identity signature is not valid hex: {e}"))
     })?;
@@ -139,14 +137,14 @@ pub(super) async fn fetch_pck_certificate(
 #[derive(serde::Deserialize)]
 struct TcbInfoResponse {
     #[serde(rename = "tcbInfo")]
-    tcb_info: serde_json::Value,
+    tcb_info: Box<RawValue>,
     signature: String,
 }
 
 #[derive(serde::Deserialize)]
 struct QeIdentityResponse {
     #[serde(rename = "enclaveIdentity")]
-    enclave_identity: serde_json::Value,
+    enclave_identity: Box<RawValue>,
     signature: String,
 }
 
