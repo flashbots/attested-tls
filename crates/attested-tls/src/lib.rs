@@ -671,19 +671,14 @@ impl AttestedCertificateVerifier {
 
         let attestation = Self::extract_custom_attestation_from_cert(cert)?;
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.attestation_verifier
-                    .verify_attestation(attestation, expected_input_data)
-                    .await
-                    .map_err(|err| {
-                        tracing::warn!(
-                            "Rejecting certificate after attestation verification failure: {err}"
-                        );
-                        InvalidCertificate(CertificateError::ApplicationVerificationFailure)
-                    })
-            })
-        })?;
+        self.attestation_verifier
+            .verify_attestation_sync(attestation, expected_input_data)
+            .map_err(|err| {
+                tracing::warn!(
+                    "Rejecting certificate after attestation verification failure: {err}"
+                );
+                InvalidCertificate(CertificateError::ApplicationVerificationFailure)
+            })?;
 
         let mut trusted_certs = self.trusted_certs.write().map_err(|_| {
             rustls::Error::General("Trusted certificate cache lock poisoned".into())
