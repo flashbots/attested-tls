@@ -48,6 +48,65 @@ pub async fn verify_dcap_attestation(
     .await
 }
 
+/// Synchronous version - Verify a DCAP TDX quote, and return the
+/// measurement values
+///
+/// This relies on having DCAP collateral already present in the cache
+///
+/// If possible, prefer the async version
+#[cfg(not(any(test, feature = "mock")))]
+pub fn verify_dcap_attestation_sync(
+    input: Vec<u8>,
+    expected_input_data: [u8; 64],
+    pccs: Pccs,
+) -> Result<MultiMeasurements, DcapVerificationError> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let override_azure_outdated_tcb = false;
+    verify_dcap_attestation_with_timestamp_sync(
+        input,
+        expected_input_data,
+        pccs,
+        None,
+        now,
+        override_azure_outdated_tcb,
+    )
+}
+
+/// Verify a DCAP TDX quote, and return the measurement values, providing a
+/// timestamp an optional pre-fetched collateral
+///
+/// This relies on having DCAP collateral already present in the cache
+///
+/// If possible, prefer the async version
+pub fn verify_dcap_attestation_with_timestamp_sync(
+    input: Vec<u8>,
+    expected_input_data: [u8; 64],
+    pccs: Pccs,
+    collateral: Option<QuoteCollateralV3>,
+    now: u64,
+    override_azure_outdated_tcb: bool,
+) -> Result<MultiMeasurements, DcapVerificationError> {
+    let quote = Quote::parse(&input)?;
+
+    let ca = quote.ca()?;
+    let fmspc = hex::encode_upper(quote.fmspc()?);
+
+    let collateral = if let Some(given_collateral) = collateral {
+        given_collateral
+    } else {
+        pccs.get_collateral_sync(fmspc.clone(), ca, now)?
+    };
+
+    verify_dcap_attestation_with_collateral_and_timestamp(
+        input,
+        quote,
+        expected_input_data,
+        collateral,
+        now,
+        override_azure_outdated_tcb,
+    )
+}
+
 /// Allows the timestamp to be given, making it possible to test with
 /// existing attestations
 ///
@@ -62,9 +121,45 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
     override_azure_outdated_tcb: bool,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let quote = Quote::parse(&input)?;
-    tracing::info!("Verifying DCAP attestation: {quote:?}");
 
     let ca = quote.ca()?;
+    let fmspc = hex::encode_upper(quote.fmspc()?);
+
+    let collateral = if let Some(given_collateral) = collateral {
+        given_collateral
+    } else if let Some(ref pccs) = pccs_option {
+        let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
+        collateral
+    } else {
+        get_collateral_for_fmspc(
+            PCS_URL,
+            fmspc.clone(),
+            ca,
+            false, // Indicates not SGX
+        )
+        .await?
+    };
+
+    verify_dcap_attestation_with_collateral_and_timestamp(
+        input,
+        quote,
+        expected_input_data,
+        collateral,
+        now,
+        override_azure_outdated_tcb,
+    )
+}
+
+fn verify_dcap_attestation_with_collateral_and_timestamp(
+    raw_quote: Vec<u8>,
+    quote: Quote,
+    expected_input_data: [u8; 64],
+    collateral: QuoteCollateralV3,
+    now: u64,
+    override_azure_outdated_tcb: bool,
+) -> Result<MultiMeasurements, DcapVerificationError> {
+    tracing::info!("Verifying DCAP attestation: {quote:?}");
+
     let fmspc = hex::encode_upper(quote.fmspc()?);
 
     // Override outdated TCB only if we are on Azure and the FMSPC is known to
@@ -85,23 +180,8 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
         |tcb_info: TcbInfo| tcb_info
     };
 
-    let collateral = if let Some(given_collateral) = collateral {
-        given_collateral
-    } else if let Some(ref pccs) = pccs_option {
-        let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
-        collateral
-    } else {
-        get_collateral_for_fmspc(
-            PCS_URL,
-            fmspc.clone(),
-            ca,
-            false, // Indicates not SGX
-        )
-        .await?
-    };
-
     let verified_report = dcap_qvl::verify::dangerous_verify_with_tcb_override(
-        &input,
+        &raw_quote,
         &collateral,
         now,
         override_outdated_tcb,
@@ -150,6 +230,20 @@ pub async fn verify_dcap_attestation(
     }
 
     Ok(measurements)
+}
+
+#[cfg(any(test, feature = "mock"))]
+pub fn verify_dcap_attestation_sync(
+    input: Vec<u8>,
+    expected_input_data: [u8; 64],
+    _pccs: Pccs,
+) -> Result<MultiMeasurements, DcapVerificationError> {
+    // In tests we use mock quotes which will fail to verify
+    let quote = tdx_quote::Quote::from_bytes(&input)?;
+    if quote.report_input_data() != expected_input_data {
+        return Err(DcapVerificationError::InputMismatch);
+    }
+    Ok(MultiMeasurements::from_tdx_quote(&quote))
 }
 
 /// Create a mock quote for testing on non-confidential hardware
@@ -230,9 +324,10 @@ mod tests {
         let collateral_bytes: &'static [u8] =
             include_bytes!("../test-assets/dcap-quote-collateral-00.yaml");
 
-        let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
+        let async_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
+        let sync_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
 
-        let measurements = verify_dcap_attestation_with_given_timestamp(
+        let async_measurements = verify_dcap_attestation_with_given_timestamp(
             attestation_bytes.to_vec(),
             [
                 116, 39, 106, 100, 143, 31, 212, 145, 244, 116, 162, 213, 44, 114, 216, 80, 227,
@@ -241,14 +336,30 @@ mod tests {
                 173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
             ],
             None,
-            Some(collateral),
+            Some(async_collateral),
             now,
             false,
         )
         .await
         .unwrap();
 
-        measurement_policy.check_measurement(&measurements).unwrap();
+        let sync_measurements = verify_dcap_attestation_with_timestamp_sync(
+            attestation_bytes.to_vec(),
+            [
+                116, 39, 106, 100, 143, 31, 212, 145, 244, 116, 162, 213, 44, 114, 216, 80, 227,
+                118, 129, 87, 180, 62, 194, 151, 169, 145, 116, 130, 189, 119, 39, 139, 161, 136,
+                37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85, 245, 114, 33,
+                173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
+            ],
+            Pccs::new_without_prewarm(None),
+            Some(sync_collateral),
+            now,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(async_measurements, sync_measurements);
+        measurement_policy.check_measurement(&async_measurements).unwrap();
     }
 
     // This specifically tests a quote which has outdated TCB level from Azure
