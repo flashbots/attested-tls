@@ -602,21 +602,16 @@ impl AttestedCertificateVerifier {
 
         let attestation = Self::extract_custom_attestation_from_cert(end_entity)?;
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.attestation_verifier
-                    .verify_attestation(attestation, expected_input_data)
-                    .await
-                    .map_err(|err| {
-                        tracing::warn!(
-                            "Rejecting certificate after attestation verification failure: {err}"
-                        );
-                        rustls::Error::InvalidCertificate(
-                            rustls::CertificateError::ApplicationVerificationFailure,
-                        )
-                    })
-            })
-        })?;
+        self.attestation_verifier
+            .verify_attestation_sync(attestation, expected_input_data)
+            .map_err(|err| {
+                tracing::warn!(
+                    "Rejecting certificate after attestation verification failure: {err}"
+                );
+                rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure,
+                )
+            })?;
 
         let mut trusted_certificates = self.trusted_certificates.write().map_err(|_| {
             rustls::Error::General("Trusted certificate cache lock poisoned".into())
@@ -814,6 +809,7 @@ pub enum AttestedTlsError {
 mod tests {
     use std::{io::Cursor, sync::Arc};
 
+    use mock_tdx::mock_pcs::{MockPcsConfig, spawn_mock_pcs_server};
     use ra_tls::rcgen::{BasicConstraints, CertificateParams, IsCa};
     use rustls::{
         CertificateError,
@@ -857,6 +853,19 @@ mod tests {
             &[],
             now,
         )
+    }
+
+    async fn ready_mock_attested_verifier(
+        root_store: Option<RootCertStore>,
+        provider: Arc<CryptoProvider>,
+    ) -> AttestedCertificateVerifier {
+        let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
+        let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
+        if let Some(ref pccs) = verifier.internal_pccs {
+            pccs.ready().await.unwrap();
+        }
+
+        AttestedCertificateVerifier::new_with_provider(root_store, verifier, provider).unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -910,12 +919,7 @@ mod tests {
         .await
         .unwrap();
 
-        let verifier = AttestedCertificateVerifier::new_with_provider(
-            None,
-            AttestationVerifier::mock(),
-            provider.clone(),
-        )
-        .unwrap();
+        let verifier = ready_mock_attested_verifier(None, provider.clone()).await;
 
         let server_config = ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
@@ -971,12 +975,7 @@ mod tests {
         let mut roots = RootCertStore::empty();
         roots.add(ca_cert).unwrap();
 
-        let verifier = AttestedCertificateVerifier::new_with_provider(
-            Some(roots),
-            AttestationVerifier::mock(),
-            provider.clone(),
-        )
-        .unwrap();
+        let verifier = ready_mock_attested_verifier(Some(roots), provider.clone()).await;
 
         let server_config = ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
@@ -1059,18 +1058,8 @@ mod tests {
         .await
         .unwrap();
 
-        let server_verifier = AttestedCertificateVerifier::new_with_provider(
-            None,
-            AttestationVerifier::mock(),
-            provider.clone(),
-        )
-        .unwrap();
-        let client_verifier = AttestedCertificateVerifier::new_with_provider(
-            None,
-            AttestationVerifier::mock(),
-            provider.clone(),
-        )
-        .unwrap();
+        let server_verifier = ready_mock_attested_verifier(None, provider.clone()).await;
+        let client_verifier = ready_mock_attested_verifier(None, provider.clone()).await;
 
         let server_config = ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
@@ -1117,12 +1106,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let verifier = AttestedCertificateVerifier::new_with_provider(
-            None,
-            AttestationVerifier::mock(),
-            provider.clone(),
-        )
-        .unwrap();
+        let verifier = ready_mock_attested_verifier(None, provider.clone()).await;
 
         let server_config = ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
@@ -1385,12 +1369,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut verifier = AttestedCertificateVerifier::new_with_provider(
-            None,
-            AttestationVerifier::mock(),
-            provider,
-        )
-        .unwrap();
+        let mut verifier = ready_mock_attested_verifier(None, provider).await;
         let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
         let (expected_input_data, not_after) =
             AttestedCertificateVerifier::cert_binding_data(&cert).unwrap();

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use attestation::{AttestationGenerator, AttestationType, AttestationVerifier};
 use attested_tls::{AttestedCertificateResolver, AttestedCertificateVerifier};
+use mock_tdx::mock_pcs::{MockPcsConfig, spawn_mock_pcs_server};
 use nested_tls::{client::NestingTlsConnector, server::NestingTlsAcceptor};
 use ra_tls::rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256};
 use rustls::{
@@ -19,7 +20,7 @@ async fn nested_tls_uses_attested_tls_for_inner_session() {
     let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
     let (outer_server, outer_client) = plain_tls_config_pair(provider.clone());
     let inner_server = attested_server_config("localhost", provider.clone()).await;
-    let inner_client = attested_client_config(provider.clone());
+    let inner_client = attested_client_config(provider.clone()).await;
 
     let acceptor = NestingTlsAcceptor::new(Arc::new(outer_server), Arc::new(inner_server));
     let connector = NestingTlsConnector::new(Arc::new(outer_client), Arc::new(inner_client));
@@ -103,13 +104,14 @@ async fn attested_server_config(server_name: &str, provider: Arc<CryptoProvider>
 }
 
 /// Create client TLS config with attestation verification
-fn attested_client_config(provider: Arc<CryptoProvider>) -> ClientConfig {
-    let verifier = AttestedCertificateVerifier::new_with_provider(
-        None,
-        AttestationVerifier::mock(),
-        provider.clone(),
-    )
-    .unwrap();
+async fn attested_client_config(provider: Arc<CryptoProvider>) -> ClientConfig {
+    let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
+    let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
+    if let Some(ref pccs) = verifier.internal_pccs {
+        pccs.ready().await.unwrap();
+    }
+    let verifier =
+        AttestedCertificateVerifier::new_with_provider(None, verifier, provider.clone()).unwrap();
 
     ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
