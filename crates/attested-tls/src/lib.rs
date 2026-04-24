@@ -1103,7 +1103,7 @@ mod tests {
         )
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn certificate_resolver_creates_initial_certificate() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -1122,7 +1122,7 @@ mod tests {
         assert_eq!(certificate.len(), 1);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn certificate_resolver_rejects_too_short_validity_duration() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -1139,7 +1139,7 @@ mod tests {
         assert!(matches!(error, AttestedTlsError::InvalidCertificateValidityDuration { .. }));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn server_and_client_configs_complete_a_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let server_name = "foo";
@@ -1186,7 +1186,7 @@ mod tests {
         assert!(!server.is_handshaking());
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn ca_signed_server_and_client_configs_complete_a_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -1245,7 +1245,7 @@ mod tests {
         assert!(!server.is_handshaking());
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn certificate_is_renewed_before_expiry() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -1269,7 +1269,7 @@ mod tests {
         assert_ne!(initial_certificate.as_ref(), renewed_certificate.as_ref());
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn server_and_client_configs_complete_a_mutual_auth_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -1333,7 +1333,7 @@ mod tests {
         assert!(server.peer_certificates().is_some());
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn alternate_san_completes_a_handshake() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -1380,7 +1380,7 @@ mod tests {
         assert!(!server.is_handshaking());
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn malformed_certificate_returns_bad_encoding() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let verifier = AttestedCertificateVerifier::build(AttestationVerifier::mock())
@@ -1399,7 +1399,7 @@ mod tests {
         assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::BadEncoding));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn certificate_without_attestation_extension_returns_bad_encoding() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let cert = plain_self_signed_certificate("foo");
@@ -1421,7 +1421,7 @@ mod tests {
         assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::BadEncoding),);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn private_ca_verifier_rejects_untrusted_self_signed_attested_server_cert() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let ca = test_ca();
@@ -1455,7 +1455,7 @@ mod tests {
         assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::UnknownIssuer));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn private_ca_verifier_rejects_untrusted_self_signed_attested_client_cert() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let ca = test_ca();
@@ -1550,7 +1550,7 @@ mod tests {
         ),);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn self_signed_attested_certificate_with_allowed_pubkey_is_accepted() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -1580,7 +1580,7 @@ mod tests {
         .unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn self_signed_attested_certificate_with_not_allowed_pubkey_is_rejected() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let trusted_key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -1611,7 +1611,7 @@ mod tests {
         assert_eq!(result.unwrap_err(), Error::InvalidCertificate(CertificateError::UnknownIssuer));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn certificate_binding_changes_when_identity_changes() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -1654,7 +1654,7 @@ mod tests {
         assert_ne!(original_report_data, replayed_report_data);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn attestation_rejection_returns_application_verification_failure() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
@@ -1687,7 +1687,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn verifier_reuses_trusted_certificate_cache() {
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
