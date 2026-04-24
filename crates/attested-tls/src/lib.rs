@@ -1397,6 +1397,78 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_verifier_cache_miss_fails_then_succeeds_after_background_fetch() {
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let resolver = AttestedCertificateResolver::new_with_provider(
+            AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+            None,
+            "foo".to_string(),
+            vec![],
+            provider.clone(),
+            Duration::from_secs(4),
+        )
+        .await
+        .unwrap();
+        let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
+
+        // Mock PCS is set up to not list the FMSPCs, meaning the pre-warm
+        // wont fetch anything
+        let mock_pcs = spawn_mock_pcs_server(MockPcsConfig {
+            include_fmspcs_listing: false,
+            ..MockPcsConfig::default()
+        })
+        .await
+        .unwrap();
+
+        let verifier = AttestedCertificateVerifier::new_with_provider(
+            None,
+            AttestationVerifier::mock_with_pccs(mock_pcs.base_url.clone()),
+            provider,
+        )
+        .unwrap();
+
+        let first_result = verify_server_cert_direct(
+            &verifier,
+            &cert,
+            &ServerName::try_from("foo").unwrap(),
+            UnixTime::now(),
+        );
+
+        // Initially verification fails because the PCCS doesn't have the
+        // collateral associated with the quote
+        assert_eq!(
+            first_result.unwrap_err(),
+            Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure)
+        );
+
+        // Now we wait a moment for the PCCS to fetch it in the background
+        for _ in 0..50 {
+            if verify_server_cert_direct(
+                &verifier,
+                &cert,
+                &ServerName::try_from("foo").unwrap(),
+                UnixTime::now(),
+            )
+            .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Now verification succeeds
+        verify_server_cert_direct(
+            &verifier,
+            &cert,
+            &ServerName::try_from("foo").unwrap(),
+            UnixTime::now(),
+        )
+        .unwrap();
+        assert_eq!(mock_pcs.tcb_call_count(), 1);
+        assert_eq!(mock_pcs.qe_call_count(), 1);
+    }
+
     /// Helper to create a private certificate authority
     fn test_ca() -> CaCert {
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
