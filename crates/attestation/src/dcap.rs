@@ -239,11 +239,12 @@ pub fn verify_dcap_attestation_sync(
     _pccs: Pccs,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     // In tests we use mock quotes which will fail to verify
-    let quote = tdx_quote::Quote::from_bytes(&input)?;
-    if quote.report_input_data() != expected_input_data {
+    let quote = Quote::parse(&input)?;
+    let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
+    if get_quote_input_data(quote.report.clone()) != expected_input_data {
         return Err(DcapVerificationError::InputMismatch);
     }
-    Ok(MultiMeasurements::from_tdx_quote(&quote))
+    Ok(measurements)
 }
 
 /// Create a mock quote for testing on non-confidential hardware
