@@ -10,6 +10,18 @@ This crate provides:
 - Attestation generation and verification for DCAP and (optionally) Azure
 - Parsing and evaluation of measurement policies
 
+## Runtime Requirements
+
+Verification uses the [`pccs`](../pccs) crate for collateral caching and
+background refresh. As a result, constructing an `AttestationVerifier` with
+PCCS enabled and calling verification APIs, including
+`verify_attestation_sync()`, is expected to happen from within a Tokio runtime,
+and will panic if called outside of one.
+
+Note that the synchronous verification API is synchronous in its return type,
+but it still relies on Tokio-backed background tasks for PCCS pre-warm
+and cache refresh.
+
 ## Feature flags
 
 ### `azure`
