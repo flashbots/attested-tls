@@ -343,11 +343,8 @@ impl AttestationVerifier {
             return Ok(());
         };
 
-        // If we have pccs, and pre-warm is disabled we are also ready
-        match pccs.ready().await {
-            Ok(_) | Err(PccsError::PrewarmDisabled) => Ok(()),
-            Err(err) => Err(err.into()),
-        }
+        pccs.ready().await?;
+        Ok(())
     }
 
     /// Verify an attestation, and ensure the measurements match one of our
@@ -691,5 +688,14 @@ mod tests {
         );
 
         assert!(result.is_ok(), "expected sync mock verification to succeed: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn mock_verifier_ready_returns_error_when_prewarm_disabled() {
+        let verifier = AttestationVerifier::mock();
+
+        let result = verifier.ready().await;
+
+        assert!(matches!(result, Err(AttestationError::Pccs(PccsError::PrewarmDisabled))));
     }
 }
