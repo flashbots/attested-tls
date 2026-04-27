@@ -6,6 +6,7 @@ members = [
     "crates/nested-tls",
     "crates/attestation",
     "crates/pccs",
+    "crates/mock-tdx",
 ]
 
 [workspace.lints.rust]
@@ -19,6 +20,7 @@ unused_async = "warn"
 
 [workspace.dependencies]
 attestation = { path = "crates/attestation" }
+mock-tdx = { path = "crates/mock-tdx" }
 rustls = { version = "0.23.37", default-features = false, features = ["brotli"] }
 tokio = { version = "1.50.0", features = ["default"] }
 tokio-rustls = { version = "0.26.4", default-features = false }

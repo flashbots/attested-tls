@@ -477,7 +477,7 @@ fn parse_next_update(field: &str, value: &str) -> Result<i64, PccsError> {
         .map(|parsed| parsed.unix_timestamp())
 }
 
-/// Parse a certifcate revocation list and extract the timestamp for next
+/// Parse a certificate revocation list and extract the timestamp for next
 /// update
 fn parse_crl_next_update(field: &str, crl_der: &[u8]) -> Result<i64, PccsError> {
     let (_, crl) = CertificateRevocationList::from_der(crl_der).map_err(|e| {
@@ -723,42 +723,40 @@ pub enum PccsError {
 }
 
 #[cfg(test)]
-mod mock_pcs;
-
-#[cfg(test)]
 mod tests {
+    use mock_tdx::{MockPcsConfig, mock_collateral, spawn_mock_pcs_server};
     use tokio::time::Duration;
 
-    use super::{
-        mock_pcs::{MockPcsConfig, spawn_mock_pcs_server},
-        *,
-    };
+    use super::*;
+
+    fn mock_tdx_fmspc() -> String {
+        let collateral = mock_collateral();
+        let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).unwrap();
+        tcb_info.fmspc
+    }
 
     #[tokio::test]
     async fn test_mock_pcs_server_helper_with_get_collateral() {
+        let fmspc = mock_tdx_fmspc();
         let mock = spawn_mock_pcs_server(MockPcsConfig {
-            fmspc: "00806F050000".to_string(),
             include_fmspcs_listing: false,
             tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
         })
-        .await;
+        .await
+        .unwrap();
 
         let pccs = Pccs::new(Some(mock.base_url.clone()));
         let now = 1_700_000_000_u64;
-        let (_, is_fresh) =
-            pccs.get_collateral("00806F050000".to_string(), "processor", now).await.unwrap();
+        let (_, is_fresh) = pccs.get_collateral(fmspc, "processor", now).await.unwrap();
         assert!(is_fresh);
     }
 
     #[test]
     fn test_extract_next_update_includes_crl_expiry() {
-        let mut collateral: QuoteCollateralV3 = serde_saphyr::from_slice(include_bytes!(
-            "../../attestation/test-assets/dcap-quote-collateral-00.yaml"
-        ))
-        .unwrap();
+        let mut collateral: QuoteCollateralV3 = mock_collateral();
 
         let mut tcb_info: serde_json::Value = serde_json::from_str(&collateral.tcb_info).unwrap();
         tcb_info["nextUpdate"] = serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
@@ -785,30 +783,27 @@ mod tests {
             .unwrap()
             .format(&Rfc3339)
             .unwrap();
+        let fmspc = mock_tdx_fmspc();
 
         let mock = spawn_mock_pcs_server(MockPcsConfig {
-            fmspc: "00806F050000".to_string(),
             include_fmspcs_listing: false,
             tcb_next_update: initial_next_update.clone(),
             qe_next_update: initial_next_update,
             refreshed_tcb_next_update: Some(refreshed_next_update.clone()),
             refreshed_qe_next_update: Some(refreshed_next_update),
         })
-        .await;
+        .await
+        .unwrap();
 
         let pccs = Pccs::new(Some(mock.base_url.clone()));
-        let (_, is_fresh) = pccs
-            .get_collateral("00806F050000".to_string(), "processor", initial_now as u64)
-            .await
-            .unwrap();
+        let (_, is_fresh) =
+            pccs.get_collateral(fmspc.clone(), "processor", initial_now as u64).await.unwrap();
         assert!(is_fresh);
         assert_eq!(mock.tcb_call_count(), 1);
         assert_eq!(mock.qe_call_count(), 1);
 
-        let (_, is_fresh_second) = pccs
-            .get_collateral("00806F050000".to_string(), "processor", initial_now as u64)
-            .await
-            .unwrap();
+        let (_, is_fresh_second) =
+            pccs.get_collateral(fmspc.clone(), "processor", initial_now as u64).await.unwrap();
         assert!(!is_fresh_second);
         assert_eq!(mock.tcb_call_count(), 1);
         assert_eq!(mock.qe_call_count(), 1);
@@ -825,10 +820,8 @@ mod tests {
 
         let before_check_calls = mock.tcb_call_count();
         let now_after_background = unix_now().unwrap();
-        let (_, is_fresh_again) = pccs
-            .get_collateral("00806F050000".to_string(), "processor", now_after_background as u64)
-            .await
-            .unwrap();
+        let (_, is_fresh_again) =
+            pccs.get_collateral(fmspc, "processor", now_after_background as u64).await.unwrap();
         assert!(!is_fresh_again);
         assert_eq!(mock.tcb_call_count(), before_check_calls);
     }
@@ -836,14 +829,14 @@ mod tests {
     #[tokio::test]
     async fn test_ready_waits_for_startup_prewarm() {
         let mock = spawn_mock_pcs_server(MockPcsConfig {
-            fmspc: "00806F050000".to_string(),
             include_fmspcs_listing: true,
             tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
         })
-        .await;
+        .await
+        .unwrap();
         let pccs = Pccs::new(Some(mock.base_url.clone()));
         let summary =
             tokio::time::timeout(Duration::from_secs(5), pccs.ready()).await.unwrap().unwrap();
@@ -872,14 +865,14 @@ mod tests {
     #[tokio::test]
     async fn test_ready_supports_multiple_waiters() {
         let mock = spawn_mock_pcs_server(MockPcsConfig {
-            fmspc: "00806F050000".to_string(),
             include_fmspcs_listing: true,
             tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
         })
-        .await;
+        .await
+        .unwrap();
         let pccs = Pccs::new(Some(mock.base_url.clone()));
         let pccs_clone = pccs.clone();
 
@@ -907,30 +900,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_collateral_sync_repairs_cache_miss_in_background() {
+        let fmspc = mock_tdx_fmspc();
         let mock = spawn_mock_pcs_server(MockPcsConfig {
-            fmspc: "00806F050000".to_string(),
             include_fmspcs_listing: false,
             tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
         })
-        .await;
+        .await
+        .unwrap();
 
         let pccs = Pccs::new_without_prewarm(Some(mock.base_url.clone()));
         let now = unix_now().unwrap() as u64;
 
-        let err = pccs.get_collateral_sync("00806F050000".to_string(), "processor", now);
+        let err = pccs.get_collateral_sync(fmspc.clone(), "processor", now);
         assert!(matches!(err, Err(PccsError::NoCollateralForFmspc(_))));
 
         for _ in 0..50 {
-            if pccs.get_collateral_sync("00806F050000".to_string(), "processor", now).is_ok() {
+            if pccs.get_collateral_sync(fmspc.clone(), "processor", now).is_ok() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        let collateral = pccs.get_collateral_sync("00806F050000".to_string(), "processor", now);
+        let collateral = pccs.get_collateral_sync(fmspc, "processor", now);
         assert!(collateral.is_ok(), "expected sync miss repair to populate cache");
         assert_eq!(mock.tcb_call_count(), 1);
         assert_eq!(mock.qe_call_count(), 1);
@@ -945,35 +939,33 @@ mod tests {
             .unwrap()
             .format(&Rfc3339)
             .unwrap();
+        let fmspc = mock_tdx_fmspc();
 
         let mock = spawn_mock_pcs_server(MockPcsConfig {
-            fmspc: "00806F050000".to_string(),
             include_fmspcs_listing: false,
             tcb_next_update: initial_next_update.clone(),
             qe_next_update: initial_next_update,
             refreshed_tcb_next_update: Some(refreshed_next_update.clone()),
             refreshed_qe_next_update: Some(refreshed_next_update),
         })
-        .await;
+        .await
+        .unwrap();
 
         let pccs = Pccs::new_without_prewarm(Some(mock.base_url.clone()));
-        let (_, is_fresh) = pccs
-            .get_collateral("00806F050000".to_string(), "processor", initial_now as u64)
-            .await
-            .unwrap();
+        let (_, is_fresh) =
+            pccs.get_collateral(fmspc.clone(), "processor", initial_now as u64).await.unwrap();
         assert!(is_fresh);
 
         {
             let mut cache = pccs.cache.write().unwrap();
             let entry = cache
-                .get_mut(&PccsInput::new("00806F050000".to_string(), "processor"))
+                .get_mut(&PccsInput::new(fmspc.clone(), "processor"))
                 .expect("expected cached collateral entry");
             entry.next_update = initial_now - 1;
             entry.refresh_task = None;
         }
 
-        let stale_collateral =
-            pccs.get_collateral_sync("00806F050000".to_string(), "processor", initial_now as u64);
+        let stale_collateral = pccs.get_collateral_sync(fmspc, "processor", initial_now as u64);
         assert!(stale_collateral.is_ok(), "expected stale collateral to be returned");
 
         for _ in 0..50 {

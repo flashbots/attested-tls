@@ -1,4 +1,3 @@
-//! A mock PCS server used for testing
 use std::{
     collections::HashMap as StdHashMap,
     net::SocketAddr,
@@ -16,33 +15,47 @@ use axum::{
     routing::get,
 };
 use dcap_qvl::QuoteCollateralV3;
-use rcgen::{
-    BasicConstraints,
-    CertificateParams,
-    CertificateRevocationListParams,
-    IsCa,
-    Issuer,
-    KeyPair,
-    KeyUsagePurpose,
-    SerialNumber,
-};
 use serde_json::{Value, json};
-use time::{Duration, OffsetDateTime};
 use tokio::{net::TcpListener, task::JoinHandle};
 
+use crate::mock_collateral;
+
+/// Configuration for a mock PCS server backed by `mock-tdx` collateral
 #[derive(Clone)]
-pub(super) struct MockPcsConfig {
-    pub(super) fmspc: String,
-    pub(super) include_fmspcs_listing: bool,
-    pub(super) tcb_next_update: String,
-    pub(super) qe_next_update: String,
-    pub(super) refreshed_tcb_next_update: Option<String>,
-    pub(super) refreshed_qe_next_update: Option<String>,
+pub struct MockPcsConfig {
+    /// Whether the `/fmspcs` endpoint should advertise the mock FMSPC
+    pub include_fmspcs_listing: bool,
+    /// `nextUpdate` value returned by the first TCB info response
+    pub tcb_next_update: String,
+    /// `nextUpdate` value returned by the first QE identity response
+    pub qe_next_update: String,
+    /// Optional `nextUpdate` value returned by later TCB info responses
+    pub refreshed_tcb_next_update: Option<String>,
+    /// Optional `nextUpdate` value returned by later QE identity responses
+    pub refreshed_qe_next_update: Option<String>,
 }
 
-/// A mock PCS server so we can run tests without using the Intel PCS.
-pub(super) struct MockPcsServer {
-    pub(super) base_url: String,
+impl Default for MockPcsConfig {
+    /// Builds a fixture-consistent config from the embedded mock collateral
+    fn default() -> Self {
+        let collateral = mock_collateral();
+        let tcb_info: Value = serde_json::from_str(&collateral.tcb_info).unwrap();
+        let qe_identity: Value = serde_json::from_str(&collateral.qe_identity).unwrap();
+
+        Self {
+            include_fmspcs_listing: false,
+            tcb_next_update: tcb_info["nextUpdate"].as_str().unwrap().to_string(),
+            qe_next_update: qe_identity["nextUpdate"].as_str().unwrap().to_string(),
+            refreshed_tcb_next_update: None,
+            refreshed_qe_next_update: None,
+        }
+    }
+}
+
+/// Handle to a running mock PCS server
+pub struct MockPcsServer {
+    /// Base URL for the spawned server
+    pub base_url: String,
     _task: JoinHandle<()>,
     tcb_calls: Arc<AtomicUsize>,
     qe_calls: Arc<AtomicUsize>,
@@ -55,15 +68,18 @@ impl Drop for MockPcsServer {
 }
 
 impl MockPcsServer {
-    pub(super) fn tcb_call_count(&self) -> usize {
+    /// Returns how many times the TCB info endpoint has been called
+    pub fn tcb_call_count(&self) -> usize {
         self.tcb_calls.load(Ordering::SeqCst)
     }
 
-    pub(super) fn qe_call_count(&self) -> usize {
+    /// Returns how many times the QE identity endpoint has been called
+    pub fn qe_call_count(&self) -> usize {
         self.qe_calls.load(Ordering::SeqCst)
     }
 }
 
+/// Shared state served by the mock PCS routes
 #[derive(Clone)]
 struct MockPcsState {
     fmspc: String,
@@ -85,24 +101,22 @@ struct MockPcsState {
     qe_calls: Arc<AtomicUsize>,
 }
 
-pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServer {
-    let base_collateral: QuoteCollateralV3 = serde_saphyr::from_slice(include_bytes!(
-        "../../attestation/test-assets/dcap-quote-collateral-00.yaml"
-    ))
-    .unwrap();
-    let now = OffsetDateTime::now_utc();
-    let fresh_crl = generate_mock_crl_der(now, now + Duration::days(365));
+/// Spawns a local mock PCS server using the embedded `mock-tdx` collateral
+pub async fn spawn_mock_pcs_server(
+    config: MockPcsConfig,
+) -> Result<MockPcsServer, Box<dyn std::error::Error>> {
+    let base_collateral: QuoteCollateralV3 = mock_collateral();
 
-    let mut tcb_info: Value = serde_json::from_str(&base_collateral.tcb_info).unwrap();
+    let mut tcb_info: Value = serde_json::from_str(&base_collateral.tcb_info)?;
     tcb_info["nextUpdate"] = Value::String(config.tcb_next_update.clone());
 
-    let mut qe_identity: Value = serde_json::from_str(&base_collateral.qe_identity).unwrap();
+    let mut qe_identity: Value = serde_json::from_str(&base_collateral.qe_identity)?;
     qe_identity["nextUpdate"] = Value::String(config.qe_next_update.clone());
 
     let tcb_calls = Arc::new(AtomicUsize::new(0));
     let qe_calls = Arc::new(AtomicUsize::new(0));
     let state = Arc::new(MockPcsState {
-        fmspc: config.fmspc,
+        fmspc: tcb_info["fmspc"].as_str().ok_or("mock collateral missing fmspc")?.to_string(),
         include_fmspcs_listing: config.include_fmspcs_listing,
         base_tcb_info: tcb_info,
         base_qe_identity: qe_identity,
@@ -112,11 +126,11 @@ pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServe
         qe_next_update: config.qe_next_update,
         refreshed_tcb_next_update: config.refreshed_tcb_next_update,
         refreshed_qe_next_update: config.refreshed_qe_next_update,
-        pck_crl: fresh_crl.clone(),
-        pck_crl_issuer_chain: "mock-pck-crl-issuer-chain".to_string(),
-        tcb_issuer_chain: "mock-tcb-info-issuer-chain".to_string(),
-        qe_issuer_chain: "mock-qe-issuer-chain".to_string(),
-        root_ca_crl_hex: hex::encode(fresh_crl),
+        pck_crl: base_collateral.pck_crl,
+        pck_crl_issuer_chain: urlencoding::encode(&base_collateral.pck_crl_issuer_chain).into(),
+        tcb_issuer_chain: urlencoding::encode(&base_collateral.tcb_info_issuer_chain).into(),
+        qe_issuer_chain: urlencoding::encode(&base_collateral.qe_identity_issuer_chain).into(),
+        root_ca_crl_hex: hex::encode(base_collateral.root_ca_crl),
         tcb_calls: tcb_calls.clone(),
         qe_calls: qe_calls.clone(),
     });
@@ -129,15 +143,16 @@ pub(super) async fn spawn_mock_pcs_server(config: MockPcsConfig) -> MockPcsServe
         .route("/sgx/certification/v4/rootcacrl", get(mock_root_ca_crl_handler))
         .with_state(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr: SocketAddr = listener.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr: SocketAddr = listener.local_addr()?;
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
-    MockPcsServer { base_url: format!("http://{addr}"), _task: task, tcb_calls, qe_calls }
+    Ok(MockPcsServer { base_url: format!("http://{addr}"), _task: task, tcb_calls, qe_calls })
 }
 
+/// Serves the mock PCK CRL and issuer chain
 async fn mock_pck_crl_handler(
     State(state): State<Arc<MockPcsState>>,
     Query(params): Query<StdHashMap<String, String>>,
@@ -150,6 +165,7 @@ async fn mock_pck_crl_handler(
     ([("SGX-PCK-CRL-Issuer-Chain", state.pck_crl_issuer_chain.clone())], state.pck_crl.clone())
 }
 
+/// Serves the optional FMSPC listing used by PCCS prewarm tests
 async fn mock_fmspcs_handler(State(state): State<Arc<MockPcsState>>) -> impl IntoResponse {
     if state.include_fmspcs_listing {
         Json(json!([{
@@ -161,6 +177,7 @@ async fn mock_fmspcs_handler(State(state): State<Arc<MockPcsState>>) -> impl Int
     }
 }
 
+/// Serves signed TCB info with configurable refresh behavior
 async fn mock_tcb_handler(
     State(state): State<Arc<MockPcsState>>,
     Query(params): Query<StdHashMap<String, String>>,
@@ -183,6 +200,7 @@ async fn mock_tcb_handler(
     )
 }
 
+/// Serves signed QE identity collateral with configurable refresh behavior
 async fn mock_qe_identity_handler(
     State(state): State<Arc<MockPcsState>>,
     Query(params): Query<StdHashMap<String, String>>,
@@ -205,32 +223,7 @@ async fn mock_qe_identity_handler(
     )
 }
 
+/// Serves the root CA CRL expected by the PCS client
 async fn mock_root_ca_crl_handler(State(state): State<Arc<MockPcsState>>) -> impl IntoResponse {
     state.root_ca_crl_hex.clone()
-}
-
-/// Create a mock certificate revocation list
-fn generate_mock_crl_der(this_update: OffsetDateTime, next_update: OffsetDateTime) -> Vec<u8> {
-    let mut issuer_params = CertificateParams::new(Vec::new()).unwrap();
-    issuer_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    issuer_params.key_usages = vec![
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::CrlSign,
-    ];
-    let issuer_key = KeyPair::generate().unwrap();
-    let issuer = Issuer::new(issuer_params, issuer_key);
-
-    CertificateRevocationListParams {
-        this_update,
-        next_update,
-        crl_number: SerialNumber::from(1_u64),
-        issuing_distribution_point: None,
-        revoked_certs: Vec::new(),
-        key_identifier_method: rcgen::KeyIdMethod::Sha256,
-    }
-    .signed_by(&issuer)
-    .unwrap()
-    .der()
-    .to_vec()
 }

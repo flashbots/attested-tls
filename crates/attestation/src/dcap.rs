@@ -7,6 +7,8 @@ use dcap_qvl::{
     quote::{Quote, Report},
     tcb_info::TcbInfo,
 };
+#[cfg(any(test, feature = "mock"))]
+use mock_tdx::generate_mock_tdx_quote;
 use pccs::{Pccs, PccsError};
 use thiserror::Error;
 
@@ -204,18 +206,30 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
 }
 
 #[cfg(any(test, feature = "mock"))]
-#[allow(clippy::unused_async)]
 pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    _pccs: Option<Pccs>,
+    pccs: Option<Pccs>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
-    // In tests we use mock quotes which will fail to verify
-    let quote = tdx_quote::Quote::from_bytes(&input)?;
-    if quote.report_input_data() != expected_input_data {
+    let quote = Quote::parse(&input)?;
+    let ca = quote.ca()?;
+    let fmspc = hex::encode_upper(quote.fmspc()?);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let collateral = if let Some(ref pccs) = pccs {
+        let (collateral, _is_fresh) = pccs.get_collateral(fmspc, ca, now).await?;
+        collateral
+    } else {
+        mock_tdx::mock_collateral()
+    };
+    let verifier = mock_tdx::mock_dcap_verifier();
+    verifier.verify(&input, &collateral, now)?;
+
+    let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
+    if get_quote_input_data(quote.report) != expected_input_data {
         return Err(DcapVerificationError::InputMismatch);
     }
-    Ok(MultiMeasurements::from_tdx_quote(&quote))
+
+    Ok(measurements)
 }
 
 #[cfg(any(test, feature = "mock"))]
@@ -225,25 +239,22 @@ pub fn verify_dcap_attestation_sync(
     _pccs: Pccs,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     // In tests we use mock quotes which will fail to verify
-    let quote = tdx_quote::Quote::from_bytes(&input)?;
-    if quote.report_input_data() != expected_input_data {
+    let quote = Quote::parse(&input)?;
+    let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
+    if get_quote_input_data(quote.report.clone()) != expected_input_data {
         return Err(DcapVerificationError::InputMismatch);
     }
-    Ok(MultiMeasurements::from_tdx_quote(&quote))
+    Ok(measurements)
 }
 
 /// Create a mock quote for testing on non-confidential hardware
 #[cfg(any(test, feature = "mock"))]
 fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, QuoteGenerationError> {
-    let attestation_key = tdx_quote::SigningKey::random(&mut rand_core::OsRng);
-    let provisioning_certification_key = tdx_quote::SigningKey::random(&mut rand_core::OsRng);
-    Ok(tdx_quote::Quote::mock(
-        attestation_key.clone(),
-        provisioning_certification_key.clone(),
-        input,
-        b"Mock cert chain".to_vec(),
-    )
-    .as_bytes())
+    generate_mock_tdx_quote(input).map_err(|error| {
+        QuoteGenerationError::IO(std::io::Error::other(format!(
+            "mock-tdx quote generation: {error}"
+        )))
+    })
 }
 
 /// Create a quote
@@ -272,9 +283,6 @@ pub enum DcapVerificationError {
     SystemTime(#[from] std::time::SystemTimeError),
     #[error("DCAP quote verification: {0}")]
     DcapQvl(#[from] anyhow::Error),
-    #[cfg(any(test, feature = "mock"))]
-    #[error("Quote parse: {0}")]
-    QuoteParse(#[from] tdx_quote::QuoteParseError),
     #[error("PCCS: {0}")]
     Pccs(#[from] PccsError),
     #[error("Timestamp exceeds i64 range")]
@@ -283,8 +291,11 @@ pub enum DcapVerificationError {
 
 #[cfg(test)]
 mod tests {
+    use mock_tdx::{MockPcsConfig, spawn_mock_pcs_server};
+
     use super::*;
     use crate::measurements::MeasurementPolicy;
+
     #[tokio::test]
     async fn test_dcap_verify() {
         let attestation_bytes: &'static [u8] =
@@ -381,5 +392,22 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mock_dcap_verify_uses_pccs_when_provided() {
+        let mock_pcs = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
+        let pccs = Pccs::new(Some(mock_pcs.base_url.clone()));
+        let expected_input_data = [0xA5; 64];
+        let attestation_bytes = create_dcap_attestation(expected_input_data).unwrap();
+
+        let measurements =
+            verify_dcap_attestation(attestation_bytes, expected_input_data, Some(pccs))
+                .await
+                .unwrap();
+
+        assert_eq!(measurements, crate::measurements::mock_dcap_measurements());
+        assert_eq!(mock_pcs.tcb_call_count(), 1);
+        assert_eq!(mock_pcs.qe_call_count(), 1);
     }
 }
