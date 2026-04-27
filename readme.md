@@ -14,7 +14,7 @@ sequenceDiagram
     Note over C,S: TLS handshake with CA-signed cert
   end
 
-  Note over C,S: TLS handshake with attestation
+  Note over C,S: TLS handshake with attestation verification
   C<<->>S: Application traffic
 ```
 

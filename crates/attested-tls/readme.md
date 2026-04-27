@@ -12,7 +12,7 @@ This crate provides two components:
   attestation during TLS handshake. It implements [`rustls::client::danger::ServerCertVerifier`](https://docs.rs/rustls/latest/rustls/client/danger/trait.ServerCertVerifier.html)
   and [`rustls::server::danger::ClientCertVerifier`](https://docs.rs/rustls/latest/rustls/server/danger/trait.ClientCertVerifier.html).
 
-It supports both server and client TLS authentication, and can be used as the
+The crate supports both server and client TLS authentication, and can be used as the
 inner attested session inside [`nested-tls`](../nested-tls).
 
 ## Protocol details
