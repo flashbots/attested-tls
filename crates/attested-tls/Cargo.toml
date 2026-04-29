@@ -4,23 +4,26 @@ version = "0.0.1"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.102"
 attestation = { workspace = true }
+rustls = { workspace = true, default-features = false }
+tokio = { workspace = true }
+
+anyhow = "1.0.102"
 ra-tls = { git = "https://github.com/Dstack-TEE/dstack.git", rev = "4f602dddc0542cd34da031c90ac0b3a560f316ed", features = ["quote"] }
 rcgen = "0.14.7"
-rustls = { workspace = true, default-features = false }
 serde_json = "1.0.149"
 sha2 = "0.10.9"
 thiserror = "2.0.17"
-tokio = { workspace = true }
 tracing = "0.1.41"
-x509-parser = "0.18.1"
+webpki-roots = "1.0.7"
+x509-parser = { version = "0.16", features = ["verify"] } # version must match the one from ra-tls
 yasna = "0.5.2"
 
 [dev-dependencies]
 attestation = { workspace = true, features = ["mock"] }
-nested-tls = { path = "../nested-tls" }
 rustls = { workspace = true, default-features = false, features = ["aws_lc_rs"] }
+
+nested-tls = { path = "../nested-tls" }
 
 [lints]
 workspace = true
