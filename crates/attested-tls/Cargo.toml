@@ -19,6 +19,7 @@ yasna = "0.5.2"
 
 [dev-dependencies]
 attestation = { workspace = true, features = ["mock"] }
+mock-tdx = { workspace = true }
 nested-tls = { path = "../nested-tls" }
 rustls = { workspace = true, default-features = false, features = ["aws_lc_rs"] }
 

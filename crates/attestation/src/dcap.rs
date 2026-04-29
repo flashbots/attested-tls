@@ -236,10 +236,16 @@ pub async fn verify_dcap_attestation(
 pub fn verify_dcap_attestation_sync(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    _pccs: Pccs,
+    pccs: Pccs,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
-    // In tests we use mock quotes which will fail to verify
     let quote = Quote::parse(&input)?;
+    let ca = quote.ca()?;
+    let fmspc = hex::encode_upper(quote.fmspc()?);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let collateral = pccs.get_collateral_sync(fmspc, ca, now)?;
+    let verifier = mock_tdx::mock_dcap_verifier();
+    verifier.verify(&input, &collateral, now)?;
+
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
     if get_quote_input_data(quote.report.clone()) != expected_input_data {
         return Err(DcapVerificationError::InputMismatch);
@@ -396,7 +402,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_dcap_verify_uses_pccs_when_provided() {
-        let mock_pcs = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
+        let mock_pcs = spawn_mock_pcs_server(MockPcsConfig {
+            include_fmspcs_listing: false,
+            ..MockPcsConfig::default()
+        })
+        .await
+        .unwrap();
         let pccs = Pccs::new(Some(mock_pcs.base_url.clone()));
         let expected_input_data = [0xA5; 64];
         let attestation_bytes = create_dcap_attestation(expected_input_data).unwrap();

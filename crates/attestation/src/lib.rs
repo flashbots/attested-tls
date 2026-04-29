@@ -321,6 +321,18 @@ impl AttestationVerifier {
         }
     }
 
+    /// Expect mock measurements used in tests, and use a PCCS
+    #[cfg(any(test, feature = "mock"))]
+    pub fn mock_with_pccs(pccs_url: String) -> Self {
+        Self {
+            measurement_policy: MeasurementPolicy::mock(),
+            pccs_url: None,
+            dump_dcap_quotes: false,
+            override_azure_outdated_tcb: false,
+            internal_pccs: Some(Pccs::new(Some(pccs_url))),
+        }
+    }
+
     /// Resolves once the internal PCCS cache is ready to verify
     /// attestations
     ///
@@ -597,6 +609,7 @@ pub enum AttestationError {
 
 #[cfg(test)]
 mod tests {
+    use mock_tdx::mock_pcs::{MockPcsConfig, spawn_mock_pcs_server};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -673,11 +686,17 @@ mod tests {
         assert_eq!(wrapped.attestation, vec![9, 8]);
     }
 
-    #[test]
-    fn mock_verifier_supports_sync_verification() {
+    #[tokio::test]
+    async fn mock_verifier_supports_sync_verification() {
         let input_data = [7u8; 64];
         let attestation = dcap::create_dcap_attestation(input_data).unwrap();
-        let verifier = AttestationVerifier::mock();
+
+        let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
+
+        let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
+        if let Some(ref pccs) = verifier.internal_pccs {
+            pccs.ready().await.unwrap();
+        }
 
         let result = verifier.verify_attestation_sync(
             AttestationExchangeMessage { attestation_type: AttestationType::DcapTdx, attestation },

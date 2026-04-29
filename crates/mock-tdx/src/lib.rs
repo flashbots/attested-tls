@@ -1,4 +1,4 @@
-mod mock_pcs;
+pub mod mock_pcs;
 
 use dcap_qvl::{
     QuoteCollateralV3,
