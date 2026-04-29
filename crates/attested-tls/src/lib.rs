@@ -721,11 +721,13 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
 
 impl ClientCertVerifier for AttestedCertificateVerifier {
     fn offer_client_auth(&self) -> bool {
-        self.client_inner.as_ref().is_none_or(|client_inner| client_inner.offer_client_auth())
+        // We assume that if this certificate verifier is used for client auth,
+        // in [ServerConfig] then client auth is desired
+        true
     }
 
     fn client_auth_mandatory(&self) -> bool {
-        self.client_inner.as_ref().is_none_or(|client_inner| client_inner.client_auth_mandatory())
+        true
     }
 
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
