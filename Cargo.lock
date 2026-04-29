@@ -297,7 +297,6 @@ dependencies = [
  "anyhow",
  "az-tdx-vtpm",
  "base64 0.22.1",
- "configfs-tsm",
  "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
  "hex",
  "http 1.4.0",
@@ -313,6 +312,7 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
+ "tdx-attest",
  "tdx-quote",
  "tempfile",
  "thiserror 2.0.18",
@@ -834,12 +834,6 @@ name = "codicon"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12170080f3533d6f09a19f81596f836854d0fa4867dc32c8172b8474b4e9de61"
-
-[[package]]
-name = "configfs-tsm"
-version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "187437900921c8172f33316ad51a3267df588e99a2aebfa5ca1a2ed44df9e703"
 
 [[package]]
 name = "console"

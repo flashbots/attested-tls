@@ -15,7 +15,7 @@ x509-parser = "0.18.0"
 thiserror = "2.0.17"
 anyhow = "1.0.100"
 pem-rfc7468 = { version = "0.7.0", features = ["std"] }
-configfs-tsm = "0.0.2"
+tdx-attest = { git = "https://github.com/Dstack-TEE/dstack.git", rev = "4f602dddc0542cd34da031c90ac0b3a560f316ed" }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 dcap-qvl = { workspace = true, features = ["danger-allow-tcb-override"] }
 hex = "0.4.3"

@@ -1,6 +1,5 @@
 //! Data Center Attestation Primitives (DCAP) evidence generation and
 //! verification
-use configfs_tsm::QuoteGenerationError;
 use dcap_qvl::{
     QuoteCollateralV3,
     collateral::get_collateral_for_fmspc,
@@ -19,7 +18,7 @@ const AZURE_BAD_FMSPC: &str = "90C06F000000";
 /// For fetching collateral directly from Intel, if no PCCS is specified
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
-/// Quote generation using configfs_tsm
+/// Quote generation using tdx-attest
 pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
     let quote = generate_quote(input_data)?;
     tracing::info!("Generated TDX quote of {} bytes", quote.len());
@@ -234,7 +233,7 @@ pub fn verify_dcap_attestation_sync(
 
 /// Create a mock quote for testing on non-confidential hardware
 #[cfg(any(test, feature = "mock"))]
-fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, QuoteGenerationError> {
+fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, tdx_attest::TdxAttestError> {
     let attestation_key = tdx_quote::SigningKey::random(&mut rand_core::OsRng);
     let provisioning_certification_key = tdx_quote::SigningKey::random(&mut rand_core::OsRng);
     Ok(tdx_quote::Quote::mock(
@@ -248,8 +247,8 @@ fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, QuoteGenerationError> {
 
 /// Create a quote
 #[cfg(not(any(test, feature = "mock")))]
-fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, QuoteGenerationError> {
-    configfs_tsm::create_tdx_quote(input)
+fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, tdx_attest::TdxAttestError> {
+    tdx_attest::get_quote(&input)
 }
 
 /// Given a [Report] get the input data regardless of report type

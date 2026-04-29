@@ -58,7 +58,9 @@ Google Cloud metadata API is used to detect whether we are on Google Cloud.
 In the case of attestation types `dcap-tdx`, `gcp-tdx`, and `qemu-tdx`, a
 standard DCAP attestation is generated using the `configfs-tsm` linux filesystem
 interface. This means that the binary must be run with access to
-`/sys/kernel/config/tsm/report` which on many systems requires sudo.
+`/sys/kernel/config/tsm/report` which on many systems requires sudo.  If
+configfs-tsm is unavailable, quote generation via vSOCK to the QGS will be
+attempted.
 
 Alternatively, an external 'attestation provider service' URL can be provided
 which outsources the attestation generation to another process.
