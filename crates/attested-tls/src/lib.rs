@@ -514,7 +514,7 @@ impl AttestedCertificateVerifier {
         })
     }
 
-    /// Create a TLS certificate verifier wrapping given attestation
+    /// Create a TLS certificate verifier builder wrapping given attestation
     /// verifier
     pub fn build(attestation_verifier: AttestationVerifier) -> AttestedCertificateVerifierBuilder {
         AttestedCertificateVerifierBuilder {
