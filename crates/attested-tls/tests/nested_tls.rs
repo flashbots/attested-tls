@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 async fn nested_tls_uses_attested_tls_for_inner_session() {
     let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
     let (outer_server, outer_client) = plain_tls_config_pair(provider.clone());
-    let inner_server = attested_server_config("localhost", provider.clone()).await;
+    let inner_server = attested_server_config("localhost", provider.clone());
     let inner_client = attested_client_config(provider.clone()).await;
 
     let acceptor = NestingTlsAcceptor::new(Arc::new(outer_server), Arc::new(inner_server));
@@ -84,16 +84,15 @@ fn plain_tls_config_pair(provider: Arc<CryptoProvider>) -> (ServerConfig, Client
 
 /// Create attested server TLS config with mock DCAP attestation and
 /// self-signed certs
-async fn attested_server_config(server_name: &str, provider: Arc<CryptoProvider>) -> ServerConfig {
-    let resolver = AttestedCertificateResolver::new_with_provider(
+fn attested_server_config(server_name: &str, provider: Arc<CryptoProvider>) -> ServerConfig {
+    let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let resolver = AttestedCertificateResolver::build(
+        server_name,
         AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
-        None,
-        server_name.to_string(),
-        vec![],
-        provider.clone(),
-        std::time::Duration::from_secs(91),
     )
-    .await
+    .with_crypto_provider(provider.clone())
+    .with_key_pair(&key_pair)
+    .finish()
     .unwrap();
 
     ServerConfig::builder_with_provider(provider)
@@ -110,8 +109,10 @@ async fn attested_client_config(provider: Arc<CryptoProvider>) -> ClientConfig {
     if let Some(ref pccs) = verifier.internal_pccs {
         pccs.ready().await.unwrap();
     }
-    let verifier =
-        AttestedCertificateVerifier::new_with_provider(None, verifier, provider.clone()).unwrap();
+    let verifier = AttestedCertificateVerifier::build(verifier)
+        .with_crypto_provider(provider.clone())
+        .finish()
+        .unwrap();
 
     ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
