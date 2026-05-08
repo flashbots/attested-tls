@@ -56,19 +56,9 @@ impl AttestationExchangeMessage {
                 }
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                #[cfg(any(test, feature = "mock"))]
-                {
-                    let quote = tdx_quote::Quote::from_bytes(&self.attestation)
-                        .map_err(DcapVerificationError::from)?;
-                    Ok(Some(MultiMeasurements::from_tdx_quote(&quote)))
-                }
-
-                #[cfg(not(any(test, feature = "mock")))]
-                {
-                    let quote = dcap_qvl::verify::Quote::parse(&self.attestation)
-                        .map_err(DcapVerificationError::from)?;
-                    Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
-                }
+                let quote = dcap_qvl::verify::Quote::parse(&self.attestation)
+                    .map_err(DcapVerificationError::from)?;
+                Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
             }
         }
     }
@@ -332,7 +322,7 @@ impl AttestationVerifier {
             pccs_url: None,
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
-            internal_pccs: Some(Pccs::new_without_prewarm(None)),
+            internal_pccs: None,
         }
     }
 
@@ -452,7 +442,11 @@ impl AttestationVerifier {
                     return Err(AttestationError::AttestationTypeNotSupported);
                 }
             }
-            _ => {
+            AttestationType::DcapTdx | AttestationType::QemuTdx | AttestationType::GcpTdx => {
+                #[cfg(any(test, feature = "mock"))]
+                let pccs =
+                    self.internal_pccs.clone().unwrap_or_else(|| Pccs::new_without_prewarm(None));
+                #[cfg(not(any(test, feature = "mock")))]
                 let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
 
                 dcap::verify_dcap_attestation_sync(
