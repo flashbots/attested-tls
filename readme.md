@@ -18,7 +18,7 @@ sequenceDiagram
   C<<->>S: Application traffic
 ```
 
-- A outer TLS session authenticates the service using a standard CA-signed
+- An outer TLS session authenticates the service using a standard CA-signed
   certificate.  This is optional.
 - An inner TLS session which uses a certificate with attestation
   evidence embedded in an extension.
@@ -36,7 +36,7 @@ More details in the individual READMEs of the provided crates:
 - [`attested-tls`](./crates/attested-tls) - provides attested TLS via X509
   Certificate extensions and a custom certificate verifier.
 - [`nested-tls`](./crates/nested-tls) - provides two TLS sessions, such that
-  that outer session can be used for a CA signed certificate and the inner
+  the outer session can be used for a CA signed certificate and the inner
   session for attestation.
 - [`attestation`](./crates/attestation) - provides attestation generation,
   verification and measurement handling.

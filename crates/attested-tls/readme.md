@@ -34,7 +34,8 @@ verification.
 
 The certificate resolver:
 
-- Takes a single ECDSA P-256 keypair when constructed
+- Uses one keypair per resolver instance; by default it generates an
+  ECDSA P-256 keypair, but callers can provide a compatible keypair
 - Issues either a self-signed leaf certificate or a leaf signed by a provided
   private CA
 - Embeds attestation evidence into the certificate using the
