@@ -166,6 +166,7 @@ impl MultiMeasurements {
         let measurements_map: HashMap<u8, String> = serde_json::from_str(input)?;
 
         Ok(match attestation_type {
+            AttestationType::None => Self::NoAttestation,
             AttestationType::AzureTdx => Self::Azure(
                 measurements_map
                     .into_iter()
@@ -179,8 +180,7 @@ impl MultiMeasurements {
                     })
                     .collect::<Result<_, MeasurementFormatError>>()?,
             ),
-            AttestationType::None => Self::NoAttestation,
-            _ => {
+            AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
                 let measurements_map = measurements_map
                     .into_iter()
                     .map(|(k, v)| {
@@ -304,7 +304,9 @@ impl MeasurementRecord {
             measurements: match attestation_type {
                 AttestationType::None => ExpectedMeasurements::NoAttestation,
                 AttestationType::AzureTdx => ExpectedMeasurements::Azure(HashMap::new()),
-                _ => ExpectedMeasurements::Dcap(HashMap::new()),
+                AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
+                    ExpectedMeasurements::Dcap(HashMap::new())
+                }
             },
         }
     }
@@ -524,6 +526,7 @@ impl MeasurementPolicy {
 
             if let Some(measurements) = record.measurements {
                 let expected_measurements = match attestation_type {
+                    AttestationType::None => ExpectedMeasurements::NoAttestation,
                     AttestationType::AzureTdx => {
                         let azure_measurements = measurements
                             .iter()
@@ -535,8 +538,9 @@ impl MeasurementPolicy {
                             )?;
                         ExpectedMeasurements::Azure(azure_measurements)
                     }
-                    AttestationType::None => ExpectedMeasurements::NoAttestation,
-                    _ => ExpectedMeasurements::Dcap(
+                    AttestationType::DcapTdx |
+                    AttestationType::GcpTdx |
+                    AttestationType::QemuTdx => ExpectedMeasurements::Dcap(
                         measurements
                             .iter()
                             .map(|(index_str, entry)| {

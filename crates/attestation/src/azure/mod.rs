@@ -396,38 +396,32 @@ impl RsaPubKey {
 }
 
 /// Detect whether we are on Azure and can make an Azure vTPM attestation
-pub async fn detect_azure_cvm() -> Result<bool, MaaError> {
-    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build()?;
-
-    let response = match client.get(AZURE_METADATA_API).header("Metadata", "true").send().await {
-        Ok(response) => response,
+pub fn detect_azure_cvm() -> Result<bool, MaaError> {
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_millis(200)).build();
+    let resp = match agent.get(AZURE_METADATA_API).set("Metadata", "true").call() {
+        Ok(resp) => resp,
         Err(err) => {
             tracing::debug!("Azure CVM detection failed: Azure metadata API request failed: {err}");
             return Ok(false);
         }
     };
 
-    if !response.status().is_success() {
+    if resp.status() != 200 {
         tracing::debug!(
             "Azure CVM detection failed: metadata API returned non-success status: {}",
-            response.status()
+            resp.status()
         );
         return Ok(false);
     }
 
     // Ensure the response has a JSON content type
-    let content_type = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .map(|value| value.to_str().map(str::to_owned))
-        .transpose()
-        .map_err(|_| MaaError::AzureMetadataApiNonJsonResponse { content_type: None })?;
+    let content_type = resp
+        .header(CONTENT_TYPE.as_str())
+        .map(|value| value.to_owned())
+        .ok_or_else(|| MaaError::AzureMetadataApiNonJsonResponse { content_type: None })?;
 
-    if !content_type
-        .as_deref()
-        .is_some_and(|value| value.to_lowercase().starts_with("application/json"))
-    {
-        return Err(MaaError::AzureMetadataApiNonJsonResponse { content_type });
+    if !content_type.to_lowercase().starts_with("application/json") {
+        return Err(MaaError::AzureMetadataApiNonJsonResponse { content_type: Some(content_type) });
     }
 
     match az_tdx_vtpm::is_tdx_cvm() {
