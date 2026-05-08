@@ -7,6 +7,7 @@ pub mod measurements;
 
 use std::{
     fmt::{self, Display, Formatter},
+    io::Read,
     net::IpAddr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -54,7 +55,7 @@ impl AttestationExchangeMessage {
                     Err(AttestationError::AttestationTypeNotSupported)
                 }
             }
-            _ => {
+            AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
                 #[cfg(any(test, feature = "mock"))]
                 {
                     let quote = tdx_quote::Quote::from_bytes(&self.attestation)
@@ -103,18 +104,18 @@ impl AttestationType {
     }
 
     /// Detect what platform we are on by attempting an attestation
-    pub async fn detect() -> Result<Self, AttestationError> {
+    pub fn detect() -> Result<Self, AttestationError> {
         // First attempt azure, if the feature is present
         #[cfg(feature = "azure")]
         {
-            if azure::detect_azure_cvm().await? {
+            if azure::detect_azure_cvm()? {
                 return Ok(AttestationType::AzureTdx);
             }
         }
         // Otherwise try DCAP quote - this internally checks that the quote provider
         // is `tdx_guest`
         if configfs_tsm::create_tdx_quote([0; 64]).is_ok() {
-            if running_on_gcp().await? {
+            if running_on_gcp()? {
                 return Ok(AttestationType::GcpTdx);
             } else {
                 return Ok(AttestationType::DcapTdx);
@@ -170,8 +171,8 @@ impl AttestationGenerator {
 
     /// Detect what confidential compute platform is present and create the
     /// appropriate attestation generator
-    pub async fn detect() -> Result<Self, AttestationError> {
-        Self::new_with_detection(None, None).await
+    pub fn detect() -> Result<Self, AttestationError> {
+        Self::new_with_detection(None, None)
     }
 
     /// Do not generate attestations
@@ -181,7 +182,7 @@ impl AttestationGenerator {
 
     /// Create an [AttestationGenerator] detecting the attestation type if
     /// it is not given
-    pub async fn new_with_detection(
+    pub fn new_with_detection(
         attestation_type_string: Option<String>,
         attestation_provider_url: Option<String>,
     ) -> Result<Self, AttestationError> {
@@ -196,7 +197,7 @@ impl AttestationGenerator {
         let attestation_type_string = attestation_type_string.unwrap_or_else(|| "auto".to_string());
         let attestation_type = if attestation_type_string == "auto" {
             tracing::info!("Doing attestation type detection...");
-            AttestationType::detect().await?
+            AttestationType::detect()?
         } else {
             serde_json::from_value(serde_json::Value::String(attestation_type_string))?
         };
@@ -206,12 +207,12 @@ impl AttestationGenerator {
     }
 
     /// Generate an attestation exchange message with given input data
-    pub async fn generate_attestation(
+    pub fn generate_attestation(
         &self,
         input_data: [u8; 64],
     ) -> Result<AttestationExchangeMessage, AttestationError> {
         if let Some(url) = &self.attestation_provider_url {
-            Self::use_attestation_provider(url, self.attestation_type, input_data).await
+            Self::use_attestation_provider(url, self.attestation_type, input_data)
         } else {
             Ok(AttestationExchangeMessage {
                 attestation_type: self.attestation_type,
@@ -241,33 +242,37 @@ impl AttestationGenerator {
                     Err(AttestationError::AttestationTypeNotSupported)
                 }
             }
-            _ => dcap::create_dcap_attestation(input_data),
+            AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
+                dcap::create_dcap_attestation(input_data)
+            }
         }
     }
 
     /// Generate an attestation by using an external service for the
     /// attestation generation
-    async fn use_attestation_provider(
+    fn use_attestation_provider(
         url: &str,
         attestation_type: AttestationType,
         input_data: [u8; 64],
     ) -> Result<AttestationExchangeMessage, AttestationError> {
         let url = format!("{}/attest/{}", url, hex::encode(input_data));
 
-        let response = reqwest::get(url)
-            .await
+        let mut response = ureq::get(&url)
+            .timeout(Duration::from_millis(1000))
+            .call()
             .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?
-            .bytes()
-            .await
-            .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?
-            .to_vec();
+            .into_reader();
+        let mut body = Vec::new();
+        response
+            .read_to_end(&mut body)
+            .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?;
 
         // If the response is not already wrapped in an attestation exchange
         // message, wrap it in one
-        if let Ok(message) = AttestationExchangeMessage::decode(&mut &response[..]) {
+        if let Ok(message) = AttestationExchangeMessage::decode(&mut &body[..]) {
             Ok(message)
         } else {
-            Ok(AttestationExchangeMessage { attestation_type, attestation: response })
+            Ok(AttestationExchangeMessage { attestation_type, attestation: body })
         }
     }
 }
@@ -391,7 +396,7 @@ impl AttestationVerifier {
                     return Err(AttestationError::AttestationTypeNotSupported);
                 }
             }
-            _ => {
+            AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
                 dcap::verify_dcap_attestation(
                     attestation_exchange_message.attestation,
                     expected_input_data,
@@ -497,14 +502,13 @@ fn log_attestation(attestation: &AttestationExchangeMessage) {
 
 /// Test whether it looks like we are running on GCP by hitting the metadata
 /// API
-async fn running_on_gcp() -> Result<bool, AttestationError> {
-    let client = reqwest::Client::builder().timeout(Duration::from_millis(200)).build()?;
-
-    let resp = client.get(GCP_METADATA_API).send().await;
+fn running_on_gcp() -> Result<bool, AttestationError> {
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_millis(200)).build();
+    let resp = agent.get(GCP_METADATA_API).call();
 
     if let Ok(r) = resp {
-        return Ok(r.status().is_success() &&
-            r.headers().get("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
+        return Ok(r.status() == 200 &&
+            r.header("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
     }
 
     Ok(false)
@@ -632,19 +636,19 @@ mod tests {
         addr
     }
 
-    #[tokio::test]
-    async fn attestation_detection_does_not_panic() {
+    #[test]
+    fn attestation_detection_does_not_panic() {
         // We dont enforce what platform the test is run on, only that the function
         // does not panic
-        let _ = AttestationGenerator::new_with_detection(None, None).await;
+        let _ = AttestationGenerator::new_with_detection(None, None);
     }
 
-    #[tokio::test]
-    async fn running_on_gcp_check_does_not_panic() {
-        let _ = running_on_gcp().await;
+    #[test]
+    fn running_on_gcp_check_does_not_panic() {
+        let _ = running_on_gcp();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn attestation_provider_response_is_wrapped_if_needed() {
         let input_data = [0u8; 64];
 
@@ -661,7 +665,6 @@ mod tests {
             AttestationType::GcpTdx,
             input_data,
         )
-        .await
         .unwrap();
         assert_eq!(decoded.attestation_type, AttestationType::None);
         assert_eq!(decoded.attestation, vec![1, 2, 3]);
@@ -673,7 +676,6 @@ mod tests {
             AttestationType::DcapTdx,
             input_data,
         )
-        .await
         .unwrap();
         assert_eq!(wrapped.attestation_type, AttestationType::DcapTdx);
         assert_eq!(wrapped.attestation, vec![9, 8]);
