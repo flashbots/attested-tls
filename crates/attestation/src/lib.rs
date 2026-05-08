@@ -442,7 +442,7 @@ impl AttestationVerifier {
                     return Err(AttestationError::AttestationTypeNotSupported);
                 }
             }
-            _ => {
+            AttestationType::DcapTdx | AttestationType::QemuTdx | AttestationType::GcpTdx => {
                 #[cfg(any(test, feature = "mock"))]
                 let pccs =
                     self.internal_pccs.clone().unwrap_or_else(|| Pccs::new_without_prewarm(None));
