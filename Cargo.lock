@@ -734,8 +734,8 @@ dependencies = [
 
 [[package]]
 name = "cc-eventlog"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
  "digest",
@@ -1334,8 +1334,8 @@ dependencies = [
 
 [[package]]
 name = "dstack-attest"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
  "cc-eventlog",
@@ -1349,6 +1349,7 @@ dependencies = [
  "insta",
  "or-panic",
  "parity-scale-codec",
+ "rmp-serde",
  "serde",
  "serde-human-bytes",
  "serde_json",
@@ -1360,8 +1361,8 @@ dependencies = [
 
 [[package]]
 name = "dstack-types"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "parity-scale-codec",
  "serde",
@@ -3118,8 +3119,8 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ra-tls"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
  "bon",
@@ -3821,8 +3822,8 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "size-parser"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
  "serde",
@@ -3952,8 +3953,8 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tdx-attest"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
  "cc-eventlog",
