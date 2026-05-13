@@ -530,7 +530,8 @@ impl AttestedCertificateVerifier {
     pub fn extract_custom_attestation_from_cert(
         cert: &X509Certificate<'_>,
     ) -> Result<AttestationExchangeMessage, rustls::Error> {
-        if let Ok(Some(attestation)) = ra_tls::attestation::from_cert(cert) &&
+        if let Ok(Some(VersionedAttestation::V0 { attestation })) =
+            ra_tls::attestation::from_cert(cert) &&
             let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote
         {
             if let Ok(message) =
