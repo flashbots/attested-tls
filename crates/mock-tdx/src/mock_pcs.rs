@@ -43,7 +43,7 @@ impl Default for MockPcsConfig {
         let qe_identity: Value = serde_json::from_str(&collateral.qe_identity).unwrap();
 
         Self {
-            include_fmspcs_listing: false,
+            include_fmspcs_listing: true,
             tcb_next_update: tcb_info["nextUpdate"].as_str().unwrap().to_string(),
             qe_next_update: qe_identity["nextUpdate"].as_str().unwrap().to_string(),
             refreshed_tcb_next_update: None,
