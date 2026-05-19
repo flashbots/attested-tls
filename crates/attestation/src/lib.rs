@@ -56,19 +56,9 @@ impl AttestationExchangeMessage {
                 }
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                #[cfg(any(test, feature = "mock"))]
-                {
-                    let quote = tdx_quote::Quote::from_bytes(&self.attestation)
-                        .map_err(DcapVerificationError::from)?;
-                    Ok(Some(MultiMeasurements::from_tdx_quote(&quote)))
-                }
-
-                #[cfg(not(any(test, feature = "mock")))]
-                {
-                    let quote = dcap_qvl::verify::Quote::parse(&self.attestation)
-                        .map_err(DcapVerificationError::from)?;
-                    Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
-                }
+                let quote = dcap_qvl::verify::Quote::parse(&self.attestation)
+                    .map_err(DcapVerificationError::from)?;
+                Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
             }
         }
     }
@@ -332,7 +322,19 @@ impl AttestationVerifier {
             pccs_url: None,
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
-            internal_pccs: Some(Pccs::new_without_prewarm(None)),
+            internal_pccs: None,
+        }
+    }
+
+    /// Expect mock measurements used in tests, and use a PCCS
+    #[cfg(any(test, feature = "mock"))]
+    pub fn mock_with_pccs(pccs_url: String) -> Self {
+        Self {
+            measurement_policy: MeasurementPolicy::mock(),
+            pccs_url: None,
+            dump_dcap_quotes: false,
+            override_azure_outdated_tcb: false,
+            internal_pccs: Some(Pccs::new(Some(pccs_url))),
         }
     }
 
@@ -452,7 +454,11 @@ impl AttestationVerifier {
                     return Err(AttestationError::AttestationTypeNotSupported);
                 }
             }
-            _ => {
+            AttestationType::DcapTdx | AttestationType::QemuTdx | AttestationType::GcpTdx => {
+                #[cfg(any(test, feature = "mock"))]
+                let pccs =
+                    self.internal_pccs.clone().unwrap_or_else(|| Pccs::new_without_prewarm(None));
+                #[cfg(not(any(test, feature = "mock")))]
                 let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
 
                 dcap::verify_dcap_attestation_sync(
@@ -607,6 +613,7 @@ pub enum AttestationError {
 
 #[cfg(test)]
 mod tests {
+    use mock_tdx::mock_pcs::{MockPcsConfig, spawn_mock_pcs_server};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -681,11 +688,17 @@ mod tests {
         assert_eq!(wrapped.attestation, vec![9, 8]);
     }
 
-    #[test]
-    fn mock_verifier_supports_sync_verification() {
+    #[tokio::test]
+    async fn mock_verifier_supports_sync_verification() {
         let input_data = [7u8; 64];
         let attestation = dcap::create_dcap_attestation(input_data).unwrap();
-        let verifier = AttestationVerifier::mock();
+
+        let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
+
+        let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
+        if let Some(ref pccs) = verifier.internal_pccs {
+            pccs.ready().await.unwrap();
+        }
 
         let result = verifier.verify_attestation_sync(
             AttestationExchangeMessage { attestation_type: AttestationType::DcapTdx, attestation },

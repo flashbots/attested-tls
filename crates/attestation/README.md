@@ -37,8 +37,10 @@ must be explicitly enabled via the `override_azure_outdated_tcb` flag on
 
 ### `mock`
 
-Enables mock quote support via `tdx-quote` for tests and development on non-TDX
-hardware. Do not use in production.  Disabled by default.
+Enables mock quote support via the local `mock-tdx` crate for tests and
+development on non-TDX hardware.
+
+Do not use in production. Disabled by default.
 
 ## Attestation Types
 
