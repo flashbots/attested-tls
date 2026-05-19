@@ -534,16 +534,12 @@ impl AttestedCertificateVerifier {
             ra_tls::attestation::from_cert(cert) &&
             let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote
         {
-            if let Ok(message) =
-                serde_json::from_slice::<AttestationExchangeMessage>(&tdx_quote.quote)
-            {
-                return Ok(message);
-            }
-
-            return Ok(AttestationExchangeMessage {
-                attestation_type: AttestationType::DcapTdx,
-                attestation: tdx_quote.quote,
-            });
+            return serde_json::from_slice::<AttestationExchangeMessage>(&tdx_quote.quote)
+                .map_err(|err| {
+                    Self::bad_encoding(format!(
+                        "dstack TDX quote payload is not an AttestationExchangeMessage: {err}"
+                    ))
+                });
         }
 
         // If that fails, extract and parse the extension

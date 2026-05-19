@@ -2,6 +2,8 @@
 //! attestation
 use std::{collections::HashMap, fmt, fmt::Formatter, net::IpAddr, path::PathBuf};
 
+use attest_measure::dcap::ExpectedDcapRegisters;
+use attest_types::{PlatformMetadata, PortableMeasurements};
 use dcap_qvl::quote::Report;
 use http::{HeaderValue, header::InvalidHeaderValue, uri::InvalidUri};
 use serde::Deserialize;
@@ -137,6 +139,14 @@ impl fmt::Debug for AzureHexDebug<'_> {
 pub enum ExpectedMeasurements {
     Dcap(HashMap<DcapMeasurementRegister, Vec<[u8; 48]>>),
     Azure(HashMap<u32, Vec<[u8; 32]>>),
+    /// Per-image hashes plus the attestation type this image targets.
+    /// Expected register values are reconstructed at verify time from
+    /// these hashes combined with the platform metadata in the
+    /// attestation evidence.
+    Portable {
+        image: PortableMeasurements,
+        attestation_type: attest_types::AttestationType,
+    },
     NoAttestation,
 }
 
@@ -267,6 +277,10 @@ pub enum MeasurementFormatError {
     NoExpectedValue(String),
     #[error("Measurement entry for register '{0}' has empty 'expected_any' list")]
     EmptyExpectedAny(String),
+    #[error("Measurement record '{0}' has both 'measurements' and 'image'")]
+    BothMeasurementsAndImage(String),
+    #[error("Portable image record requires a concrete attestation_type (got 'none')")]
+    PortableRequiresAttestationType,
 }
 
 /// An accepted measurement value given in the measurements file
@@ -370,42 +384,31 @@ impl MeasurementPolicy {
         }
     }
 
-    /// Given an attestation type and set of measurements, check whether
-    /// they are acceptable
+    /// Given a set of measurements, check whether they are acceptable.
+    ///
+    /// Portable policy records cannot match without platform metadata; use
+    /// [`Self::check_with_platform`] when verifying against a peer that
+    /// supplied an [`AttestationExchangeMessage::platform`] field.
     pub fn check_measurement(
         &self,
         measurements: &MultiMeasurements,
     ) -> Result<(), AttestationError> {
-        if self.accepted_measurements.iter().any(|measurement_record| match measurements {
-            MultiMeasurements::Dcap(dcap_measurements) => {
-                if let ExpectedMeasurements::Dcap(expected) = &measurement_record.measurements {
-                    // All measurements in our policy must be given and must match
-                    for (k, v) in expected.iter() {
-                        match dcap_measurements.get(k) {
-                            Some(actual_value) if v.iter().any(|v| actual_value == v) => {}
-                            _ => return false,
-                        }
-                    }
-                    return true;
-                }
-                false
-            }
-            MultiMeasurements::Azure(azure_measurements) => {
-                if let ExpectedMeasurements::Azure(expected) = &measurement_record.measurements {
-                    for (k, v) in expected.iter() {
-                        match azure_measurements.get(k) {
-                            Some(actual_value) if v.iter().any(|v| actual_value == v) => {}
-                            _ => return false,
-                        }
-                    }
-                    return true;
-                }
-                false
-            }
-            MultiMeasurements::NoAttestation => {
-                matches!(measurement_record.measurements, ExpectedMeasurements::NoAttestation)
-            }
-        }) {
+        self.check_with_platform(measurements, None)
+    }
+
+    /// Like [`Self::check_measurement`] but also handles
+    /// [`ExpectedMeasurements::Portable`] records by reconstructing
+    /// expected register values from the peer's [`PlatformMetadata`].
+    pub fn check_with_platform(
+        &self,
+        measurements: &MultiMeasurements,
+        platform: Option<&PlatformMetadata>,
+    ) -> Result<(), AttestationError> {
+        if self
+            .accepted_measurements
+            .iter()
+            .any(|record| record_matches(record, measurements, platform))
+        {
             Ok(())
         } else {
             Err(AttestationError::MeasurementsNotAccepted)
@@ -452,6 +455,11 @@ impl MeasurementPolicy {
             measurement_id: Option<String>,
             attestation_type: String,
             measurements: Option<HashMap<String, MeasurementEntry>>,
+            /// Portable per-image hashes. When present, expected register
+            /// values are rebuilt at verify time from these hashes plus
+            /// the peer's platform metadata. Mutually exclusive with
+            /// `measurements`.
+            image: Option<PortableMeasurements>,
         }
 
         /// Measurement entry for a single register in the measurements JSON
@@ -510,8 +518,35 @@ impl MeasurementPolicy {
         let mut measurement_policy = Vec::new();
 
         for record in records_simple {
-            let attestation_type =
+            let attestation_type: AttestationType =
                 serde_json::from_value(serde_json::Value::String(record.attestation_type))?;
+
+            if record.measurements.is_some() && record.image.is_some() {
+                return Err(MeasurementFormatError::BothMeasurementsAndImage(
+                    record.measurement_id.unwrap_or_default(),
+                ));
+            }
+
+            if let Some(image) = record.image {
+                let portable_at = match attestation_type {
+                    AttestationType::GcpTdx => attest_types::AttestationType::GcpTdx,
+                    AttestationType::AzureTdx => attest_types::AttestationType::AzureTdx,
+                    AttestationType::QemuTdx | AttestationType::DcapTdx => {
+                        attest_types::AttestationType::SelfHostedTdx
+                    }
+                    AttestationType::None => {
+                        return Err(MeasurementFormatError::PortableRequiresAttestationType);
+                    }
+                };
+                measurement_policy.push(MeasurementRecord {
+                    measurement_id: record.measurement_id.unwrap_or_default(),
+                    measurements: ExpectedMeasurements::Portable {
+                        image,
+                        attestation_type: portable_at,
+                    },
+                });
+                continue;
+            }
 
             if let Some(measurements) = record.measurements {
                 let expected_measurements = match attestation_type {
@@ -570,6 +605,75 @@ impl MeasurementPolicy {
         Ok(normalized_host.eq_ignore_ascii_case("localhost") ||
             normalized_host.parse::<IpAddr>().is_ok_and(|address| address.is_loopback()))
     }
+}
+
+fn record_matches(
+    record: &MeasurementRecord,
+    measurements: &MultiMeasurements,
+    platform: Option<&PlatformMetadata>,
+) -> bool {
+    use attest_types::AttestationType as AT;
+
+    match (&record.measurements, measurements) {
+        (ExpectedMeasurements::Dcap(expected), MultiMeasurements::Dcap(actual)) => {
+            expected.iter().all(|(reg, allowed)| {
+                actual.get(reg).is_some_and(|v| allowed.iter().any(|e| e == v))
+            })
+        }
+        (ExpectedMeasurements::Azure(expected), MultiMeasurements::Azure(actual)) => {
+            expected.iter().all(|(idx, allowed)| {
+                actual.get(idx).is_some_and(|v| allowed.iter().any(|e| e == v))
+            })
+        }
+        (
+            ExpectedMeasurements::Portable { image, attestation_type },
+            MultiMeasurements::Dcap(actual),
+        ) => {
+            let Some(platform) = platform else {
+                return false;
+            };
+            if platform.attestation_type != *attestation_type {
+                return false;
+            }
+            match attest_measure::dcap::expected_dcap_registers(&image.dcap, platform) {
+                Ok(expected) => expected_dcap_matches(&expected, actual),
+                Err(_) => false,
+            }
+        }
+        (
+            ExpectedMeasurements::Portable { image, attestation_type },
+            MultiMeasurements::Azure(actual),
+        ) => {
+            *attestation_type == AT::AzureTdx && portable_azure_matches(image, actual)
+        }
+        (ExpectedMeasurements::NoAttestation, MultiMeasurements::NoAttestation) => true,
+        _ => false,
+    }
+}
+
+/// Pinned registers must match; registers the platform left unpinned
+/// (`None`) are accepted as-is.
+fn expected_dcap_matches(
+    expected: &ExpectedDcapRegisters,
+    actual: &HashMap<DcapMeasurementRegister, [u8; 48]>,
+) -> bool {
+    let pin = |reg: DcapMeasurementRegister, e: Option<[u8; 48]>| match e {
+        Some(e) => actual.get(&reg).is_some_and(|v| *v == e),
+        None => true,
+    };
+    pin(DcapMeasurementRegister::MRTD, expected.mrtd) &&
+        pin(DcapMeasurementRegister::RTMR0, expected.rtmr0) &&
+        actual.get(&DcapMeasurementRegister::RTMR1).is_some_and(|v| *v == expected.rtmr1) &&
+        actual.get(&DcapMeasurementRegister::RTMR2).is_some_and(|v| *v == expected.rtmr2)
+}
+
+fn portable_azure_matches(image: &PortableMeasurements, actual: &HashMap<u32, [u8; 32]>) -> bool {
+    let Some(az) = image.azure.as_ref() else {
+        return false;
+    };
+    actual.get(&4).is_some_and(|v| *v == az.pcr4) &&
+        actual.get(&9).is_some_and(|v| *v == az.pcr9) &&
+        actual.get(&11).is_some_and(|v| *v == az.pcr11)
 }
 
 #[cfg(test)]

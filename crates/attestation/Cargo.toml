@@ -8,6 +8,8 @@ repository = "https://github.com/flashbots/attested-tls"
 keywords = ["attestation", "CVM", "TDX"]
 
 [dependencies]
+attest-types = { path = "../../../attest/crates/types" }
+attest-measure = { path = "../../../attest/crates/measure" }
 dcap-qvl = { workspace = true, features = ["danger-allow-tcb-override"] }
 pccs = { workspace = true }
 mock-tdx = { workspace = true, optional = true }
