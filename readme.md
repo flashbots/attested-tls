@@ -43,6 +43,9 @@ More details in the individual READMEs of the provided crates:
   verification and measurement handling.
 - [`pccs`](./crates/pccs) provides collateral fetching and caching for DCAP
   verification.
+- [`mock-tdx`](./crates/mock-tdx) - generates deterministic mock TDX DCAP
+  quotes, collateral, and trust roots for tests and development on non-TDX
+  hardware.
 
 The included `shell.nix` file can be used with `nix-shell`, `direnv`, or `nix
 develop` to add the dependencies needed by the optional `azure` feature of the

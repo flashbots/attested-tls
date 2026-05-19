@@ -21,9 +21,9 @@ dependencies = [
 
 [[package]]
 name = "actix-http"
-version = "3.12.0"
+version = "3.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f860ee6746d0c5b682147b2f7f8ef036d4f92fe518251a3a35ffa3650eafdf0e"
+checksum = "93acb4a42f64936f9b8cae4a433b237599dd6eb6ed06124eb67132ef8cc90662"
 dependencies = [
  "actix-codec",
  "actix-rt",
@@ -301,6 +301,7 @@ dependencies = [
  "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
  "hex",
  "http 1.4.0",
+ "mock-tdx",
  "num-bigint",
  "once_cell",
  "openssl",
@@ -313,7 +314,6 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
- "tdx-quote",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -331,6 +331,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "attestation",
+ "mock-tdx",
  "nested-tls",
  "ra-tls",
  "rcgen 0.14.7",
@@ -358,6 +359,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a054912289d18629dc78375ba2c3726a3afe3ff71b4edba9dedfca0e3446d1fc"
 dependencies = [
  "aws-lc-sys",
+ "untrusted 0.7.1",
  "zeroize",
 ]
 
@@ -733,8 +735,8 @@ dependencies = [
 
 [[package]]
 name = "cc-eventlog"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
  "digest",
@@ -1180,7 +1182,7 @@ dependencies = [
  "rustls-pki-types",
  "sha2",
  "signature",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -1333,8 +1335,8 @@ dependencies = [
 
 [[package]]
 name = "dstack-attest"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
  "cc-eventlog",
@@ -1348,6 +1350,7 @@ dependencies = [
  "insta",
  "or-panic",
  "parity-scale-codec",
+ "rmp-serde",
  "serde",
  "serde-human-bytes",
  "serde_json",
@@ -1359,8 +1362,8 @@ dependencies = [
 
 [[package]]
 name = "dstack-types"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "parity-scale-codec",
  "serde",
@@ -2293,18 +2296,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "k256"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6e3919bbaa2945715f0bb6d3934a173d1e9a59ac23767fbaaef277265a7411b"
-dependencies = [
- "cfg-if",
- "ecdsa",
- "elliptic-curve",
- "sha2",
-]
-
-[[package]]
 name = "keccak"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2475,6 +2466,28 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mock-tdx"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
+ "hex",
+ "p256",
+ "parity-scale-codec",
+ "rcgen 0.14.7",
+ "serde",
+ "serde-saphyr",
+ "serde_bytes",
+ "serde_json",
+ "sha2",
+ "time",
+ "tokio",
+ "urlencoding",
+ "x509-parser 0.18.1",
+ "yasna 0.5.2",
 ]
 
 [[package]]
@@ -2669,15 +2682,14 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openssl"
-version = "0.10.78"
+version = "0.10.79"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f38c4372413cdaaf3cc79dd92d29d7d9f5ab09b51b10dded508fb90bb70b9222"
+checksum = "bf0b434746ee2832f4f0baf10137e1cabb18cbe6912c69e2e33263c45250f542"
 dependencies = [
  "bitflags 2.11.0",
  "cfg-if",
  "foreign-types",
  "libc",
- "once_cell",
  "openssl-macros",
  "openssl-sys",
 ]
@@ -2704,9 +2716,9 @@ dependencies = [
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.114"
+version = "0.9.115"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13ce1245cd07fcc4cfdb438f7507b0c7e4f3849a69fd84d52374c66d83741bb6"
+checksum = "158fe5b292746440aa6e7a7e690e55aeb72d41505e2804c23c6973ad0e9c9781"
 dependencies = [
  "cc",
  "libc",
@@ -2745,19 +2757,6 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe42f1670a52a47d448f14b6a5c61dd78fce51856e68edaa38f7ae3a46b8d6b6"
 dependencies = [
- "ecdsa",
- "elliptic-curve",
- "primeorder",
- "sha2",
-]
-
-[[package]]
-name = "p521"
-version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fc9e2161f1f215afdfce23677034ae137bbd45016a880c2eb3ba8eb95f085b2"
-dependencies = [
- "base16ct",
  "ecdsa",
  "elliptic-curve",
  "primeorder",
@@ -2820,9 +2819,9 @@ name = "pccs"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "axum",
  "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
  "hex",
+ "mock-tdx",
  "rcgen 0.14.7",
  "reqwest",
  "serde",
@@ -3121,8 +3120,8 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ra-tls"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
  "bon",
@@ -3261,6 +3260,7 @@ version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10b99e0098aa4082912d4c649628623db6aba77335e4f4569ff5083a6448b32e"
 dependencies = [
+ "aws-lc-rs",
  "pem",
  "ring",
  "rustls-pki-types",
@@ -3395,7 +3395,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.17",
  "libc",
- "untrusted",
+ "untrusted 0.9.0",
  "windows-sys 0.52.0",
 ]
 
@@ -3513,7 +3513,7 @@ dependencies = [
  "aws-lc-rs",
  "ring",
  "rustls-pki-types",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -3823,8 +3823,8 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "size-parser"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
  "serde",
@@ -3954,8 +3954,8 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tdx-attest"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
  "cc-eventlog",
@@ -3969,20 +3969,6 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "vsock",
-]
-
-[[package]]
-name = "tdx-quote"
-version = "0.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2b5801f4d44185197dffb3a63147bb227e19987b5b93628269625676ab1635"
-dependencies = [
- "nom",
- "p256",
- "pem",
- "sha2",
- "spki",
- "x509-verify",
 ]
 
 [[package]]
@@ -4370,6 +4356,12 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "untrusted"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "untrusted"
@@ -4948,18 +4940,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "x509-ocsp"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e54e695a31f0fecb826cf59ae2093c941d7ef932a1f8508185dd23b29ce2e2e"
-dependencies = [
- "const-oid",
- "der",
- "spki",
- "x509-cert",
-]
-
-[[package]]
 name = "x509-parser"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4984,6 +4964,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43b0f71ce057da06bc0851b23ee24f3f86190b07203dd8f567d0b706a185202"
 dependencies = [
  "asn1-rs 0.7.1",
+ "aws-lc-rs",
  "data-encoding",
  "der-parser 10.0.0",
  "lazy_static",
@@ -4993,27 +4974,6 @@ dependencies = [
  "rusticata-macros",
  "thiserror 2.0.18",
  "time",
-]
-
-[[package]]
-name = "x509-verify"
-version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c43a49bf845cd2f3aff9603a4276409dbf2b8fa4454d3e9501bf5b0028342964"
-dependencies = [
- "const-oid",
- "der",
- "ecdsa",
- "ed25519-dalek",
- "k256",
- "p256",
- "p384",
- "p521",
- "sha2",
- "signature",
- "spki",
- "x509-cert",
- "x509-ocsp",
 ]
 
 [[package]]
