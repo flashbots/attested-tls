@@ -104,7 +104,7 @@ impl AttestationType {
         }
         // Otherwise try DCAP quote - this internally checks that the quote provider
         // is `tdx_guest`
-        if configfs_tsm::create_tdx_quote([0; 64]).is_ok() {
+        if tdx_attest::get_quote(&[0; 64]).is_ok() {
             if running_on_gcp()? {
                 return Ok(AttestationType::GcpTdx);
             } else {
@@ -582,8 +582,8 @@ pub enum AttestationError {
     X509(#[from] x509_parser::error::X509Error),
     #[error("Configuration mismatch - expected no remote attestation")]
     AttestationGivenWhenNoneExpected,
-    #[error("Configfs-tsm quote generation: {0}")]
-    QuoteGeneration(#[from] configfs_tsm::QuoteGenerationError),
+    #[error("TDX quote generation: {0}")]
+    QuoteGeneration(#[from] tdx_attest::TdxAttestError),
     #[error("DCAP verification: {0}")]
     DcapVerification(#[from] DcapVerificationError),
     #[error("Attestation type not supported")]

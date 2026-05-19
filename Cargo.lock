@@ -297,7 +297,6 @@ dependencies = [
  "anyhow",
  "az-tdx-vtpm",
  "base64 0.22.1",
- "configfs-tsm",
  "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
  "hex",
  "http 1.4.0",
@@ -314,6 +313,7 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
+ "tdx-attest 0.5.8",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -735,6 +735,23 @@ dependencies = [
 
 [[package]]
 name = "cc-eventlog"
+version = "0.5.8"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+dependencies = [
+ "anyhow",
+ "digest",
+ "ez-hash",
+ "fs-err",
+ "hex",
+ "parity-scale-codec",
+ "serde",
+ "serde-human-bytes",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "cc-eventlog"
 version = "0.5.11"
 source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
@@ -838,12 +855,6 @@ name = "codicon"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12170080f3533d6f09a19f81596f836854d0fa4867dc32c8172b8474b4e9de61"
-
-[[package]]
-name = "configfs-tsm"
-version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "187437900921c8172f33316ad51a3267df588e99a2aebfa5ca1a2ed44df9e703"
 
 [[package]]
 name = "console"
@@ -1339,7 +1350,7 @@ version = "0.5.11"
 source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
- "cc-eventlog",
+ "cc-eventlog 0.5.11",
  "dcap-qvl 0.3.12 (registry+https://github.com/rust-lang/crates.io-index)",
  "dstack-types",
  "errify",
@@ -1356,7 +1367,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sha3",
- "tdx-attest",
+ "tdx-attest 0.5.11",
  "tracing",
 ]
 
@@ -3125,7 +3136,7 @@ source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855
 dependencies = [
  "anyhow",
  "bon",
- "cc-eventlog",
+ "cc-eventlog 0.5.11",
  "dcap-qvl 0.3.12 (registry+https://github.com/rust-lang/crates.io-index)",
  "dstack-attest",
  "dstack-types",
@@ -3954,11 +3965,30 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tdx-attest"
+version = "0.5.8"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+dependencies = [
+ "anyhow",
+ "cc-eventlog 0.5.8",
+ "fs-err",
+ "hex",
+ "libc",
+ "parity-scale-codec",
+ "serde",
+ "serde-human-bytes",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "vsock",
+]
+
+[[package]]
+name = "tdx-attest"
 version = "0.5.11"
 source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
- "cc-eventlog",
+ "cc-eventlog 0.5.11",
  "fs-err",
  "hex",
  "libc",
