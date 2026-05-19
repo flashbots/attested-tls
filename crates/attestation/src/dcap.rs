@@ -18,7 +18,7 @@ const AZURE_BAD_FMSPC: &str = "90C06F000000";
 /// For fetching collateral directly from Intel, if no PCCS is specified
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
-/// Quote generation using tdx-attest
+/// Generate a TDX quote
 pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
     let quote = generate_quote(input_data)?;
     tracing::info!("Generated TDX quote of {} bytes", quote.len());
