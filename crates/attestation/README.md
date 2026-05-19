@@ -14,13 +14,12 @@ This crate provides:
 
 Verification uses the [`pccs`](../pccs) crate for collateral caching and
 background refresh. As a result, constructing an `AttestationVerifier` with
-PCCS enabled and calling verification APIs, including
-`verify_attestation_sync()`, is expected to happen from within a Tokio runtime,
-and will panic if called outside of one.
+PCCS enabled and calling verification APIs is expected to happen from within a
+Tokio runtime and might panic if called outside of one.
 
-Note that the synchronous verification API is synchronous in its return type,
-but it still relies on Tokio-backed background tasks for PCCS pre-warm
-and cache refresh.
+Note that although some of the verification API methods are synchronous (for
+example `verify_attestation_sync`), still their functionality depends on
+Tokio-backed background tasks such as PCCS pre-warm and cache refresh.
 
 ## Feature flags
 

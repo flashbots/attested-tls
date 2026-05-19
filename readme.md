@@ -2,7 +2,7 @@
 
 Primitives for attested TLS channels.
 
-This workspace contains components for a protocol which binds confidential
+This workspace contains components for a protocol that binds confidential
 computing attestation evidence to TLS certificates.
 
 ```mermaid
@@ -20,16 +20,17 @@ sequenceDiagram
 
 - An outer TLS session authenticates the service using a standard CA-signed
   certificate.  This is optional.
-- An inner TLS session which uses a certificate with attestation
-  evidence embedded in an extension.
+- An inner TLS session uses a certificate with attestation evidence embedded in
+  an extension.
 - The attestation is verified during the inner TLS handshake and is bound to
   the details of the certificate.
 
 The idea is that the outer identity proves ownership of the domain and can
 potentially persist across CVM re-starts to avoid relying on the CA at boot.
 
-The inner identity should not be persistent and represents a particular CVM
-instance and particular OS image build.
+The inner identity represents particular CVM lifetime (for example, it can
+persist across service restarts, but must not persist across CVM reboots, let
+alone CVM image updates).
 
 More details in the individual READMEs of the provided crates:
 

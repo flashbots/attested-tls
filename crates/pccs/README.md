@@ -5,6 +5,7 @@ collateral fetching and caching.
 
 This crate is used by attestation verification code that needs Intel TDX/SGX
 collateral such as TCB info, QE identity, and certificate revocation lists.
+
 It can:
 
 - Fetch collateral from Intel PCS or a configured PCCS endpoint
@@ -22,6 +23,6 @@ For Intel's terminology and architecture, see the Intel documentation for the
 
 This crate expects to be used from within a Tokio runtime.
 
-That applies even when calling synchronous-looking APIs such as
-`get_collateral_sync()`: cache miss repair, proactive refresh, and startup
-pre-warm are all driven by Tokio background tasks.
+The above applies even when calling synchronous-looking APIs such as
+`get_collateral_sync()` because cache miss repair, proactive refresh, and
+startup pre-warm are all driven by Tokio background tasks.

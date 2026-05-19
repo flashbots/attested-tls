@@ -2,7 +2,7 @@
 
 Nested TLS primitives.
 
-This crate provides wrappers around `rustls'` `Acceptor` and `Connector` for
+This crate provides wrappers around `rustls`'s `Acceptor` and `Connector` for
 running one TLS session inside another.
 
 At a high level:

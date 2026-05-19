@@ -4,20 +4,24 @@ Attested TLS primitives built on `rustls`.
 
 This crate provides two components:
 
-- `AttestedCertificateResolver`: issues TLS certificates which contain an
-  embedded attestation and handles renewal. It implements
-  [`rustls::server::ResolvesServerCert`](https://docs.rs/rustls/latest/rustls/server/trait.ResolvesServerCert.html)
+- `AttestedCertificateResolver`: issues and renews TLS certificates with
+  attestations embedded in their extensions.
+
+  It implements [`rustls::server::ResolvesServerCert`](https://docs.rs/rustls/latest/rustls/server/trait.ResolvesServerCert.html)
   and [`rustls::client::ResolvesClientCert`](https://docs.rs/rustls/latest/rustls/client/trait.ResolvesClientCert.html).
-- `AttestedCertificateVerifier`: verifies the TLS certificate and the embedded
-  attestation during TLS handshake. It implements [`rustls::client::danger::ServerCertVerifier`](https://docs.rs/rustls/latest/rustls/client/danger/trait.ServerCertVerifier.html)
+
+- `AttestedCertificateVerifier`: verifies the TLS certificates and their
+  embedded attestations during TLS handshake.
+
+  It implements [`rustls::client::danger::ServerCertVerifier`](https://docs.rs/rustls/latest/rustls/client/danger/trait.ServerCertVerifier.html)
   and [`rustls::server::danger::ClientCertVerifier`](https://docs.rs/rustls/latest/rustls/server/danger/trait.ClientCertVerifier.html).
 
-The crate supports both server and client TLS authentication, and can be used as the
-inner attested session inside [`nested-tls`](../nested-tls).
+The crate supports both server and client TLS authentication, and can be used as
+the inner attested session inside [`nested-tls`](../nested-tls).
 
 ## Protocol details
 
-The resolver issues a short-lived X.509 leaf certificate whose attestation is
+The resolver issues a short-lived X.509 leaf certificate which attestation is
 bound to:
 
 - The certificate public key
@@ -36,8 +40,8 @@ The certificate resolver:
 
 - Uses one keypair per resolver instance; by default it generates an
   ECDSA P-256 keypair, but callers can provide a compatible keypair
-- Issues either a self-signed leaf certificate or a leaf signed by a provided
-  private CA
+- Issues either a self-signed certificate or a leaf certificate signed by a
+  provided (private) CA
 - Embeds attestation evidence into the certificate using the
   [`ra-tls`](https://github.com/Dstack-TEE/dstack/tree/master/ra-tls) crate
 - Renews the certificate after two-thirds of its validity period has passed
@@ -67,8 +71,9 @@ Certificates are issued with:
 - Subject alternative names containing the primary hostname plus any extra SANs
 - Usable for both server and client auth
 
-The attestation is embedded using the `ra-tls` certificate extension format.
-When verifying a certificate, this crate first tries to parse the `ra-tls`
+The attestation is embedded using the [`ra-tls`](https://github.com/Dstack-TEE/dstack/tree/master/ra-tls)
+certificate extension format. When verifying a certificate, this crate first
+tries to parse the [`ra-tls`](https://github.com/Dstack-TEE/dstack/tree/master/ra-tls)
 attestation payload directly. If that fails, it falls back to reading the
 custom attestation extension OID and parsing the JSON payload stored there.
 
