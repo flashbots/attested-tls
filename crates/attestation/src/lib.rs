@@ -4,6 +4,7 @@
 pub mod azure;
 pub mod dcap;
 pub mod measurements;
+pub mod nitro;
 
 use std::{
     fmt::{self, Display, Formatter},
@@ -18,7 +19,7 @@ use pccs::{Pccs, PccsError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy};
+use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy, nitro::NitroError};
 
 /// Used in attestation type detection to check if we are on GCP
 const GCP_METADATA_API: &str = "http://metadata.google.internal";
@@ -60,6 +61,7 @@ impl AttestationExchangeMessage {
                     .map_err(DcapVerificationError::from)?;
                 Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
             }
+            AttestationType::AwsNitro => Ok(Some(nitro::get_measurements(&self.attestation)?)),
         }
     }
 }
@@ -79,6 +81,8 @@ pub enum AttestationType {
     QemuTdx,
     /// DCAP TDX
     DcapTdx,
+    /// AWS Nitro Enclaves
+    AwsNitro,
 }
 
 impl AttestationType {
@@ -90,6 +94,7 @@ impl AttestationType {
             AttestationType::QemuTdx => "qemu-tdx",
             AttestationType::GcpTdx => "gcp-tdx",
             AttestationType::DcapTdx => "dcap-tdx",
+            AttestationType::AwsNitro => "aws-nitro",
         }
     }
 
@@ -235,6 +240,7 @@ impl AttestationGenerator {
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
                 dcap::create_dcap_attestation(input_data)
             }
+            AttestationType::AwsNitro => Ok(nitro::create_nitro_attestation(input_data)?),
         }
     }
 
@@ -406,6 +412,10 @@ impl AttestationVerifier {
                 )
                 .await?
             }
+            AttestationType::AwsNitro => nitro::verify_nitro_attestation(
+                attestation_exchange_message.attestation,
+                expected_input_data,
+            )?,
         };
 
         // Do a measurement / attestation type policy check
@@ -467,6 +477,10 @@ impl AttestationVerifier {
                     pccs,
                 )?
             }
+            AttestationType::AwsNitro => nitro::verify_nitro_attestation(
+                attestation_exchange_message.attestation,
+                expected_input_data,
+            )?,
         };
 
         // Do a measurement / attestation type policy check
@@ -586,6 +600,8 @@ pub enum AttestationError {
     QuoteGeneration(#[from] tdx_attest::TdxAttestError),
     #[error("DCAP verification: {0}")]
     DcapVerification(#[from] DcapVerificationError),
+    #[error("Nitro attestation: {0}")]
+    Nitro(#[from] NitroError),
     #[error("Attestation type not supported")]
     AttestationTypeNotSupported,
     #[error("Attestation type not accepted")]
