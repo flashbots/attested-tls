@@ -238,6 +238,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn aws_signed_attestation_fixture_has_expected_measurements() {
+        let attestation = include_bytes!("../test-assets/aws-nitro-attestation-sample.bin");
+        let timestamp_millis = 1_680_010_000_000;
+        let doc = decode_with_root_at_time(
+            attestation,
+            AWS_ROOT_CERT_DER,
+            Time::new(Box::new(move || timestamp_millis)),
+        )
+        .unwrap();
+        let measurements = measurements_from_doc(&doc).unwrap();
+        let mut expected_pcrs = HashMap::from([
+            (
+                3,
+                hex::decode(
+                    "e48b6ac6bab30e3717d28c2c88f2ba8b614e454590eb00b26170eef0d707b5b8e3a97662c20b2ced6192d3aaa2f5e24e",
+                )
+                .unwrap(),
+            ),
+            (
+                4,
+                hex::decode(
+                    "3413af1370600b63aef6362b3d2506bcd6b6c263c8736b913d09e83c8bf24f93eb23eb87b15672586ef78c4289594acd",
+                )
+                .unwrap(),
+            ),
+        ]);
+        for index in 0..16 {
+            expected_pcrs.entry(index).or_insert_with(|| vec![0u8; NITRO_PCR_LENGTH]);
+        }
+        let expected = MultiMeasurements::Nitro(expected_pcrs);
+
+        assert_eq!(measurements, expected);
+    }
+
     #[tokio::test]
     async fn mock_nitro_verifier_supports_async_and_sync_verification() {
         let input_data = [7u8; 64];
