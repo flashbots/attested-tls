@@ -107,6 +107,9 @@ impl AttestationType {
                 return Ok(AttestationType::AzureTdx);
             }
         }
+        if nitro::running_on_nitro() {
+            return Ok(AttestationType::AwsNitro);
+        }
         // Otherwise try DCAP quote - this internally checks that the quote provider
         // is `tdx_guest`
         if tdx_attest::get_quote(&[0; 64]).is_ok() {

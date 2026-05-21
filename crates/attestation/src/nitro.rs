@@ -24,6 +24,12 @@ pub fn create_nitro_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, NitroEr
     request_attestation(&nitro, input_data)
 }
 
+/// Return true if we can successfully talk to the Nitro Secure Module.
+pub(crate) fn running_on_nitro() -> bool {
+    let nitro = Nitro::init();
+    matches!(nitro.process_request(Request::DescribeNSM), Response::DescribeNSM { .. })
+}
+
 fn request_attestation(driver: &impl Driver, input_data: [u8; 64]) -> Result<Vec<u8>, NitroError> {
     match driver.process_request(Request::Attestation {
         nonce: Some(ByteBuf::from(input_data.to_vec())),
@@ -267,8 +273,8 @@ mod tests {
 
     #[test]
     fn another_aws_signed_attestation_fixture_has_expected_measurements() {
-        let attestation = include_bytes!("../test-assets/aws-nitro-1779281545803060420");
-        let timestamp_millis = 1_779_292_000_000;
+        let attestation = include_bytes!("../test-assets/aws-nitro-1779365257362730433");
+        let timestamp_millis = 1_779_365_255_000;
         let doc = decode_with_root_at_time(
             attestation,
             AWS_ROOT_CERT_DER,
@@ -276,10 +282,34 @@ mod tests {
         )
         .unwrap();
         let measurements = measurements_from_doc(&doc).unwrap();
-        // This attestation was captured from a debug-mode enclave, so PCR0/1/2 are
-        // all zeros (debug mode zeroes the EIF measurements). PCR3 and PCR4
-        // are non-zero.
         let mut expected_pcrs = HashMap::from([
+            (
+                0,
+                hex::decode(
+                    "5fd25293fa7f5682ab2290f0850da91ff42e7e37f79498a7f133dac86a66e678e3c399891a119d82ab35b2fca0d647fe",
+                )
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            ),
+            (
+                1,
+                hex::decode(
+                    "0343b056cd8485ca7890ddd833476d78460aed2aa161548e4e26bedf321726696257d623e8805f3f605946b3d8b0c6aa",
+                )
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            ),
+            (
+                2,
+                hex::decode(
+                    "c48f4b4ddb0711cac8c94de79f3e96e387eb52693cc3b1fb664ef90c7f9c5df602a16e7dabe6cad52e8791223ddf602b",
+                )
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            ),
             (
                 3,
                 hex::decode(
