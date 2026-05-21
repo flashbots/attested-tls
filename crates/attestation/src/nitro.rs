@@ -90,11 +90,9 @@ fn decode_with_root_at_time(
 }
 
 fn measurements_from_doc(doc: &AttestationDoc) -> Result<MultiMeasurements, NitroError> {
-    let expected_pcr_len = match doc.digest {
-        Digest::SHA256 => 32,
-        Digest::SHA384 => NITRO_PCR_LENGTH,
-        Digest::SHA512 => 64,
-    };
+    if doc.digest != Digest::SHA384 {
+        return Err(NitroError::UnsupportedDigest(doc.digest));
+    }
 
     let mut measurements = HashMap::new();
     for (index, value) in &doc.pcrs {
@@ -102,14 +100,21 @@ fn measurements_from_doc(doc: &AttestationDoc) -> Result<MultiMeasurements, Nitr
         if index > 31 {
             return Err(NitroError::InvalidPcrIndex(index as usize));
         }
-        if value.as_ref().len() != expected_pcr_len {
+        if value.as_ref().len() != NITRO_PCR_LENGTH {
             return Err(NitroError::BadPcrLength {
                 index,
-                expected: expected_pcr_len,
+                expected: NITRO_PCR_LENGTH,
                 actual: value.as_ref().len(),
             });
         }
-        measurements.insert(index, value.as_ref().to_vec());
+        measurements.insert(
+            index,
+            value.as_ref().try_into().map_err(|_| NitroError::BadPcrLength {
+                index,
+                expected: NITRO_PCR_LENGTH,
+                actual: value.as_ref().len(),
+            })?,
+        );
     }
 
     Ok(MultiMeasurements::Nitro(measurements))
@@ -185,12 +190,12 @@ pub fn mock_nitro_measurements() -> MultiMeasurements {
 
     let pcrs = mock_nitro_pcrs();
     MultiMeasurements::Nitro(HashMap::from([
-        (0, pcrs.get(PcrIndex::Zero).as_ref().to_vec()),
-        (1, pcrs.get(PcrIndex::One).as_ref().to_vec()),
-        (2, pcrs.get(PcrIndex::Two).as_ref().to_vec()),
-        (3, pcrs.get(PcrIndex::Three).as_ref().to_vec()),
-        (4, pcrs.get(PcrIndex::Four).as_ref().to_vec()),
-        (8, pcrs.get(PcrIndex::Eight).as_ref().to_vec()),
+        (0, pcrs.get(PcrIndex::Zero).as_ref().try_into().unwrap()),
+        (1, pcrs.get(PcrIndex::One).as_ref().try_into().unwrap()),
+        (2, pcrs.get(PcrIndex::Two).as_ref().try_into().unwrap()),
+        (3, pcrs.get(PcrIndex::Three).as_ref().try_into().unwrap()),
+        (4, pcrs.get(PcrIndex::Four).as_ref().try_into().unwrap()),
+        (8, pcrs.get(PcrIndex::Eight).as_ref().try_into().unwrap()),
     ]))
 }
 
@@ -205,6 +210,8 @@ pub enum NitroError {
     Verification(String),
     #[error("Nitro attestation nonce is not as expected")]
     InputMismatch,
+    #[error("Unsupported Nitro digest: {0:?}; expected SHA384")]
+    UnsupportedDigest(Digest),
     #[error("Invalid Nitro PCR index: {0}")]
     InvalidPcrIndex(usize),
     #[error("Nitro PCR {index} has length {actual}, expected {expected}")]
@@ -218,25 +225,6 @@ pub enum NitroError {
 mod tests {
     use super::*;
     use crate::{AttestationExchangeMessage, AttestationType, AttestationVerifier};
-
-    #[test]
-    fn aws_signed_attestation_fixture_verifies() {
-        let attestation = include_bytes!("../test-assets/aws-nitro-attestation-sample.bin");
-        let timestamp_millis = 1_680_010_000_000;
-        let doc = decode_with_root_at_time(
-            attestation,
-            AWS_ROOT_CERT_DER,
-            Time::new(Box::new(move || timestamp_millis)),
-        )
-        .unwrap();
-        let measurements = measurements_from_doc(&doc).unwrap();
-
-        if let MultiMeasurements::Nitro(pcrs) = measurements {
-            assert!(pcrs.contains_key(&0));
-        } else {
-            panic!("expected Nitro measurements");
-        }
-    }
 
     #[test]
     fn aws_signed_attestation_fixture_has_expected_measurements() {
@@ -255,6 +243,8 @@ mod tests {
                 hex::decode(
                     "e48b6ac6bab30e3717d28c2c88f2ba8b614e454590eb00b26170eef0d707b5b8e3a97662c20b2ced6192d3aaa2f5e24e",
                 )
+                .unwrap()
+                .try_into()
                 .unwrap(),
             ),
             (
@@ -262,11 +252,55 @@ mod tests {
                 hex::decode(
                     "3413af1370600b63aef6362b3d2506bcd6b6c263c8736b913d09e83c8bf24f93eb23eb87b15672586ef78c4289594acd",
                 )
+                .unwrap()
+                .try_into()
                 .unwrap(),
             ),
         ]);
         for index in 0..16 {
-            expected_pcrs.entry(index).or_insert_with(|| vec![0u8; NITRO_PCR_LENGTH]);
+            expected_pcrs.entry(index).or_insert([0u8; NITRO_PCR_LENGTH]);
+        }
+        let expected = MultiMeasurements::Nitro(expected_pcrs);
+
+        assert_eq!(measurements, expected);
+    }
+
+    #[test]
+    fn another_aws_signed_attestation_fixture_has_expected_measurements() {
+        let attestation = include_bytes!("../test-assets/aws-nitro-1779281545803060420");
+        let timestamp_millis = 1_779_292_000_000;
+        let doc = decode_with_root_at_time(
+            attestation,
+            AWS_ROOT_CERT_DER,
+            Time::new(Box::new(move || timestamp_millis)),
+        )
+        .unwrap();
+        let measurements = measurements_from_doc(&doc).unwrap();
+        // This attestation was captured from a debug-mode enclave, so PCR0/1/2 are
+        // all zeros (debug mode zeroes the EIF measurements). PCR3 and PCR4
+        // are non-zero.
+        let mut expected_pcrs = HashMap::from([
+            (
+                3,
+                hex::decode(
+                    "ea81e40d742a2d5c5f9e099f5abce802914b55d7b2df6eeda212f8b4a96581a15689220b8dfcdda1825e3cfe2b7d6a06",
+                )
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            ),
+            (
+                4,
+                hex::decode(
+                    "50b5a4fd0bdcb66bfb04830da2a8baccf172629c3b30b8486c78ef06b18596fc4375fc0be0761e7033b41bf20ba28b41",
+                )
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            ),
+        ]);
+        for index in 0..16 {
+            expected_pcrs.entry(index).or_insert([0u8; NITRO_PCR_LENGTH]);
         }
         let expected = MultiMeasurements::Nitro(expected_pcrs);
 
@@ -296,5 +330,28 @@ mod tests {
         let err = verify_nitro_attestation(attestation, [2u8; 64]).unwrap_err();
 
         assert!(matches!(err, NitroError::InputMismatch));
+    }
+
+    #[test]
+    fn unsupported_digest_is_rejected() {
+        use std::collections::BTreeMap;
+
+        use nsm_nitro_enclave_utils::api::ByteBuf;
+
+        let doc = AttestationDoc {
+            module_id: "test".to_string(),
+            digest: Digest::SHA256,
+            timestamp: 0,
+            pcrs: BTreeMap::from([(0usize, ByteBuf::from(vec![0u8; 32]))]),
+            certificate: ByteBuf::from(Vec::new()),
+            cabundle: Vec::new(),
+            public_key: None,
+            user_data: None,
+            nonce: None,
+        };
+
+        let err = measurements_from_doc(&doc).unwrap_err();
+
+        assert!(matches!(err, NitroError::UnsupportedDigest(Digest::SHA256)));
     }
 }

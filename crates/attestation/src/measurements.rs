@@ -91,7 +91,7 @@ fn parse_nitro_pcr_index(value: &str) -> Result<u32, MeasurementFormatError> {
 pub enum MultiMeasurements {
     Dcap(HashMap<DcapMeasurementRegister, [u8; 48]>),
     Azure(HashMap<u32, [u8; 32]>),
-    Nitro(HashMap<u32, Vec<u8>>),
+    Nitro(HashMap<u32, [u8; 48]>),
     NoAttestation,
 }
 
@@ -147,7 +147,7 @@ impl fmt::Debug for AzureHexDebug<'_> {
 }
 
 /// Used to display Nitro measurements as hex
-struct NitroHexDebug<'a>(&'a HashMap<u32, Vec<u8>>);
+struct NitroHexDebug<'a>(&'a HashMap<u32, [u8; 48]>);
 
 impl fmt::Debug for NitroHexDebug<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -168,7 +168,7 @@ impl fmt::Debug for NitroHexDebug<'_> {
 pub enum ExpectedMeasurements {
     Dcap(HashMap<DcapMeasurementRegister, Vec<[u8; 48]>>),
     Azure(HashMap<u32, Vec<[u8; 32]>>),
-    Nitro(HashMap<u32, Vec<Vec<u8>>>),
+    Nitro(HashMap<u32, Vec<[u8; 48]>>),
     NoAttestation,
 }
 
@@ -239,6 +239,8 @@ impl MultiMeasurements {
                         if value.len() != crate::nitro::NITRO_PCR_LENGTH {
                             return Err(MeasurementFormatError::BadLength);
                         }
+                        let value: [u8; 48] =
+                            value.try_into().map_err(|_| MeasurementFormatError::BadLength)?;
                         Ok((parse_nitro_pcr_index(&k)?, value))
                     })
                     .collect::<Result<_, MeasurementFormatError>>()?,
@@ -585,13 +587,13 @@ impl MeasurementPolicy {
             entry: &MeasurementEntry,
             register_name: &str,
             expected_len: usize,
-        ) -> Result<Vec<Vec<u8>>, MeasurementFormatError> {
-            let parse_hex_value = |hex_str: &str| {
+        ) -> Result<Vec<[u8; 48]>, MeasurementFormatError> {
+            let parse_hex_value = |hex_str: &str| -> Result<[u8; 48], MeasurementFormatError> {
                 let value = hex::decode(hex_str)?;
                 if value.len() != expected_len {
                     return Err(MeasurementFormatError::BadLength);
                 }
-                Ok(value)
+                value.try_into().map_err(|_| MeasurementFormatError::BadLength)
             };
 
             match (&entry.expected, &entry.expected_any) {
@@ -665,7 +667,7 @@ impl MeasurementPolicy {
                                     )?,
                                 ))
                             })
-                            .collect::<Result<HashMap<u32, Vec<Vec<u8>>>, MeasurementFormatError>>(
+                            .collect::<Result<HashMap<u32, Vec<[u8; 48]>>, MeasurementFormatError>>(
                             )?,
                     ),
                 };
@@ -1244,21 +1246,21 @@ mod tests {
 
         let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
 
-        let measurements1 = MultiMeasurements::Nitro(HashMap::from([(0, vec![0u8; 48])]));
+        let measurements1 = MultiMeasurements::Nitro(HashMap::from([(0, [0u8; 48])]));
         assert!(policy.check_measurement(&measurements1).is_ok());
 
-        let measurements2 = MultiMeasurements::Nitro(HashMap::from([(0, vec![0x11u8; 48])]));
+        let measurements2 = MultiMeasurements::Nitro(HashMap::from([(0, [0x11u8; 48])]));
         assert!(policy.check_measurement(&measurements2).is_ok());
 
-        let measurements3 = MultiMeasurements::Nitro(HashMap::from([(0, vec![0x22u8; 48])]));
+        let measurements3 = MultiMeasurements::Nitro(HashMap::from([(0, [0x22u8; 48])]));
         assert!(policy.check_measurement(&measurements3).is_err());
     }
 
     #[test]
     fn test_nitro_header_round_trip() {
         let measurements = MultiMeasurements::Nitro(HashMap::from([
-            (0, vec![0xabu8; crate::nitro::NITRO_PCR_LENGTH]),
-            (8, vec![0xcdu8; crate::nitro::NITRO_PCR_LENGTH]),
+            (0, [0xabu8; crate::nitro::NITRO_PCR_LENGTH]),
+            (8, [0xcdu8; crate::nitro::NITRO_PCR_LENGTH]),
         ]));
 
         let header = measurements.to_header_format().unwrap();
@@ -1292,11 +1294,11 @@ mod tests {
         assert!(azure_debug.contains(&hex::encode(azure_register_value)));
         assert!(!azure_debug.contains(&format!("{azure_register_value:?}")));
 
-        let nitro_register_value = vec![0xabu8; crate::nitro::NITRO_PCR_LENGTH];
-        let nitro = MultiMeasurements::Nitro(HashMap::from([(8u32, nitro_register_value.clone())]));
+        let nitro_register_value = [0xabu8; crate::nitro::NITRO_PCR_LENGTH];
+        let nitro = MultiMeasurements::Nitro(HashMap::from([(8u32, nitro_register_value)]));
         let nitro_debug = format!("{nitro:?}");
         assert!(nitro_debug.contains("Nitro"));
-        assert!(nitro_debug.contains(&hex::encode(&nitro_register_value)));
+        assert!(nitro_debug.contains(&hex::encode(nitro_register_value)));
         assert!(!nitro_debug.contains(&format!("{nitro_register_value:?}")));
     }
 
