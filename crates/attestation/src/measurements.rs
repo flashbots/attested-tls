@@ -583,38 +583,6 @@ impl MeasurementPolicy {
             }
         }
 
-        fn parse_measurement_entry_vec(
-            entry: &MeasurementEntry,
-            register_name: &str,
-            expected_len: usize,
-        ) -> Result<Vec<[u8; 48]>, MeasurementFormatError> {
-            let parse_hex_value = |hex_str: &str| -> Result<[u8; 48], MeasurementFormatError> {
-                let value = hex::decode(hex_str)?;
-                if value.len() != expected_len {
-                    return Err(MeasurementFormatError::BadLength);
-                }
-                value.try_into().map_err(|_| MeasurementFormatError::BadLength)
-            };
-
-            match (&entry.expected, &entry.expected_any) {
-                (Some(single), None) => Ok(vec![parse_hex_value(single)?]),
-                (None, Some(any_list)) => {
-                    if any_list.is_empty() {
-                        return Err(MeasurementFormatError::EmptyExpectedAny(
-                            register_name.to_string(),
-                        ));
-                    }
-                    any_list.iter().map(|hex_str| parse_hex_value(hex_str)).collect()
-                }
-                (Some(_), Some(_)) => Err(MeasurementFormatError::BothExpectedAndExpectedAny(
-                    register_name.to_string(),
-                )),
-                (None, None) => {
-                    Err(MeasurementFormatError::NoExpectedValue(register_name.to_string()))
-                }
-            }
-        }
-
         let records_simple: Vec<MeasurementRecordSimple> = serde_json::from_slice(&json_bytes)?;
 
         let mut measurement_policy = Vec::new();
@@ -660,10 +628,8 @@ impl MeasurementPolicy {
                                 let index = parse_nitro_pcr_index(index_str)?;
                                 Ok((
                                     index,
-                                    parse_measurement_entry_vec(
-                                        entry,
-                                        index_str,
-                                        crate::nitro::NITRO_PCR_LENGTH,
+                                    parse_measurement_entry::<{ crate::nitro::NITRO_PCR_LENGTH }>(
+                                        entry, index_str,
                                     )?,
                                 ))
                             })
