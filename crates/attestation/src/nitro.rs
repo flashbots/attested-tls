@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use coset::{CborSerializable, CoseSign1};
 use nsm_nitro_enclave_utils::{
     api::{
         ByteBuf,
@@ -57,12 +58,28 @@ pub fn verify_nitro_attestation(
     measurements_from_doc(&doc)
 }
 
-/// Extract Nitro PCR measurements from a verified attestation document.
+/// Extract Nitro PCR measurements without verifying the attestation
+/// document.
 pub fn get_measurements(input: &[u8]) -> Result<MultiMeasurements, NitroError> {
-    let doc = decode_with_accepted_roots(input)?;
+    let doc = decode_without_verification(input)?;
     measurements_from_doc(&doc)
 }
 
+/// Decode an attestation document without verifying timestamp or signature
+fn decode_without_verification(input: &[u8]) -> Result<AttestationDoc, NitroError> {
+    let cose = CoseSign1::from_slice(input)
+        .map_err(|err| NitroError::Decode(format!("COSE decode: {err:?}")))?;
+    let payload = cose
+        .payload
+        .as_ref()
+        .ok_or_else(|| NitroError::Decode("missing COSE payload".to_string()))?;
+
+    AttestationDoc::from_binary(payload)
+        .map_err(|err| NitroError::Decode(format!("attestation document decode: {err:?}")))
+}
+
+/// Decode an attestation document, checking against AWS root of trust, or
+/// mock root of trust if compiled in test or mock mode
 fn decode_with_accepted_roots(input: &[u8]) -> Result<AttestationDoc, NitroError> {
     let production_result = decode_with_root(input, AWS_ROOT_CERT_DER);
     #[allow(clippy::needless_match)]
@@ -82,10 +99,14 @@ fn decode_with_accepted_roots(input: &[u8]) -> Result<AttestationDoc, NitroError
     }
 }
 
+/// Decode an attestation document, and verify against a given root of trust
+/// and the current time
 fn decode_with_root(input: &[u8], root_cert_der: &[u8]) -> Result<AttestationDoc, NitroError> {
     decode_with_root_at_time(input, root_cert_der, Time::default())
 }
 
+/// Decode an attestation document, and verify against a given root of trust
+/// and a given timestamp
 fn decode_with_root_at_time(
     input: &[u8],
     root_cert_der: &[u8],
@@ -95,6 +116,7 @@ fn decode_with_root_at_time(
         .map_err(|err| NitroError::Verification(format!("{err:?}")))
 }
 
+/// Extract PCRs from a Nitro attestation document
 fn measurements_from_doc(doc: &AttestationDoc) -> Result<MultiMeasurements, NitroError> {
     if doc.digest != Digest::SHA384 {
         return Err(NitroError::UnsupportedDigest(doc.digest));
@@ -126,6 +148,7 @@ fn measurements_from_doc(doc: &AttestationDoc) -> Result<MultiMeasurements, Nitr
     Ok(MultiMeasurements::Nitro(measurements))
 }
 
+/// Generate a mock Nitro root of trust certificate chain
 #[cfg(any(test, feature = "mock"))]
 fn mock_nitro_pki() -> &'static nsm_nitro_enclave_utils_keygen::NsmCertChain {
     use std::time::Duration;
@@ -139,6 +162,7 @@ fn mock_nitro_pki() -> &'static nsm_nitro_enclave_utils_keygen::NsmCertChain {
     &MOCK_NITRO_PKI
 }
 
+/// Get mock Nitro root of trust certificate encoded as DER
 #[cfg(any(test, feature = "mock"))]
 fn mock_nitro_root_cert_der() -> Result<Vec<u8>, NitroError> {
     use nsm_nitro_enclave_utils_keygen::DerEncodeExt;
@@ -146,6 +170,7 @@ fn mock_nitro_root_cert_der() -> Result<Vec<u8>, NitroError> {
     mock_nitro_pki().root.to_der().map_err(|err| NitroError::MockPki(format!("{err:?}")))
 }
 
+/// PCR values for mock Nitro attestations
 #[cfg(any(test, feature = "mock"))]
 fn mock_nitro_pcrs() -> nsm_nitro_enclave_utils::pcr::Pcrs {
     use std::collections::BTreeMap;
@@ -214,6 +239,8 @@ pub enum NitroError {
     UnexpectedResponse(String),
     #[error("Nitro attestation verification: {0}")]
     Verification(String),
+    #[error("Nitro attestation decode: {0}")]
+    Decode(String),
     #[error("Nitro attestation nonce is not as expected")]
     InputMismatch,
     #[error("Unsupported Nitro digest: {0:?}; expected SHA384")]
