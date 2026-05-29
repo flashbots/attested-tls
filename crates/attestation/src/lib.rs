@@ -281,9 +281,7 @@ impl AttestationGenerator {
 pub struct AttestationVerifier {
     /// The measurement policy with accepted values and attestation types
     pub measurement_policy: MeasurementPolicy,
-    /// If this is empty, anything will be accepted - but measurements are
-    /// always injected into HTTP headers, so that they can be verified
-    /// upstream A PCCS service to use - defaults to Intel PCS
+    /// A PCCS service to use - defaults to Intel PCS
     pub pccs_url: Option<String>,
     /// Whether to write quotes to files on disk
     pub dump_dcap_quotes: bool,
