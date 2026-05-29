@@ -193,6 +193,11 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
             fmspc,
             "DCAP verification succeeded with non-UpToDate TCB status"
         );
+        return Err(DcapVerificationError::BadTcbStatus(
+            verified_report.status,
+            verified_report.advisory_ids,
+            fmspc,
+        ));
     }
 
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
@@ -290,6 +295,8 @@ pub enum DcapVerificationError {
     Pccs(#[from] PccsError),
     #[error("Timestamp exceeds i64 range")]
     TimeStampExceedsI64,
+    #[error("Bad TCB status: {0}, Advisory IDs: {1:?}, FMSPC: {2}")]
+    BadTcbStatus(String, Vec<String>, String),
 }
 
 #[cfg(test)]
