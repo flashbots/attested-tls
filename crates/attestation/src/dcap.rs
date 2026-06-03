@@ -1,5 +1,6 @@
 //! Data Center Attestation Primitives (DCAP) evidence generation and
 //! verification
+use attest_types::AttestationEvidence;
 use dcap_qvl::{
     QuoteCollateralV3,
     collateral::get_collateral_for_fmspc,
@@ -21,21 +22,24 @@ const AZURE_BAD_FMSPC: &str = "90C06F000000";
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
 /// Generate a TDX quote
-pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
-    let quote = generate_quote(input_data)?;
-    tracing::info!("Generated TDX quote of {} bytes", quote.len());
-    Ok(quote)
+pub fn create_dcap_attestation(
+    input_data: [u8; 64],
+) -> Result<AttestationEvidence, AttestationError> {
+    let attestation_evidence = generate_quote(input_data)?;
+    tracing::info!("Generated TDX quote of {} bytes", attestation_evidence.quote.len());
+    Ok(attestation_evidence)
 }
 
 /// Verify a DCAP TDX quote, and return the measurement values
 #[cfg(not(any(test, feature = "mock")))]
 pub async fn verify_dcap_attestation(
-    input: Vec<u8>,
+    attestation_evidence: AttestationEvidence,
     expected_input_data: [u8; 64],
     pccs: Option<Pccs>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let override_azure_outdated_tcb = false;
+    let input = attestation_evidence.quote;
     verify_dcap_attestation_with_given_timestamp(
         input,
         expected_input_data,
@@ -206,11 +210,11 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
 
 #[cfg(any(test, feature = "mock"))]
 pub async fn verify_dcap_attestation(
-    input: Vec<u8>,
+    attestation_evidence: AttestationEvidence,
     expected_input_data: [u8; 64],
     pccs: Option<Pccs>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
-    let quote = Quote::parse(&input)?;
+    let quote = Quote::parse(&attestation_evidence.quote)?;
     let ca = quote.ca()?;
     let fmspc = hex::encode_upper(quote.fmspc()?);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
@@ -221,7 +225,7 @@ pub async fn verify_dcap_attestation(
         mock_tdx::mock_collateral()
     };
     let verifier = mock_tdx::mock_dcap_verifier();
-    verifier.verify(&input, &collateral, now)?;
+    verifier.verify(&attestation_evidence.quote, &collateral, now)?;
 
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
     if get_quote_input_data(quote.report) != expected_input_data {
@@ -254,7 +258,7 @@ pub fn verify_dcap_attestation_sync(
 
 /// Create a mock quote for testing on non-confidential hardware
 #[cfg(any(test, feature = "mock"))]
-fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, tdx_attest::TdxAttestError> {
+fn generate_quote(input: [u8; 64]) -> Result<AttestationEvidence, tdx_attest::TdxAttestError> {
     generate_mock_tdx_quote(input).map_err(|error| {
         tdx_attest::TdxAttestError::QuoteFailure(format!("mock-tdx quote generation: {error}"))
     })
@@ -262,8 +266,13 @@ fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, tdx_attest::TdxAttestError
 
 /// Create a quote
 #[cfg(not(any(test, feature = "mock")))]
-fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, tdx_attest::TdxAttestError> {
-    tdx_attest::get_quote(&input)
+fn generate_quote(input: [u8; 64]) -> Result<AttestationEvidence, tdx_attest::TdxAttestError> {
+    use attest_measure::platform;
+
+    Ok(AttestationEvidence {
+        quote: tdx_attest::get_quote(&input)?,
+        platform: platform::metadata_for(attest_types::AttestationType::GcpTdx).unwrap(),
+    })
 }
 
 /// Given a [Report] get the input data regardless of report type

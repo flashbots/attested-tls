@@ -543,6 +543,7 @@ impl AttestedCertificateVerifier {
             return Ok(AttestationExchangeMessage {
                 attestation_type: AttestationType::DcapTdx,
                 attestation: tdx_quote.quote,
+                platform_metadata: None,
             });
         }
 
