@@ -411,6 +411,13 @@ impl MeasurementPolicy {
                             Err(_) => return false, // TODO should we bail here
                         };
 
+                        if let Some(expected_mrtd) = expected_measurements.mrtd {
+                            match dcap_measurements.get(&DcapMeasurementRegister::MRTD) {
+                                Some(mrtd) if mrtd == &expected_mrtd => {}
+                                _ => return false,
+                            }
+                        }
+
                         if let Some(expected_rtmr0) = expected_measurements.rtmr0 {
                             match dcap_measurements.get(&DcapMeasurementRegister::RTMR0) {
                                 Some(rtmr0) if rtmr0 == &expected_rtmr0 => {}
@@ -432,7 +439,6 @@ impl MeasurementPolicy {
                             }
                         }
 
-                        // TODO how to handle mrtd and rtmr0 since they are Option
                         return true;
                     }
                     _ => false,
@@ -743,7 +749,7 @@ mod tests {
             expected_dcap_registers(&image_hashes, &platform_metadata, Some(&firmware)).unwrap();
 
         let measurements = MultiMeasurements::Dcap(HashMap::from([
-            (DcapMeasurementRegister::MRTD, mock_tdx::MOCK_MRTD),
+            (DcapMeasurementRegister::MRTD, expected_measurements.mrtd.unwrap()),
             (DcapMeasurementRegister::RTMR0, expected_measurements.rtmr0.unwrap()),
             (DcapMeasurementRegister::RTMR1, expected_measurements.rtmr1),
             (DcapMeasurementRegister::RTMR2, expected_measurements.rtmr2),
