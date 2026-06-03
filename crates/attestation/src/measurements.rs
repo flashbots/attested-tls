@@ -2,7 +2,7 @@
 //! attestation
 use std::{collections::HashMap, fmt, fmt::Formatter, net::IpAddr, path::PathBuf};
 
-use attest_measure::dcap::{build_rtmr2, gcp, self_hosted};
+use attest_measure::dcap::{DcapFirmware, expected_dcap_registers};
 use attest_types::{AttestationType as ImageAttestationType, DcapImageHashes, PlatformMetadata};
 use dcap_qvl::quote::Report;
 use http::{HeaderValue, header::InvalidHeaderValue, uri::InvalidUri};
@@ -397,25 +397,37 @@ impl MeasurementPolicy {
                         let Some(platform_metadata) = &platform_metadata else {
                             return false;
                         };
-                        let expected_rtmr1 = match platform_metadata.attestation_type {
-                            ImageAttestationType::GcpTdx => gcp::build_rtmr1(image_hashes).value(),
-                            ImageAttestationType::SelfHostedTdx => {
-                                self_hosted::build_rtmr1(image_hashes).value()
-                            }
+                        let firmware = match platform_metadata.attestation_type {
+                            ImageAttestationType::GcpTdx => Some(DcapFirmware::gcp_hardcoded()),
+                            ImageAttestationType::SelfHostedTdx => None,
                             ImageAttestationType::AzureTdx => return false,
                         };
-                        let expected_rtmr2 = build_rtmr2(image_hashes).value();
+                        let expected_measurements = match expected_dcap_registers(
+                            image_hashes,
+                            platform_metadata,
+                            firmware.as_ref(),
+                        ) {
+                            Ok(expected_measurements) => expected_measurements,
+                            Err(_) => return false, // TODO should we bail here
+                        };
+
+                        if let Some(expected_rtmr0) = expected_measurements.rtmr0 {
+                            match dcap_measurements.get(&DcapMeasurementRegister::RTMR0) {
+                                Some(rtmr0) if rtmr0 == &expected_rtmr0 => {}
+                                _ => return false,
+                            }
+                        }
 
                         if let Some(rtmr1) = dcap_measurements.get(&DcapMeasurementRegister::RTMR1)
                         {
-                            if rtmr1 != &expected_rtmr1 {
+                            if rtmr1 != &expected_measurements.rtmr1 {
                                 return false;
                             }
                         }
 
                         if let Some(rtmr2) = dcap_measurements.get(&DcapMeasurementRegister::RTMR2)
                         {
-                            if rtmr2 != &expected_rtmr2 {
+                            if rtmr2 != &expected_measurements.rtmr2 {
                                 return false;
                             }
                         }
@@ -612,7 +624,8 @@ impl MeasurementPolicy {
 mod tests {
     use std::collections::HashSet;
 
-    use attest_measure::dcap::{build_rtmr2, gcp::build_rtmr1};
+    use attest_measure::dcap::expected_dcap_registers;
+    use attest_types::AcpiHashes;
 
     use super::*;
 
@@ -721,15 +734,19 @@ mod tests {
         };
         let platform_metadata = PlatformMetadata {
             attestation_type: attest_types::AttestationType::GcpTdx,
-            ram_bytes: 0,
-            num_disks: 2,
-            acpi: None,
+            ram_bytes: 4 * 1024 * 1024 * 1024,
+            num_disks: 1,
+            acpi: Some(AcpiHashes { loader: [0x11; 48], rsdp: [0x22; 48], tables: [0x33; 48] }),
         };
+        let firmware = DcapFirmware::gcp_hardcoded();
+        let expected_measurements =
+            expected_dcap_registers(&image_hashes, &platform_metadata, Some(&firmware)).unwrap();
+
         let measurements = MultiMeasurements::Dcap(HashMap::from([
             (DcapMeasurementRegister::MRTD, mock_tdx::MOCK_MRTD),
-            (DcapMeasurementRegister::RTMR0, mock_tdx::MOCK_RTMR0),
-            (DcapMeasurementRegister::RTMR1, build_rtmr1(&image_hashes).value()),
-            (DcapMeasurementRegister::RTMR2, build_rtmr2(&image_hashes).value()),
+            (DcapMeasurementRegister::RTMR0, expected_measurements.rtmr0.unwrap()),
+            (DcapMeasurementRegister::RTMR1, expected_measurements.rtmr1),
+            (DcapMeasurementRegister::RTMR2, expected_measurements.rtmr2),
             (DcapMeasurementRegister::RTMR3, mock_tdx::MOCK_RTMR3),
         ]));
 
