@@ -432,7 +432,7 @@ impl AttestationVerifier {
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
                 let attesation_evidence = AttestationEvidence {
                     quote: attestation_exchange_message.attestation,
-                    platform: attestation_exchange_message.platform_metadata.unwrap(),
+                    platform: attestation_exchange_message.platform_metadata.clone().unwrap(),
                 };
 
                 dcap::verify_dcap_attestation(
@@ -445,7 +445,8 @@ impl AttestationVerifier {
         };
 
         // Do a measurement / attestation type policy check
-        self.measurement_policy.check_measurement(&measurements)?;
+        self.measurement_policy
+            .check_measurement(&measurements, attestation_exchange_message.platform_metadata)?;
 
         tracing::debug!("Verification successful");
         Ok(Some(measurements))
@@ -506,7 +507,8 @@ impl AttestationVerifier {
         };
 
         // Do a measurement / attestation type policy check
-        self.measurement_policy.check_measurement(&measurements)?;
+        self.measurement_policy
+            .check_measurement(&measurements, attestation_exchange_message.platform_metadata)?;
 
         tracing::debug!("Verification successful");
         Ok(Some(measurements))
@@ -549,8 +551,8 @@ fn running_on_gcp() -> Result<bool, AttestationError> {
     let resp = agent.get(GCP_METADATA_API).call();
 
     if let Ok(r) = resp {
-        return Ok(r.status() == 200 &&
-            r.header("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
+        return Ok(r.status() == 200
+            && r.header("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
     }
 
     Ok(false)

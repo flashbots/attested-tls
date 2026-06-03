@@ -372,7 +372,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(async_measurements, sync_measurements);
-        measurement_policy.check_measurement(&async_measurements).unwrap();
+        measurement_policy.check_measurement(&async_measurements, None).unwrap();
     }
 
     // This specifically tests a quote which has outdated TCB level from Azure

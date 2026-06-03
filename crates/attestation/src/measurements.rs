@@ -2,6 +2,8 @@
 //! attestation
 use std::{collections::HashMap, fmt, fmt::Formatter, net::IpAddr, path::PathBuf};
 
+use attest_measure::dcap::{build_rtmr2, gcp, self_hosted};
+use attest_types::{AttestationType as ImageAttestationType, DcapImageHashes, PlatformMetadata};
 use dcap_qvl::quote::Report;
 use http::{HeaderValue, header::InvalidHeaderValue, uri::InvalidUri};
 use serde::Deserialize;
@@ -135,6 +137,7 @@ impl fmt::Debug for AzureHexDebug<'_> {
 /// Expected measurement values for policy enforcement
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExpectedMeasurements {
+    Image(DcapImageHashes),
     Dcap(HashMap<DcapMeasurementRegister, Vec<[u8; 48]>>),
     Azure(HashMap<u32, Vec<[u8; 32]>>),
     NoAttestation,
@@ -375,20 +378,53 @@ impl MeasurementPolicy {
     pub fn check_measurement(
         &self,
         measurements: &MultiMeasurements,
+        platform_metadata: Option<PlatformMetadata>,
     ) -> Result<(), AttestationError> {
         if self.accepted_measurements.iter().any(|measurement_record| match measurements {
             MultiMeasurements::Dcap(dcap_measurements) => {
-                if let ExpectedMeasurements::Dcap(expected) = &measurement_record.measurements {
-                    // All measurements in our policy must be given and must match
-                    for (k, v) in expected.iter() {
-                        match dcap_measurements.get(k) {
-                            Some(actual_value) if v.iter().any(|v| actual_value == v) => {}
-                            _ => return false,
+                match &measurement_record.measurements {
+                    ExpectedMeasurements::Dcap(expected) => {
+                        // All measurements in our policy must be given and must match
+                        for (k, v) in expected.iter() {
+                            match dcap_measurements.get(k) {
+                                Some(actual_value) if v.iter().any(|v| actual_value == v) => {}
+                                _ => return false,
+                            }
                         }
+                        return true;
                     }
-                    return true;
+                    ExpectedMeasurements::Image(image_hashes) => {
+                        let Some(platform_metadata) = &platform_metadata else {
+                            return false;
+                        };
+                        let expected_rtmr1 = match platform_metadata.attestation_type {
+                            ImageAttestationType::GcpTdx => gcp::build_rtmr1(image_hashes).value(),
+                            ImageAttestationType::SelfHostedTdx => {
+                                self_hosted::build_rtmr1(image_hashes).value()
+                            }
+                            ImageAttestationType::AzureTdx => return false,
+                        };
+                        let expected_rtmr2 = build_rtmr2(image_hashes).value();
+
+                        if let Some(rtmr1) = dcap_measurements.get(&DcapMeasurementRegister::RTMR1)
+                        {
+                            if rtmr1 != &expected_rtmr1 {
+                                return false;
+                            }
+                        }
+
+                        if let Some(rtmr2) = dcap_measurements.get(&DcapMeasurementRegister::RTMR2)
+                        {
+                            if rtmr2 != &expected_rtmr2 {
+                                return false;
+                            }
+                        }
+
+                        // TODO how to handle mrtd and rtmr0 since they are Option
+                        return true;
+                    }
+                    _ => false,
                 }
-                false
             }
             MultiMeasurements::Azure(azure_measurements) => {
                 if let ExpectedMeasurements::Azure(expected) = &measurement_record.measurements {
@@ -527,9 +563,9 @@ impl MeasurementPolicy {
                             )?;
                         ExpectedMeasurements::Azure(azure_measurements)
                     }
-                    AttestationType::DcapTdx |
-                    AttestationType::GcpTdx |
-                    AttestationType::QemuTdx => ExpectedMeasurements::Dcap(
+                    AttestationType::DcapTdx
+                    | AttestationType::GcpTdx
+                    | AttestationType::QemuTdx => ExpectedMeasurements::Dcap(
                         measurements
                             .iter()
                             .map(|(index_str, entry)| {
@@ -567,14 +603,16 @@ impl MeasurementPolicy {
         };
         let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
 
-        Ok(normalized_host.eq_ignore_ascii_case("localhost") ||
-            normalized_host.parse::<IpAddr>().is_ok_and(|address| address.is_loopback()))
+        Ok(normalized_host.eq_ignore_ascii_case("localhost")
+            || normalized_host.parse::<IpAddr>().is_ok_and(|address| address.is_loopback()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+
+    use attest_measure::dcap::{build_rtmr2, gcp::build_rtmr1};
 
     use super::*;
 
@@ -612,20 +650,22 @@ mod tests {
 
         // Will not match mock measurements
         assert!(matches!(
-            specific_measurements.check_measurement(&mock_dcap_measurements()).unwrap_err(),
+            specific_measurements.check_measurement(&mock_dcap_measurements(), None).unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
 
         // Will not match another attestation type
         assert!(matches!(
-            specific_measurements.check_measurement(&MultiMeasurements::NoAttestation).unwrap_err(),
+            specific_measurements
+                .check_measurement(&MultiMeasurements::NoAttestation, None)
+                .unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
 
         // A non-specific measurement fails
         assert!(matches!(
             specific_measurements
-                .check_measurement(&MultiMeasurements::Azure(HashMap::new()))
+                .check_measurement(&MultiMeasurements::Azure(HashMap::new()), None)
                 .unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
@@ -638,15 +678,62 @@ mod tests {
         let allowed_attestation_type =
             MeasurementPolicy::from_file("test-assets/measurements_2.json".into()).await.unwrap();
 
-        allowed_attestation_type.check_measurement(&mock_dcap_measurements()).unwrap();
+        allowed_attestation_type.check_measurement(&mock_dcap_measurements(), None).unwrap();
 
         // Will not match another attestation type
         assert!(matches!(
             allowed_attestation_type
-                .check_measurement(&MultiMeasurements::NoAttestation)
+                .check_measurement(&MultiMeasurements::NoAttestation, None)
                 .unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
+    }
+
+    #[test]
+    fn test_gcp_image_hash_measurement_policy_accepts_matching_measurements() {
+        fn decode_hash(input: &str) -> [u8; 48] {
+            hex::decode(input).unwrap().try_into().unwrap()
+        }
+
+        // Result of measuring a flashbox-l1 image
+        let image_hashes = DcapImageHashes {
+            uki_authenticode: decode_hash(
+                "fcaceb6d87694746ba2d93a87ef4209f2a7629b7f400097b93241e80b9ec3e1e80f9a4cd8028e6a83f297ea5de8d9abc",
+            ),
+            kernel_authenticode: decode_hash(
+                "b6c5133268aa8b440509f3d53ee855a5cd3aeb6441eb109a9f27f14c43bce3e2383856df4af876501ceeb4c9a3b15f0c",
+            ),
+            cmdline_hash: decode_hash(
+                "e03b89abf354a38976537b7a9138fd312e4cbf73b61eebc44086491701b1d167b9f6cb97a922325866c93e0834723d87",
+            ),
+            initrd_hash: decode_hash(
+                "a5b3d4742045e7d08aa19953c35098e784826b01a84f60568fa69f1a848dafd96ec98b8df616d6142779c9b97318166b",
+            ),
+            gpt_disk_guid_hash: decode_hash(
+                "180bac1af9c35cc15e909623c005289539b4da2840d9c9b658fd4968ea4f03e0159402d03da1afc9035e0db30804e282",
+            ),
+        };
+        let policy = MeasurementPolicy {
+            accepted_measurements: vec![MeasurementRecord {
+                measurement_id: "image-hash-policy".to_string(),
+                measurements: ExpectedMeasurements::Image(image_hashes.clone()),
+            }],
+        };
+        let platform_metadata = PlatformMetadata {
+            attestation_type: attest_types::AttestationType::GcpTdx,
+            ram_bytes: 0,
+            num_disks: 2,
+            acpi: None,
+        };
+        let measurements = MultiMeasurements::Dcap(HashMap::from([
+            (DcapMeasurementRegister::MRTD, mock_tdx::MOCK_MRTD),
+            (DcapMeasurementRegister::RTMR0, mock_tdx::MOCK_RTMR0),
+            (DcapMeasurementRegister::RTMR1, build_rtmr1(&image_hashes).value()),
+            (DcapMeasurementRegister::RTMR2, build_rtmr2(&image_hashes).value()),
+            (DcapMeasurementRegister::RTMR3, mock_tdx::MOCK_RTMR3),
+        ]));
+
+        policy.check_measurement(&measurements, Some(platform_metadata)).unwrap();
     }
 
     #[tokio::test]
@@ -662,13 +749,13 @@ mod tests {
         assert!(!policy.accepted_measurements.is_empty());
 
         assert!(matches!(
-            policy.check_measurement(&MultiMeasurements::NoAttestation).unwrap_err(),
+            policy.check_measurement(&MultiMeasurements::NoAttestation, None).unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
 
         // A non-specific measurement fails
         assert!(matches!(
-            policy.check_measurement(&MultiMeasurements::Azure(HashMap::new())).unwrap_err(),
+            policy.check_measurement(&MultiMeasurements::Azure(HashMap::new()), None).unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
     }
@@ -724,17 +811,17 @@ mod tests {
         // First value should match
         let measurements1 =
             MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, [0u8; 48])]));
-        assert!(policy.check_measurement(&measurements1).is_ok());
+        assert!(policy.check_measurement(&measurements1, None).is_ok());
 
         // Second value should also match
         let measurements2 =
             MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, [0x11u8; 48])]));
-        assert!(policy.check_measurement(&measurements2).is_ok());
+        assert!(policy.check_measurement(&measurements2, None).is_ok());
 
         // Different value should not match
         let measurements3 =
             MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, [0x22u8; 48])]));
-        assert!(policy.check_measurement(&measurements3).is_err());
+        assert!(policy.check_measurement(&measurements3, None).is_err());
     }
 
     #[tokio::test]
@@ -814,21 +901,21 @@ mod tests {
             (DcapMeasurementRegister::MRTD, [0u8; 48]),
             (DcapMeasurementRegister::RTMR0, [0x11u8; 48]),
         ]));
-        assert!(policy.check_measurement(&measurements1).is_ok());
+        assert!(policy.check_measurement(&measurements1, None).is_ok());
 
         // Both match (single + second of any)
         let measurements2 = MultiMeasurements::Dcap(HashMap::from([
             (DcapMeasurementRegister::MRTD, [0u8; 48]),
             (DcapMeasurementRegister::RTMR0, [0x22u8; 48]),
         ]));
-        assert!(policy.check_measurement(&measurements2).is_ok());
+        assert!(policy.check_measurement(&measurements2, None).is_ok());
 
         // Single matches but any doesn't
         let measurements3 = MultiMeasurements::Dcap(HashMap::from([
             (DcapMeasurementRegister::MRTD, [0u8; 48]),
             (DcapMeasurementRegister::RTMR0, [0x33u8; 48]),
         ]));
-        assert!(policy.check_measurement(&measurements3).is_err());
+        assert!(policy.check_measurement(&measurements3, None).is_err());
     }
 
     #[tokio::test]
