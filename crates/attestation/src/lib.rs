@@ -12,6 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use attest_measure::platform::PlatformError;
 use attest_types::{AttestationEvidence, PlatformMetadata};
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
@@ -425,13 +426,8 @@ impl AttestationVerifier {
                 }
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                let attesation_evidence = AttestationEvidence {
-                    quote: attestation_exchange_message.attestation,
-                    platform: attestation_exchange_message.platform_metadata.clone().unwrap(),
-                };
-
                 dcap::verify_dcap_attestation(
-                    attesation_evidence,
+                    attestation_exchange_message.attestation,
                     expected_input_data,
                     self.internal_pccs.clone(),
                 )
@@ -642,6 +638,11 @@ pub enum AttestationError {
     Pccs(#[from] PccsError),
     #[error("Sync verification requested but no PCCS configured")]
     NoPccs,
+    #[cfg(any(test, feature = "mock"))]
+    #[error("Cannot create mock attestation: {0}")]
+    Mock(String),
+    #[error("Cannot retrieve platform metadata: {0}")]
+    PlatformMetadata(#[from] PlatformError),
 }
 
 #[cfg(test)]
