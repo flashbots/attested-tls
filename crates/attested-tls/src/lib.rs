@@ -540,6 +540,8 @@ impl AttestedCertificateVerifier {
                 return Ok(message);
             }
 
+            // TODO maybe we have to drop support for the VersionedAttestation::V0
+            // format as it cannot encode platform metadata
             return Ok(AttestationExchangeMessage {
                 attestation_type: AttestationType::DcapTdx,
                 attestation: tdx_quote.quote,

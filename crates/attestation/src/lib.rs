@@ -250,11 +250,11 @@ impl AttestationGenerator {
                     }
                 }
                 AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                    let attestaton_evidence = dcap::create_dcap_attestation(input_data)?;
+                    let attestation_evidence = dcap::create_dcap_attestation(input_data)?;
                     Ok(AttestationExchangeMessage {
                         attestation_type: self.attestation_type,
-                        attestation: attestaton_evidence.quote,
-                        platform_metadata: Some(attestaton_evidence.platform),
+                        attestation: attestation_evidence.quote,
+                        platform_metadata: Some(attestation_evidence.platform),
                     })
                 }
             }
