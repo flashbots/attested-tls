@@ -391,7 +391,7 @@ impl MeasurementPolicy {
                                 _ => return false,
                             }
                         }
-                        return true;
+                        true
                     }
                     ExpectedMeasurements::Image(image_hashes) => {
                         let Some(platform_metadata) = &platform_metadata else {
@@ -402,13 +402,13 @@ impl MeasurementPolicy {
                             ImageAttestationType::SelfHostedTdx => None,
                             ImageAttestationType::AzureTdx => return false,
                         };
-                        let expected_measurements = match expected_dcap_registers(
+
+                        let Ok(expected_measurements) = expected_dcap_registers(
                             image_hashes,
                             platform_metadata,
                             firmware.as_ref(),
-                        ) {
-                            Ok(expected_measurements) => expected_measurements,
-                            Err(_) => return false, // TODO should we bail here
+                        ) else {
+                            return false; // TODO should we bail here
                         };
 
                         if let Some(expected_mrtd) = expected_measurements.mrtd {
@@ -426,20 +426,18 @@ impl MeasurementPolicy {
                         }
 
                         if let Some(rtmr1) = dcap_measurements.get(&DcapMeasurementRegister::RTMR1)
+                            && rtmr1 != &expected_measurements.rtmr1
                         {
-                            if rtmr1 != &expected_measurements.rtmr1 {
-                                return false;
-                            }
+                            return false;
                         }
 
                         if let Some(rtmr2) = dcap_measurements.get(&DcapMeasurementRegister::RTMR2)
+                            && rtmr2 != &expected_measurements.rtmr2
                         {
-                            if rtmr2 != &expected_measurements.rtmr2 {
-                                return false;
-                            }
+                            return false;
                         }
 
-                        return true;
+                        true
                     }
                     _ => false,
                 }
@@ -581,9 +579,9 @@ impl MeasurementPolicy {
                             )?;
                         ExpectedMeasurements::Azure(azure_measurements)
                     }
-                    AttestationType::DcapTdx
-                    | AttestationType::GcpTdx
-                    | AttestationType::QemuTdx => ExpectedMeasurements::Dcap(
+                    AttestationType::DcapTdx |
+                    AttestationType::GcpTdx |
+                    AttestationType::QemuTdx => ExpectedMeasurements::Dcap(
                         measurements
                             .iter()
                             .map(|(index_str, entry)| {
@@ -621,8 +619,8 @@ impl MeasurementPolicy {
         };
         let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
 
-        Ok(normalized_host.eq_ignore_ascii_case("localhost")
-            || normalized_host.parse::<IpAddr>().is_ok_and(|address| address.is_loopback()))
+        Ok(normalized_host.eq_ignore_ascii_case("localhost") ||
+            normalized_host.parse::<IpAddr>().is_ok_and(|address| address.is_loopback()))
     }
 }
 

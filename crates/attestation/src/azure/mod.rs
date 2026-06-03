@@ -17,7 +17,8 @@ use x509_parser::prelude::*;
 
 use crate::{
     dcap::{
-        verify_dcap_attestation_with_given_timestamp, verify_dcap_attestation_with_timestamp_sync,
+        verify_dcap_attestation_with_given_timestamp,
+        verify_dcap_attestation_with_timestamp_sync,
     },
     measurements::MultiMeasurements,
 };
