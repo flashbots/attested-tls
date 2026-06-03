@@ -198,6 +198,16 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
     Ok(measurements)
 }
 
+/// This returns an error if the TCB status associated with the attestation
+/// is not marked 'UpToDate'.
+///
+/// dcap-qvl's verification already rejects 'revoked' TCB status, so this
+/// serves to reject the following remaining non-up-to-date variants:
+/// - SWHardeningNeeded
+/// - ConfigurationNeeded
+/// - ConfigurationAndSWHardeningNeeded
+/// - OutOfDate
+/// - OutOfDateConfigurationNeeded
 fn ensure_up_to_date_tcb(
     verified_report: VerifiedReport,
     fmspc: String,
