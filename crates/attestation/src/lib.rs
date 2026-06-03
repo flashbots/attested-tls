@@ -225,42 +225,37 @@ impl AttestationGenerator {
         if let Some(url) = &self.attestation_provider_url {
             Self::use_attestation_provider(url, self.attestation_type, input_data)
         } else {
-            self.generate_attestation_bytes(input_data)
-        }
-    }
-
-    /// Generate attestation evidence bytes based on attestation type, with
-    /// given input data
-    fn generate_attestation_bytes(
-        &self,
-        input_data: [u8; 64],
-    ) -> Result<AttestationExchangeMessage, AttestationError> {
-        match self.attestation_type {
-            AttestationType::None => Ok(AttestationExchangeMessage {
-                attestation_type: AttestationType::None,
-                attestation: Vec::new(),
-                platform_metadata: None,
-            }),
-            AttestationType::AzureTdx => {
-                #[cfg(feature = "azure")]
-                {
-                    Ok(azure::create_azure_attestation(input_data)?)
+            match self.attestation_type {
+                AttestationType::None => Ok(AttestationExchangeMessage {
+                    attestation_type: AttestationType::None,
+                    attestation: Vec::new(),
+                    platform_metadata: None,
+                }),
+                AttestationType::AzureTdx => {
+                    #[cfg(feature = "azure")]
+                    {
+                        Ok(AttestationExchangeMessage {
+                            attestation_type: AttestationType::AzureTdx,
+                            attestation: azure::create_azure_attestation(input_data)?,
+                            platform_metadata: None,
+                        })
+                    }
+                    #[cfg(not(feature = "azure"))]
+                    {
+                        tracing::error!(
+                            "Attempted to generate an azure attestation but the `azure` feature not enabled"
+                        );
+                        Err(AttestationError::AttestationTypeNotSupported)
+                    }
                 }
-                #[cfg(not(feature = "azure"))]
-                {
-                    tracing::error!(
-                        "Attempted to generate an azure attestation but the `azure` feature not enabled"
-                    );
-                    Err(AttestationError::AttestationTypeNotSupported)
+                AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
+                    let attestaton_evidence = dcap::create_dcap_attestation(input_data)?;
+                    Ok(AttestationExchangeMessage {
+                        attestation_type: self.attestation_type,
+                        attestation: attestaton_evidence.quote,
+                        platform_metadata: Some(attestaton_evidence.platform),
+                    })
                 }
-            }
-            AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                let attestaton_evidence = dcap::create_dcap_attestation(input_data)?;
-                Ok(AttestationExchangeMessage {
-                    attestation_type: self.attestation_type,
-                    attestation: attestaton_evidence.quote,
-                    platform_metadata: Some(attestaton_evidence.platform),
-                })
             }
         }
     }

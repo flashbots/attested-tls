@@ -17,8 +17,7 @@ use x509_parser::prelude::*;
 
 use crate::{
     dcap::{
-        verify_dcap_attestation_with_given_timestamp,
-        verify_dcap_attestation_with_timestamp_sync,
+        verify_dcap_attestation_with_given_timestamp, verify_dcap_attestation_with_timestamp_sync,
     },
     measurements::MultiMeasurements,
 };
@@ -599,7 +598,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(async_measurements, sync_measurements);
-        measurement_policy.check_measurement(&async_measurements).unwrap();
+        measurement_policy.check_measurement(&async_measurements, None).unwrap();
     }
 
     #[tokio::test]
