@@ -91,26 +91,32 @@ impl From<attest_types::AttestationType> for AttestationType {
     }
 }
 
-impl From<AttestationType> for attest_types::AttestationType {
-    fn from(attestation_type: AttestationType) -> Self {
+impl TryFrom<AttestationType> for attest_types::AttestationType {
+    type Error = AttestationError;
+
+    fn try_from(attestation_type: AttestationType) -> Result<Self, Self::Error> {
         match attestation_type {
-            AttestationType::None => attest_types::AttestationType::SelfHostedTdx,
-            AttestationType::AzureTdx => attest_types::AttestationType::AzureTdx,
-            AttestationType::GcpTdx => attest_types::AttestationType::GcpTdx,
+            AttestationType::None => Err(AttestationError::AttestationTypeNotAccepted),
+            AttestationType::AzureTdx => Ok(attest_types::AttestationType::AzureTdx),
+            AttestationType::GcpTdx => Ok(attest_types::AttestationType::GcpTdx),
             AttestationType::DcapTdx | AttestationType::QemuTdx => {
-                attest_types::AttestationType::SelfHostedTdx
+                Ok(attest_types::AttestationType::SelfHostedTdx)
             }
         }
     }
 }
 
-fn placeholder_platform_metadata(attestation_type: AttestationType) -> PlatformMetadata {
-    PlatformMetadata {
-        attestation_type: attestation_type.into(),
+/// WIP - create placeholder platform metadata when we don't have it.
+/// Used for attestation provider server - which should be fixed.
+fn placeholder_platform_metadata(
+    attestation_type: AttestationType,
+) -> Result<PlatformMetadata, AttestationError> {
+    Ok(PlatformMetadata {
+        attestation_type: attestation_type.try_into()?,
         ram_bytes: 0,
         num_disks: 0,
         acpi: None,
-    }
+    })
 }
 
 /// Type of attestation used
@@ -258,8 +264,9 @@ impl AttestationGenerator {
                 AttestationType::AzureTdx => {
                     #[cfg(feature = "azure")]
                     {
-                        let platform =
-                            attest_measure::platform::metadata_for(self.attestation_type.into())?;
+                        let platform = attest_measure::platform::metadata_for(
+                            self.attestation_type.try_into()?,
+                        )?;
                         Ok(AttestationExchangeMessage {
                             attestation_evidence: Some(AttestationEvidence {
                                 quote: azure::create_azure_attestation(input_data)?,
@@ -277,7 +284,8 @@ impl AttestationGenerator {
                 }
                 AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
                     let mut attestation_evidence = dcap::create_dcap_attestation(input_data)?;
-                    attestation_evidence.platform.attestation_type = self.attestation_type.into();
+                    attestation_evidence.platform.attestation_type =
+                        self.attestation_type.try_into()?;
                     Ok(attestation_evidence.into())
                 }
             }
@@ -312,7 +320,7 @@ impl AttestationGenerator {
                 return Ok(AttestationExchangeMessage::without_attestation());
             }
 
-            let platform = placeholder_platform_metadata(attestation_type);
+            let platform = placeholder_platform_metadata(attestation_type)?;
             Ok(AttestationExchangeMessage {
                 attestation_evidence: Some(AttestationEvidence { quote: body, platform }),
             })
@@ -745,7 +753,7 @@ mod tests {
         let encoded_message = AttestationExchangeMessage {
             attestation_evidence: Some(AttestationEvidence {
                 quote: vec![1, 2, 3],
-                platform: placeholder_platform_metadata(AttestationType::GcpTdx),
+                platform: placeholder_platform_metadata(AttestationType::GcpTdx).unwrap(),
             }),
         }
         .encode();

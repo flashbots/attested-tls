@@ -548,7 +548,7 @@ impl AttestedCertificateVerifier {
                 attestation_evidence: Some(AttestationEvidence {
                     quote: tdx_quote.quote,
                     platform: PlatformMetadata {
-                        attestation_type: AttestationType::DcapTdx.into(),
+                        attestation_type: AttestationType::DcapTdx.try_into().expect("AttestationType::DcapTdx should convert to attest-types::AttestationType::SelfHosted"),
                         ram_bytes: 0,
                         num_disks: 0,
                         acpi: None,
