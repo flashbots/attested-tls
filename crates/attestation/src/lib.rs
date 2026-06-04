@@ -13,7 +13,7 @@ use std::{
 };
 
 use attest_measure::platform::PlatformError;
-use attest_types::{AttestationEvidence, PlatformMetadata};
+pub use attest_types::{AttestationEvidence, PlatformMetadata};
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
 use pccs::{Pccs, PccsError};
@@ -28,34 +28,31 @@ const GCP_METADATA_API: &str = "http://metadata.google.internal";
 /// An attestation payload together with its type
 #[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
 pub struct AttestationExchangeMessage {
-    /// What CVM platform is used (including none)
-    pub attestation_type: AttestationType,
-    /// The attestation evidence as bytes - in the case of DCAP this is a
-    /// quote
-    pub attestation: Vec<u8>,
-    pub platform_metadata: Option<PlatformMetadata>,
+    /// Attestation payload with platform metadata, if present.
+    /// `None` means no evidence presented.
+    pub attestation_evidence: Option<AttestationEvidence>,
 }
 
 impl AttestationExchangeMessage {
     /// Create an empty attestation payload for the case that we are running
     /// in a non-confidential environment
     pub fn without_attestation() -> Self {
-        Self {
-            attestation_type: AttestationType::None,
-            attestation: Vec::new(),
-            platform_metadata: None,
-        }
+        Self { attestation_evidence: None }
     }
 
     /// Extract the measurements from the attestation, if present, but do
     /// not verify
     pub fn get_measurements(&self) -> Result<Option<MultiMeasurements>, AttestationError> {
-        match self.attestation_type {
+        let Some(attestation_evidence) = &self.attestation_evidence else {
+            return Ok(None);
+        };
+
+        match self.attestation_type() {
             AttestationType::None => Ok(None),
             AttestationType::AzureTdx => {
                 #[cfg(feature = "azure")]
                 {
-                    Ok(Some(azure::get_measurements(&self.attestation)?))
+                    Ok(Some(azure::get_measurements(&attestation_evidence.quote)?))
                 }
                 #[cfg(not(feature = "azure"))]
                 {
@@ -63,26 +60,56 @@ impl AttestationExchangeMessage {
                 }
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                let quote = dcap_qvl::verify::Quote::parse(&self.attestation)
+                let quote = dcap_qvl::verify::Quote::parse(&attestation_evidence.quote)
                     .map_err(DcapVerificationError::from)?;
                 Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
             }
         }
     }
+
+    pub fn attestation_type(&self) -> AttestationType {
+        self.attestation_evidence
+            .as_ref()
+            .map(|evidence| evidence.platform.attestation_type.into())
+            .unwrap_or(AttestationType::None)
+    }
 }
 
 impl From<AttestationEvidence> for AttestationExchangeMessage {
     fn from(attestation_evidence: AttestationEvidence) -> Self {
-        let attestation_type = match attestation_evidence.platform.attestation_type {
+        Self { attestation_evidence: Some(attestation_evidence) }
+    }
+}
+
+impl From<attest_types::AttestationType> for AttestationType {
+    fn from(attestation_type: attest_types::AttestationType) -> Self {
+        match attestation_type {
             attest_types::AttestationType::GcpTdx => AttestationType::GcpTdx,
             attest_types::AttestationType::AzureTdx => AttestationType::AzureTdx,
             attest_types::AttestationType::SelfHostedTdx => AttestationType::QemuTdx,
-        };
-        Self {
-            attestation_type,
-            attestation: attestation_evidence.quote,
-            platform_metadata: Some(attestation_evidence.platform),
         }
+    }
+}
+
+impl From<AttestationType> for attest_types::AttestationType {
+    fn from(attestation_type: AttestationType) -> Self {
+        match attestation_type {
+            AttestationType::None => attest_types::AttestationType::SelfHostedTdx,
+            AttestationType::AzureTdx => attest_types::AttestationType::AzureTdx,
+            AttestationType::GcpTdx => attest_types::AttestationType::GcpTdx,
+            AttestationType::DcapTdx | AttestationType::QemuTdx => {
+                attest_types::AttestationType::SelfHostedTdx
+            }
+        }
+    }
+}
+
+fn placeholder_platform_metadata(attestation_type: AttestationType) -> PlatformMetadata {
+    PlatformMetadata {
+        attestation_type: attestation_type.into(),
+        ram_bytes: 0,
+        num_disks: 0,
+        acpi: None,
     }
 }
 
@@ -199,7 +226,7 @@ impl AttestationGenerator {
         attestation_provider_url: Option<String>,
     ) -> Result<Self, AttestationError> {
         if attestation_provider_url.is_some() {
-            // If a remote provide is used, dont do detection
+            // If a remote provider is used, dont do detection
             let attestation_type = serde_json::from_value(serde_json::Value::String(
                 attestation_type_string.ok_or(AttestationError::AttestationTypeNotGiven)?,
             ))?;
@@ -227,18 +254,17 @@ impl AttestationGenerator {
             Self::use_attestation_provider(url, self.attestation_type, input_data)
         } else {
             match self.attestation_type {
-                AttestationType::None => Ok(AttestationExchangeMessage {
-                    attestation_type: AttestationType::None,
-                    attestation: Vec::new(),
-                    platform_metadata: None,
-                }),
+                AttestationType::None => Ok(AttestationExchangeMessage::without_attestation()),
                 AttestationType::AzureTdx => {
                     #[cfg(feature = "azure")]
                     {
+                        let platform =
+                            attest_measure::platform::metadata_for(self.attestation_type.into())?;
                         Ok(AttestationExchangeMessage {
-                            attestation_type: AttestationType::AzureTdx,
-                            attestation: azure::create_azure_attestation(input_data)?,
-                            platform_metadata: None,
+                            attestation_evidence: Some(AttestationEvidence {
+                                quote: azure::create_azure_attestation(input_data)?,
+                                platform,
+                            }),
                         })
                     }
                     #[cfg(not(feature = "azure"))]
@@ -250,12 +276,9 @@ impl AttestationGenerator {
                     }
                 }
                 AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                    let attestation_evidence = dcap::create_dcap_attestation(input_data)?;
-                    Ok(AttestationExchangeMessage {
-                        attestation_type: self.attestation_type,
-                        attestation: attestation_evidence.quote,
-                        platform_metadata: Some(attestation_evidence.platform),
-                    })
+                    let mut attestation_evidence = dcap::create_dcap_attestation(input_data)?;
+                    attestation_evidence.platform.attestation_type = self.attestation_type.into();
+                    Ok(attestation_evidence.into())
                 }
             }
         }
@@ -285,10 +308,13 @@ impl AttestationGenerator {
         if let Ok(message) = AttestationExchangeMessage::decode(&mut &body[..]) {
             Ok(message)
         } else {
+            if attestation_type == AttestationType::None {
+                return Ok(AttestationExchangeMessage::without_attestation());
+            }
+
+            let platform = placeholder_platform_metadata(attestation_type);
             Ok(AttestationExchangeMessage {
-                attestation_type,
-                attestation: body,
-                platform_metadata: None,
+                attestation_evidence: Some(AttestationEvidence { quote: body, platform }),
             })
         }
     }
@@ -391,7 +417,7 @@ impl AttestationVerifier {
         attestation_exchange_message: AttestationExchangeMessage,
         expected_input_data: [u8; 64],
     ) -> Result<Option<MultiMeasurements>, AttestationError> {
-        let attestation_type = attestation_exchange_message.attestation_type;
+        let attestation_type = attestation_exchange_message.attestation_type();
         tracing::debug!("Verifying {attestation_type} attestation");
 
         if self.dump_dcap_quotes {
@@ -403,7 +429,7 @@ impl AttestationVerifier {
                 if self.has_remote_attestation() {
                     return Err(AttestationError::AttestationTypeNotAccepted);
                 }
-                if attestation_exchange_message.attestation.is_empty() {
+                if attestation_exchange_message.attestation_evidence.is_none() {
                     return Ok(None);
                 } else {
                     return Err(AttestationError::AttestationGivenWhenNoneExpected);
@@ -412,8 +438,12 @@ impl AttestationVerifier {
             AttestationType::AzureTdx => {
                 #[cfg(feature = "azure")]
                 {
+                    let attestation_evidence = attestation_exchange_message
+                        .attestation_evidence
+                        .as_ref()
+                        .ok_or(AttestationError::AttestationTypeNotAccepted)?;
                     azure::verify_azure_attestation(
-                        attestation_exchange_message.attestation,
+                        attestation_evidence.quote.clone(),
                         expected_input_data,
                         self.internal_pccs.clone(),
                         self.override_azure_outdated_tcb,
@@ -426,8 +456,12 @@ impl AttestationVerifier {
                 }
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
+                let attestation_evidence = attestation_exchange_message
+                    .attestation_evidence
+                    .as_ref()
+                    .ok_or(AttestationError::AttestationTypeNotAccepted)?;
                 dcap::verify_dcap_attestation(
-                    attestation_exchange_message.attestation,
+                    attestation_evidence.quote.clone(),
                     expected_input_data,
                     self.internal_pccs.clone(),
                 )
@@ -436,8 +470,11 @@ impl AttestationVerifier {
         };
 
         // Do a measurement / attestation type policy check
-        self.measurement_policy
-            .check_measurement(&measurements, attestation_exchange_message.platform_metadata)?;
+        let platform_metadata = attestation_exchange_message
+            .attestation_evidence
+            .as_ref()
+            .map(|evidence| evidence.platform.clone());
+        self.measurement_policy.check_measurement(&measurements, platform_metadata)?;
 
         tracing::debug!("Verification successful");
         Ok(Some(measurements))
@@ -448,7 +485,7 @@ impl AttestationVerifier {
         attestation_exchange_message: AttestationExchangeMessage,
         expected_input_data: [u8; 64],
     ) -> Result<Option<MultiMeasurements>, AttestationError> {
-        let attestation_type = attestation_exchange_message.attestation_type;
+        let attestation_type = attestation_exchange_message.attestation_type();
         tracing::debug!("Verifying {attestation_type} attestation");
 
         if self.dump_dcap_quotes {
@@ -460,7 +497,7 @@ impl AttestationVerifier {
                 if self.has_remote_attestation() {
                     return Err(AttestationError::AttestationTypeNotAccepted);
                 }
-                if attestation_exchange_message.attestation.is_empty() {
+                if attestation_exchange_message.attestation_evidence.is_none() {
                     return Ok(None);
                 } else {
                     return Err(AttestationError::AttestationGivenWhenNoneExpected);
@@ -469,9 +506,13 @@ impl AttestationVerifier {
             AttestationType::AzureTdx => {
                 #[cfg(feature = "azure")]
                 {
+                    let attestation_evidence = attestation_exchange_message
+                        .attestation_evidence
+                        .as_ref()
+                        .ok_or(AttestationError::AttestationTypeNotAccepted)?;
                     let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
                     azure::verify_azure_attestation_sync(
-                        attestation_exchange_message.attestation,
+                        attestation_evidence.quote.clone(),
                         expected_input_data,
                         pccs,
                         self.override_azure_outdated_tcb,
@@ -483,6 +524,10 @@ impl AttestationVerifier {
                 }
             }
             AttestationType::DcapTdx | AttestationType::QemuTdx | AttestationType::GcpTdx => {
+                let attestation_evidence = attestation_exchange_message
+                    .attestation_evidence
+                    .as_ref()
+                    .ok_or(AttestationError::AttestationTypeNotAccepted)?;
                 #[cfg(any(test, feature = "mock"))]
                 let pccs =
                     self.internal_pccs.clone().unwrap_or_else(|| Pccs::new_without_prewarm(None));
@@ -490,7 +535,7 @@ impl AttestationVerifier {
                 let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
 
                 dcap::verify_dcap_attestation_sync(
-                    attestation_exchange_message.attestation,
+                    attestation_evidence.quote.clone(),
                     expected_input_data,
                     pccs,
                 )?
@@ -498,8 +543,11 @@ impl AttestationVerifier {
         };
 
         // Do a measurement / attestation type policy check
-        self.measurement_policy
-            .check_measurement(&measurements, attestation_exchange_message.platform_metadata)?;
+        let platform_metadata = attestation_exchange_message
+            .attestation_evidence
+            .as_ref()
+            .map(|evidence| evidence.platform.clone());
+        self.measurement_policy.check_measurement(&measurements, platform_metadata)?;
 
         tracing::debug!("Verification successful");
         Ok(Some(measurements))
@@ -513,12 +561,13 @@ impl AttestationVerifier {
 
 /// Write attestation data to a log file
 fn log_attestation(attestation: &AttestationExchangeMessage) {
-    if attestation.attestation_type != AttestationType::None {
+    if let Some(attestation_evidence) = &attestation.attestation_evidence {
         let timestamp =
             SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_nanos();
 
-        let filename = format!("quotes/{}-{}", attestation.attestation_type, timestamp);
-        let attestation_bytes = attestation.attestation.clone();
+        let attestation_type = attestation.attestation_type();
+        let filename = format!("quotes/{attestation_type}-{timestamp}");
+        let attestation_bytes = attestation_evidence.quote.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 if let Err(err) = tokio::fs::write(&filename, attestation_bytes).await {
@@ -542,8 +591,8 @@ fn running_on_gcp() -> Result<bool, AttestationError> {
     let resp = agent.get(GCP_METADATA_API).call();
 
     if let Ok(r) = resp {
-        return Ok(r.status() == 200 &&
-            r.header("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
+        return Ok(r.status() == 200
+            && r.header("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
     }
 
     Ok(false)
@@ -694,9 +743,10 @@ mod tests {
         let input_data = [0u8; 64];
 
         let encoded_message = AttestationExchangeMessage {
-            attestation_type: AttestationType::None,
-            attestation: vec![1, 2, 3],
-            platform_metadata: None,
+            attestation_evidence: Some(AttestationEvidence {
+                quote: vec![1, 2, 3],
+                platform: placeholder_platform_metadata(AttestationType::GcpTdx),
+            }),
         }
         .encode();
 
@@ -708,8 +758,8 @@ mod tests {
             input_data,
         )
         .unwrap();
-        assert_eq!(decoded.attestation_type, AttestationType::None);
-        assert_eq!(decoded.attestation, vec![1, 2, 3]);
+        assert_eq!(decoded.attestation_type(), AttestationType::GcpTdx);
+        assert_eq!(decoded.attestation_evidence.unwrap().quote, vec![1, 2, 3]);
 
         let raw_addr = spawn_test_attestation_provider_server(vec![9, 8]).await;
         let raw_url = format!("http://{raw_addr}");
@@ -719,8 +769,8 @@ mod tests {
             input_data,
         )
         .unwrap();
-        assert_eq!(wrapped.attestation_type, AttestationType::DcapTdx);
-        assert_eq!(wrapped.attestation, vec![9, 8]);
+        assert_eq!(wrapped.attestation_type(), AttestationType::QemuTdx);
+        assert_eq!(wrapped.attestation_evidence.unwrap().quote, vec![9, 8]);
     }
 
     #[tokio::test]
