@@ -297,7 +297,7 @@ fn finish_azure_attestation_verification(
     let (_type_label, ak_certificate_der) =
         pem_rfc7468::decode_vec(tpm_attestation.ak_certificate_pem.as_bytes())?;
 
-    let (remaining_bytes, ak_certificate) = X509Certificate::from_der(&ak_certificate_der)?;
+    let (_, ak_certificate) = X509Certificate::from_der(&ak_certificate_der)?;
 
     // Check that AK public key matches that from TPM quote and HCL claims
     let ak_from_certificate = RsaPubKey::from_certificate(&ak_certificate)?;
@@ -309,12 +309,8 @@ fn finish_azure_attestation_verification(
         return Err(MaaError::AkFromClaimsNotEqualAkFromCertificate);
     }
 
-    // Strip trailing data from AK certificate
-    let leaf_len = ak_certificate_der.len() - remaining_bytes.len();
-    let ak_certificate_der_without_trailing_data = &ak_certificate_der[..leaf_len];
-
     // Verify the AK certificate against microsoft root cert
-    verify_ak_cert_with_azure_roots(ak_certificate_der_without_trailing_data, now)?;
+    verify_ak_cert_with_azure_roots(&ak_certificate_der, now)?;
 
     Ok(MultiMeasurements::from_pcrs(pcrs))
 }

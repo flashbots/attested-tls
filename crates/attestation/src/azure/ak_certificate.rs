@@ -4,6 +4,7 @@ use std::time::Duration;
 use once_cell::sync::Lazy;
 use tokio_rustls::rustls::pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use webpki::EndEntityCert;
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::azure::{MaaError, nv_index};
 
@@ -30,8 +31,8 @@ const AZURE_VIRTUAL_TPM_ROOT_2023: &str =
 // Valid: 2025-04-24 to 2027-04-24
 const GLOBAL_VIRTUAL_TPMCA03_PEM: &str = include_str!("../../assets/global-virtual-tpm-ca-03.pem");
 
-/// The intermediate chain for azure
-static GLOBAL_VIRTUAL_TPMCA03: Lazy<Vec<CertificateDer<'static>>> = Lazy::new(|| {
+/// Documented intermediate certificates for Azure.
+static DOCUMENTED_AZURE_INTERMEDIATES: Lazy<Vec<CertificateDer<'static>>> = Lazy::new(|| {
     let (_type_label, cert_der) =
         pem_rfc7468::decode_vec(GLOBAL_VIRTUAL_TPMCA03_PEM.as_bytes()).expect("Cannot decode PEM");
     vec![CertificateDer::from(cert_der)]
@@ -49,18 +50,24 @@ static AZURE_ROOT_ANCHORS: Lazy<Vec<TrustAnchor<'static>>> = Lazy::new(|| {
 
 /// Verify an AK certificate against azure root CA
 pub(crate) fn verify_ak_cert_with_azure_roots(
-    ak_cert_der: &[u8],
+    ak_cert_der_chain: &[u8],
     now_secs: u64,
 ) -> Result<(), MaaError> {
-    let ak_cert_der: CertificateDer = ak_cert_der.into();
+    let (remaining_bytes, _) = X509Certificate::from_der(ak_cert_der_chain)?;
+    let leaf_len = ak_cert_der_chain.len() - remaining_bytes.len();
+
+    let ak_cert_der = CertificateDer::from(ak_cert_der_chain[..leaf_len].to_vec());
     let end_entity_cert = EndEntityCert::try_from(&ak_cert_der)?;
+
+    let mut intermediates = DOCUMENTED_AZURE_INTERMEDIATES.clone();
+    intermediates.extend(parse_trailing_der_certificates(remaining_bytes)?);
 
     let now = UnixTime::since_unix_epoch(Duration::from_secs(now_secs));
 
     end_entity_cert.verify_for_usage(
         webpki::ALL_VERIFICATION_ALGS,
         &AZURE_ROOT_ANCHORS,
-        &GLOBAL_VIRTUAL_TPMCA03,
+        &intermediates,
         now,
         AnyEku,
         None,
@@ -69,6 +76,26 @@ pub(crate) fn verify_ak_cert_with_azure_roots(
     tracing::debug!("Successfully verified AK certificate from vTPM");
 
     Ok(())
+}
+
+/// Parse DER certificates appended after the AK leaf cert
+fn parse_trailing_der_certificates(
+    mut remaining_bytes: &[u8],
+) -> Result<Vec<CertificateDer<'static>>, MaaError> {
+    let mut certificates = Vec::new();
+
+    while !remaining_bytes.is_empty() {
+        if remaining_bytes.iter().all(|byte| *byte == 0) {
+            break;
+        }
+
+        let (next_remaining_bytes, _) = X509Certificate::from_der(remaining_bytes)?;
+        let cert_len = remaining_bytes.len() - next_remaining_bytes.len();
+        certificates.push(CertificateDer::from(remaining_bytes[..cert_len].to_vec()));
+        remaining_bytes = next_remaining_bytes;
+    }
+
+    Ok(certificates)
 }
 
 /// Retrieve an AK certificate from the vTPM
