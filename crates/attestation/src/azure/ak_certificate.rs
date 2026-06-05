@@ -1,9 +1,10 @@
 //! Generation and verification of AK certificates from the vTPM
-use std::time::Duration;
+use std::{io::Read, time::Duration};
 
 use once_cell::sync::Lazy;
 use tokio_rustls::rustls::pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use webpki::EndEntityCert;
+use x509_parser::{extensions::GeneralName, prelude::*};
 
 use crate::azure::{MaaError, nv_index};
 
@@ -30,8 +31,13 @@ const AZURE_VIRTUAL_TPM_ROOT_2023: &str =
 // Valid: 2025-04-24 to 2027-04-24
 const GLOBAL_VIRTUAL_TPMCA03_PEM: &str = include_str!("../../assets/global-virtual-tpm-ca-03.pem");
 
-/// The intermediate chain for azure
-static GLOBAL_VIRTUAL_TPMCA03: Lazy<Vec<CertificateDer<'static>>> = Lazy::new(|| {
+/// Azure intermediate certificates bundled with this crate.
+///
+/// This is kept only for backwards compatibility with older evidence that
+/// did not serialize AIA-fetched intermediates. New Azure vTPM evidence
+/// should carry the AK issuer chain fetched from AIA instead of relying on
+/// this bundled, eventually-stale list.
+static BUNDLED_AZURE_INTERMEDIATES: Lazy<Vec<CertificateDer<'static>>> = Lazy::new(|| {
     let (_type_label, cert_der) =
         pem_rfc7468::decode_vec(GLOBAL_VIRTUAL_TPMCA03_PEM.as_bytes()).expect("Cannot decode PEM");
     vec![CertificateDer::from(cert_der)]
@@ -50,17 +56,21 @@ static AZURE_ROOT_ANCHORS: Lazy<Vec<TrustAnchor<'static>>> = Lazy::new(|| {
 /// Verify an AK certificate against azure root CA
 pub(crate) fn verify_ak_cert_with_azure_roots(
     ak_cert_der: &[u8],
+    intermediate_cert_ders: &[Vec<u8>],
     now_secs: u64,
 ) -> Result<(), MaaError> {
     let ak_cert_der: CertificateDer = ak_cert_der.into();
     let end_entity_cert = EndEntityCert::try_from(&ak_cert_der)?;
+
+    let mut intermediates = BUNDLED_AZURE_INTERMEDIATES.clone();
+    intermediates.extend(intermediate_cert_ders.iter().cloned().map(CertificateDer::from));
 
     let now = UnixTime::since_unix_epoch(Duration::from_secs(now_secs));
 
     end_entity_cert.verify_for_usage(
         webpki::ALL_VERIFICATION_ALGS,
         &AZURE_ROOT_ANCHORS,
-        &GLOBAL_VIRTUAL_TPMCA03,
+        &intermediates,
         now,
         AnyEku,
         None,
@@ -71,11 +81,93 @@ pub(crate) fn verify_ak_cert_with_azure_roots(
     Ok(())
 }
 
+/// Fetch intermediate certificates from the Authority Information Access
+/// (AIA) CA Issuers URLs in the leaf and each fetched intermediate.
+///
+/// Azure vTPM AK intermediate CAs rotate and the public Trusted Launch FAQ
+/// can lag behind the certificates observed in production. Microsoft
+/// guidance is to build the chain from the CA Issuers URLs embedded in the
+/// AK certificate's AIA extension; see:
+/// https://learn.microsoft.com/en-us/answers/questions/5897616/download-intermediate-ca-cert-for-azure-cloud-virt
+///
+/// The fetched certificates are untrusted evidence. Verification still pins
+/// the Azure vTPM root in `verify_ak_cert_with_azure_roots`.
+pub(crate) fn fetch_ak_intermediates_from_aia(
+    ak_cert: &X509Certificate<'_>,
+) -> Result<Vec<Vec<u8>>, MaaError> {
+    const MAX_AIA_DEPTH: usize = 6;
+
+    let mut intermediates = Vec::new();
+    let mut issuer_url = first_ca_issuers_url(ak_cert);
+
+    for _ in 0..MAX_AIA_DEPTH {
+        let Some(url) = issuer_url else {
+            break;
+        };
+
+        tracing::debug!("Fetching Azure vTPM AK issuer certificate from {url}");
+        let issuer_der = fetch_certificate_der(&url)?;
+        let (_, issuer_cert) = X509Certificate::from_der(&issuer_der)?;
+
+        // Stop before adding the self-signed root. The root is already pinned
+        // in AZURE_ROOT_ANCHORS and should not come from untrusted evidence.
+        if issuer_cert.subject() == issuer_cert.issuer() {
+            break;
+        }
+
+        issuer_url = first_ca_issuers_url(&issuer_cert);
+        intermediates.push(issuer_der);
+    }
+
+    Ok(intermediates)
+}
+
 /// Retrieve an AK certificate from the vTPM
 pub(crate) fn read_ak_certificate_from_tpm() -> Result<Vec<u8>, tss_esapi::Error> {
     tracing::debug!("Reading AK certificate from vTPM");
     let mut context = nv_index::get_session_context()?;
     nv_index::read_nv_index(&mut context, TPM_AK_CERT_IDX)
+}
+
+fn first_ca_issuers_url(cert: &X509Certificate<'_>) -> Option<String> {
+    cert.extensions().iter().find_map(|extension| {
+        let ParsedExtension::AuthorityInfoAccess(aia) = extension.parsed_extension() else {
+            return None;
+        };
+
+        aia.iter().find_map(|desc| {
+            if desc.access_method.to_id_string() != "1.3.6.1.5.5.7.48.2" {
+                return None;
+            }
+
+            let GeneralName::URI(uri) = &desc.access_location else {
+                return None;
+            };
+
+            Some((*uri).to_string())
+        })
+    })
+}
+
+fn fetch_certificate_der(url: &str) -> Result<Vec<u8>, MaaError> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(MaaError::UnsupportedAiaUrl { url: url.to_string() });
+    }
+
+    let response = ureq::get(url)
+        .timeout(Duration::from_secs(10))
+        .call()
+        .map_err(|err| MaaError::AiaFetch { url: url.to_string(), source: err })?;
+
+    let mut bytes = Vec::new();
+    response.into_reader().take(1024 * 1024).read_to_end(&mut bytes)?;
+
+    if bytes.starts_with(b"-----BEGIN") {
+        let (_type_label, der) = pem_rfc7468::decode_vec(&bytes)?;
+        Ok(der)
+    } else {
+        Ok(bytes)
+    }
 }
 
 /// Convert a PEM-encoded cert into a TrustAnchor
@@ -97,6 +189,44 @@ impl webpki::ExtendedKeyUsageValidator for AnyEku {
     fn validate(&self, _iter: webpki::KeyPurposeIdIter<'_, '_>) -> Result<(), webpki::Error> {
         Ok(())
     }
+}
+
+#[cfg(test)]
+#[test]
+fn azure_ak_fixture_has_expected_aia_issuer_url() {
+    let (_type_label, ak_der) = pem_rfc7468::decode_vec(
+        include_bytes!("../../test-assets/azure-ak-leaf-westus3.pem").as_slice(),
+    )
+    .unwrap();
+    let (_, cert) = X509Certificate::from_der(&ak_der).unwrap();
+
+    assert_eq!(
+        first_ca_issuers_url(&cert).as_deref(),
+        Some(
+            "http://primary-cdn.pki.core.windows.net/westus3/cacerts/azurevtpmicapki/azurevtpmicausw3/cert.cer"
+        )
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn verifies_azure_ak_fixture_with_fixture_intermediates() {
+    let (_type_label, ak_der) = pem_rfc7468::decode_vec(
+        include_bytes!("../../test-assets/azure-ak-leaf-westus3.pem").as_slice(),
+    )
+    .unwrap();
+    let intermediates = [
+        include_bytes!("../../test-assets/azure-cloud-virtual-tpm-ca-24.pem").as_slice(),
+        include_bytes!("../../test-assets/azure-cloud-virtual-tpm-ca-2025.pem").as_slice(),
+    ]
+    .into_iter()
+    .map(|pem| pem_rfc7468::decode_vec(pem).unwrap().1)
+    .collect::<Vec<_>>();
+
+    // Fixed timestamp within the leaf and intermediate validity windows, so
+    // this offline fixture test does not expire when wall-clock time advances.
+    let june_5_2026 = 1_780_617_600;
+    verify_ak_cert_with_azure_roots(&ak_der, &intermediates, june_5_2026).unwrap();
 }
 
 #[cfg(test)]

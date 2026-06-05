@@ -3,7 +3,9 @@ mod ak_certificate;
 mod nv_index;
 use std::time::Duration;
 
-use ak_certificate::{read_ak_certificate_from_tpm, verify_ak_cert_with_azure_roots};
+use ak_certificate::{
+    fetch_ak_intermediates_from_aia, read_ak_certificate_from_tpm, verify_ak_cert_with_azure_roots,
+};
 use az_tdx_vtpm::{hcl, imds, vtpm};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
 use dcap_qvl::QuoteCollateralV3;
@@ -17,8 +19,7 @@ use x509_parser::prelude::*;
 
 use crate::{
     dcap::{
-        verify_dcap_attestation_with_given_timestamp,
-        verify_dcap_attestation_with_timestamp_sync,
+        verify_dcap_attestation_with_given_timestamp, verify_dcap_attestation_with_timestamp_sync,
     },
     measurements::MultiMeasurements,
 };
@@ -42,6 +43,11 @@ struct AttestationDocument {
 struct TpmAttest {
     /// Attestation Key certificate from vTPM
     ak_certificate_pem: String,
+    /// Intermediate CA certificates fetched from the AK leaf certificate's
+    /// AIA CA Issuers URLs. These are untrusted evidence; verification
+    /// pins the Azure vTPM root CA.
+    #[serde(default, deserialize_with = "deserialize_ak_intermediate_certificates_pem")]
+    ak_intermediate_certificates_pem: Vec<String>,
     /// vTPM quote
     quote: vtpm::Quote,
     /// Raw TCG event log bytes (UEFI + IMA) [currently not used]
@@ -52,6 +58,29 @@ struct TpmAttest {
     /// Optional platform / instance metadata used to bind or verify the AK
     /// [currently not used]
     instance_info: Option<Vec<u8>>,
+}
+
+/// Maximum number of evidence-supplied AK intermediate certificates
+/// accepted during verification. Azure chains currently observed use 2
+/// intermediates; this allows some rotation/cross-signing headroom while
+/// bounding peer-controlled evidence.
+const MAX_AK_INTERMEDIATE_CERTIFICATES: usize = 4;
+
+fn deserialize_ak_intermediate_certificates_pem<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let certificates = Vec::<String>::deserialize(deserializer)?;
+    if certificates.len() > MAX_AK_INTERMEDIATE_CERTIFICATES {
+        return Err(serde::de::Error::custom(format_args!(
+            "too many AK intermediate certificates in evidence: {} > {}",
+            certificates.len(),
+            MAX_AK_INTERMEDIATE_CERTIFICATES
+        )));
+    }
+    Ok(certificates)
 }
 
 /// Used during verification to support both sync and async verification
@@ -77,13 +106,23 @@ pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaErro
     let td_quote_bytes = imds::get_td_quote(&td_report_from_hcl)?;
 
     let ak_certificate_der = read_ak_certificate_from_tpm()?;
+    let (remaining_bytes, ak_leaf_certificate) = X509Certificate::from_der(&ak_certificate_der)?;
+    let leaf_len = ak_certificate_der.len() - remaining_bytes.len();
+    let ak_leaf_certificate_der = &ak_certificate_der[..leaf_len];
+    let ak_intermediate_certificates_der = fetch_ak_intermediates_from_aia(&ak_leaf_certificate)?;
 
     let tpm_attestation = TpmAttest {
         ak_certificate_pem: pem_rfc7468::encode_string(
             "CERTIFICATE",
             pem_rfc7468::LineEnding::default(),
-            &ak_certificate_der,
+            ak_leaf_certificate_der,
         )?,
+        ak_intermediate_certificates_pem: ak_intermediate_certificates_der
+            .iter()
+            .map(|der| {
+                pem_rfc7468::encode_string("CERTIFICATE", pem_rfc7468::LineEnding::default(), der)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         quote: vtpm::get_quote(&input_data[..32])?,
         event_log: Vec::new(),
         instance_info: None,
@@ -296,8 +335,15 @@ fn finish_azure_attestation_verification(
     // Parse AK certificate
     let (_type_label, ak_certificate_der) =
         pem_rfc7468::decode_vec(tpm_attestation.ak_certificate_pem.as_bytes())?;
+    let ak_intermediate_certificate_ders = tpm_attestation
+        .ak_intermediate_certificates_pem
+        .iter()
+        .map(|pem| pem_rfc7468::decode_vec(pem.as_bytes()).map(|(_type_label, der)| der))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let (remaining_bytes, ak_certificate) = X509Certificate::from_der(&ak_certificate_der)?;
+    let leaf_len = ak_certificate_der.len() - remaining_bytes.len();
+    let ak_leaf_certificate_der = &ak_certificate_der[..leaf_len];
 
     // Check that AK public key matches that from TPM quote and HCL claims
     let ak_from_certificate = RsaPubKey::from_certificate(&ak_certificate)?;
@@ -309,12 +355,12 @@ fn finish_azure_attestation_verification(
         return Err(MaaError::AkFromClaimsNotEqualAkFromCertificate);
     }
 
-    // Strip trailing data from AK certificate
-    let leaf_len = ak_certificate_der.len() - remaining_bytes.len();
-    let ak_certificate_der_without_trailing_data = &ak_certificate_der[..leaf_len];
-
     // Verify the AK certificate against microsoft root cert
-    verify_ak_cert_with_azure_roots(ak_certificate_der_without_trailing_data, now)?;
+    verify_ak_cert_with_azure_roots(
+        ak_leaf_certificate_der,
+        &ak_intermediate_certificate_ders,
+        now,
+    )?;
 
     Ok(MultiMeasurements::from_pcrs(pcrs))
 }
@@ -452,6 +498,12 @@ pub enum MaaError {
     Json(#[from] serde_json::Error),
     #[error("HTTP client: {0}")]
     Reqwest(#[from] reqwest::Error),
+    #[error("AIA URL is not HTTP(S): {url}")]
+    UnsupportedAiaUrl { url: String },
+    #[error("Failed to fetch AIA issuer certificate from {url}: {source}")]
+    AiaFetch { url: String, source: ureq::Error },
+    #[error("IO: {0}")]
+    Io(#[from] std::io::Error),
     #[error("vTPM quote: {0}")]
     VtpmQuote(#[from] vtpm::QuoteError),
     #[error("AK public key: {0}")]
