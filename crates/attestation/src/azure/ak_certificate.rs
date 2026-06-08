@@ -12,6 +12,13 @@ use crate::azure::{MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES, MaaError, nv_index
 /// the vTPM
 const TPM_AK_CERT_IDX: u32 = 0x1C101D0;
 
+/// id-ad-caIssuers access method OID used in X.509 Authority Information
+/// Access extensions to point to issuer certificate URLs.
+///
+/// Defined by RFC 5280 as `{ id-ad 2 }`, where `id-ad` is `1.3.6.1.5.5.7.48`.
+/// https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.2.1
+const AIA_CA_ISSUERS_ACCESS_METHOD_OID: &str = "1.3.6.1.5.5.7.48.2";
+
 // microsoftRSADevicesRoot2021 is the root CA certificate used to sign Azure
 // TDX vTPM certificates. This is different from the AME root CA used by
 // TrustedLaunch VMs. The certificate can be downloaded from:
@@ -175,7 +182,7 @@ fn ca_issuers_urls(cert: &X509Certificate<'_>) -> Vec<String> {
             };
 
             Some(aia.iter().filter_map(|desc| {
-                if desc.access_method.to_id_string() != "1.3.6.1.5.5.7.48.2" {
+                if desc.access_method.to_id_string() != AIA_CA_ISSUERS_ACCESS_METHOD_OID {
                     return None;
                 }
 
