@@ -99,7 +99,17 @@ struct PreparedAzureAttestation {
     tpm_attestation: TpmAttest,
 }
 
-/// Generate a TDX attestation on Azure
+/// Generate a TDX attestation on Azure.
+///
+/// This may perform network calls. Azure's IMDS is queried for the TDX
+/// quote, and the vTPM AK certificate's Authority Information Access (AIA)
+/// CA Issuers URLs are followed to include the observed issuer
+/// intermediates in the evidence.
+///
+/// The intermediates are included as untrusted evidence so verifiers do not
+/// need network access or AIA-fetching logic. This keeps verification
+/// deterministic and easier to reuse in constrained verifier environments
+/// such as TEEs, onchain verification, or zero-knowledge proof generation.
 pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaError> {
     let hcl_report_bytes = vtpm::get_report_with_report_data(&input_data)?;
 
