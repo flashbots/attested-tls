@@ -504,7 +504,7 @@ pub enum MaaError {
     #[error("AIA URL is not HTTP(S): {url}")]
     UnsupportedAiaUrl { url: String },
     #[error("Failed to fetch AIA issuer certificate from {url}: {source}")]
-    AiaFetch { url: String, source: ureq::Error },
+    AiaFetch { url: String, source: Box<ureq::Error> },
     #[error("IO: {0}")]
     Io(#[from] std::io::Error),
     #[error("vTPM quote: {0}")]

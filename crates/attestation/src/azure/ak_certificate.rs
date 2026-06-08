@@ -157,7 +157,7 @@ fn fetch_certificate_der(url: &str) -> Result<Vec<u8>, MaaError> {
     let response = ureq::get(url)
         .timeout(Duration::from_secs(10))
         .call()
-        .map_err(|err| MaaError::AiaFetch { url: url.to_string(), source: err })?;
+        .map_err(|err| MaaError::AiaFetch { url: url.to_string(), source: Box::new(err) })?;
 
     let mut bytes = Vec::new();
     response.into_reader().take(1024 * 1024).read_to_end(&mut bytes)?;
