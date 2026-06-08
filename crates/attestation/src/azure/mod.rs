@@ -4,7 +4,9 @@ mod nv_index;
 use std::time::Duration;
 
 use ak_certificate::{
-    fetch_ak_intermediates_from_aia, read_ak_certificate_from_tpm, verify_ak_cert_with_azure_roots,
+    fetch_ak_intermediates_from_aia,
+    read_ak_certificate_from_tpm,
+    verify_ak_cert_with_azure_roots,
 };
 use az_tdx_vtpm::{hcl, imds, vtpm};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
@@ -19,7 +21,8 @@ use x509_parser::prelude::*;
 
 use crate::{
     dcap::{
-        verify_dcap_attestation_with_given_timestamp, verify_dcap_attestation_with_timestamp_sync,
+        verify_dcap_attestation_with_given_timestamp,
+        verify_dcap_attestation_with_timestamp_sync,
     },
     measurements::MultiMeasurements,
 };
