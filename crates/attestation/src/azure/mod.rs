@@ -63,11 +63,14 @@ struct TpmAttest {
     instance_info: Option<Vec<u8>>,
 }
 
-/// Maximum number of evidence-supplied AK intermediate certificates
-/// accepted during verification. Azure chains currently observed use 2
-/// intermediates; this allows some rotation/cross-signing headroom while
-/// bounding peer-controlled evidence.
-const MAX_AK_INTERMEDIATE_CERTIFICATES: usize = 4;
+/// Maximum number of Azure vTPM AK intermediate certificates to fetch
+/// during generation and accept during verification.
+///
+/// This is a defensive resource/cycle bound for following untrusted AIA
+/// URLs and parsing peer-supplied evidence. Azure chains currently observed
+/// use 1-2 intermediates. Verification still pins Azure roots and fails
+/// closed if this bound prevents collecting a complete chain.
+const MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES: usize = 8;
 
 fn deserialize_ak_intermediate_certificates_pem<'de, D>(
     deserializer: D,
@@ -76,11 +79,11 @@ where
     D: serde::Deserializer<'de>,
 {
     let certificates = Vec::<String>::deserialize(deserializer)?;
-    if certificates.len() > MAX_AK_INTERMEDIATE_CERTIFICATES {
+    if certificates.len() > MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES {
         return Err(serde::de::Error::custom(format_args!(
             "too many AK intermediate certificates in evidence: {} > {}",
             certificates.len(),
-            MAX_AK_INTERMEDIATE_CERTIFICATES
+            MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES
         )));
     }
     Ok(certificates)
@@ -505,6 +508,12 @@ pub enum MaaError {
     UnsupportedAiaUrl { url: String },
     #[error("Failed to fetch AIA issuer certificate from {url}: {source}")]
     AiaFetch { url: String, source: Box<ureq::Error> },
+    #[error(
+        "Azure vTPM AK issuer chain exceeded maximum intermediate certificate count: {max_depth}"
+    )]
+    AkIssuerChainTooDeep { max_depth: usize },
+    #[error("Azure vTPM AK issuer chain ended before reaching a self-signed root certificate")]
+    AkIssuerChainIncomplete,
     #[error("IO: {0}")]
     Io(#[from] std::io::Error),
     #[error("vTPM quote: {0}")]

@@ -6,7 +6,7 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use webpki::EndEntityCert;
 use x509_parser::{extensions::GeneralName, prelude::*};
 
-use crate::azure::{MaaError, nv_index};
+use crate::azure::{MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES, MaaError, nv_index};
 
 /// The NV index where we expect to be able to read the AK certificate from
 /// the vTPM
@@ -95,31 +95,68 @@ pub(crate) fn verify_ak_cert_with_azure_roots(
 pub(crate) fn fetch_ak_intermediates_from_aia(
     ak_cert: &X509Certificate<'_>,
 ) -> Result<Vec<Vec<u8>>, MaaError> {
-    const MAX_AIA_DEPTH: usize = 6;
-
     let mut intermediates = Vec::new();
-    let mut issuer_url = first_ca_issuers_url(ak_cert);
+    let mut issuer_urls = ca_issuers_urls(ak_cert);
 
-    for _ in 0..MAX_AIA_DEPTH {
-        let Some(url) = issuer_url else {
-            break;
-        };
-
-        tracing::debug!("Fetching Azure vTPM AK issuer certificate from {url}");
-        let issuer_der = fetch_certificate_der(&url)?;
-        let (_, issuer_cert) = X509Certificate::from_der(&issuer_der)?;
+    while !issuer_urls.is_empty() {
+        let fetched_issuer = fetch_first_available_issuer(&issuer_urls)?;
 
         // Stop before adding the self-signed root. The root is already pinned
         // in AZURE_ROOT_ANCHORS and should not come from untrusted evidence.
-        if issuer_cert.subject() == issuer_cert.issuer() {
-            break;
+        if fetched_issuer.is_self_signed {
+            return Ok(intermediates);
         }
 
-        issuer_url = first_ca_issuers_url(&issuer_cert);
-        intermediates.push(issuer_der);
+        // This check must happen after the root check above. The self-signed
+        // root is fetched to prove the AIA walk reached a trust anchor, but it
+        // is not serialized as evidence and does not count toward the
+        // intermediate certificate limit.
+        if intermediates.len() == MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES {
+            return Err(MaaError::AkIssuerChainTooDeep {
+                max_depth: MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES,
+            });
+        }
+
+        issuer_urls = fetched_issuer.ca_issuers_urls;
+        intermediates.push(fetched_issuer.der);
     }
 
-    Ok(intermediates)
+    Err(MaaError::AkIssuerChainIncomplete)
+}
+
+struct FetchedIssuer {
+    der: Vec<u8>,
+    ca_issuers_urls: Vec<String>,
+    is_self_signed: bool,
+}
+
+fn fetch_first_available_issuer(urls: &[String]) -> Result<FetchedIssuer, MaaError> {
+    let mut last_error = None;
+
+    for url in urls {
+        match fetch_issuer(url) {
+            Ok(issuer) => return Ok(issuer),
+            Err(err) => {
+                tracing::debug!(
+                    "Failed to fetch Azure vTPM AK issuer certificate from {url}: {err}"
+                );
+                last_error = Some(err);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or(MaaError::AkIssuerChainIncomplete))
+}
+
+fn fetch_issuer(url: &str) -> Result<FetchedIssuer, MaaError> {
+    tracing::debug!("Fetching Azure vTPM AK issuer certificate from {url}");
+    let der = fetch_certificate_der(url)?;
+    let (remaining_bytes, cert) = X509Certificate::from_der(&der)?;
+    let cert_len = der.len() - remaining_bytes.len();
+    let is_self_signed = cert.subject() == cert.issuer();
+    let ca_issuers_urls = ca_issuers_urls(&cert);
+
+    Ok(FetchedIssuer { der: der[..cert_len].to_vec(), ca_issuers_urls, is_self_signed })
 }
 
 /// Retrieve an AK certificate from the vTPM
@@ -129,24 +166,28 @@ pub(crate) fn read_ak_certificate_from_tpm() -> Result<Vec<u8>, tss_esapi::Error
     nv_index::read_nv_index(&mut context, TPM_AK_CERT_IDX)
 }
 
-fn first_ca_issuers_url(cert: &X509Certificate<'_>) -> Option<String> {
-    cert.extensions().iter().find_map(|extension| {
-        let ParsedExtension::AuthorityInfoAccess(aia) = extension.parsed_extension() else {
-            return None;
-        };
-
-        aia.iter().find_map(|desc| {
-            if desc.access_method.to_id_string() != "1.3.6.1.5.5.7.48.2" {
-                return None;
-            }
-
-            let GeneralName::URI(uri) = &desc.access_location else {
+fn ca_issuers_urls(cert: &X509Certificate<'_>) -> Vec<String> {
+    cert.extensions()
+        .iter()
+        .filter_map(|extension| {
+            let ParsedExtension::AuthorityInfoAccess(aia) = extension.parsed_extension() else {
                 return None;
             };
 
-            Some((*uri).to_string())
+            Some(aia.iter().filter_map(|desc| {
+                if desc.access_method.to_id_string() != "1.3.6.1.5.5.7.48.2" {
+                    return None;
+                }
+
+                let GeneralName::URI(uri) = &desc.access_location else {
+                    return None;
+                };
+
+                Some((*uri).to_string())
+            }))
         })
-    })
+        .flatten()
+        .collect()
 }
 
 fn fetch_certificate_der(url: &str) -> Result<Vec<u8>, MaaError> {
