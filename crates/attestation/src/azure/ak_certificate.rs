@@ -15,8 +15,8 @@ const TPM_AK_CERT_IDX: u32 = 0x1C101D0;
 /// id-ad-caIssuers access method OID used in X.509 Authority Information
 /// Access extensions to point to issuer certificate URLs.
 ///
-/// Defined by RFC 5280 as `{ id-ad 2 }`, where `id-ad` is `1.3.6.1.5.5.7.48`.
-/// https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.2.1
+/// Defined by RFC 5280 as `{ id-ad 2 }`, where `id-ad` is
+/// `1.3.6.1.5.5.7.48`. https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.2.1
 const AIA_CA_ISSUERS_ACCESS_METHOD_OID: &str = "1.3.6.1.5.5.7.48.2";
 
 // microsoftRSADevicesRoot2021 is the root CA certificate used to sign Azure
@@ -210,6 +210,9 @@ fn fetch_certificate_der(url: &str) -> Result<Vec<u8>, MaaError> {
     let mut bytes = Vec::new();
     response.into_reader().take(1024 * 1024).read_to_end(&mut bytes)?;
 
+    // RFC 5280 id-ad-caIssuers HTTP URLs are expected to serve DER-encoded
+    // certificates. Accept explicit PEM armor as a lenient fallback for
+    // endpoints that serve PEM anyway.
     if bytes.starts_with(b"-----BEGIN") {
         let (_type_label, der) = pem_rfc7468::decode_vec(&bytes)?;
         Ok(der)
