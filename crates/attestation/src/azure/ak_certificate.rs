@@ -243,16 +243,119 @@ impl webpki::ExtendedKeyUsageValidator for AnyEku {
 }
 
 #[cfg(test)]
-#[tokio::test]
-async fn root_should_be_fresh() {
-    let response = reqwest::get(
-        "http://www.microsoft.com/pkiops/certs/Microsoft%20RSA%20Devices%20Root%20CA%202021.crt",
-    )
-    .await
-    .unwrap();
-    let ca_der = response.bytes().await.unwrap();
-    assert_eq!(
-        pem_rfc7468::decode_vec(MICROSOFT_RSA_DEVICES_ROOT_2021.as_bytes()).unwrap().1,
-        ca_der
-    );
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+        time::Duration,
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn root_should_be_fresh() {
+        let response = reqwest::get(
+            "http://www.microsoft.com/pkiops/certs/Microsoft%20RSA%20Devices%20Root%20CA%202021.crt",
+        )
+        .await
+        .unwrap();
+        let ca_der = response.bytes().await.unwrap();
+        assert_eq!(
+            pem_rfc7468::decode_vec(MICROSOFT_RSA_DEVICES_ROOT_2021.as_bytes()).unwrap().1,
+            ca_der
+        );
+    }
+
+    #[test]
+    fn fetch_first_available_issuer_tries_later_urls_after_failure() {
+        let (_type_label, root_der) =
+            pem_rfc7468::decode_vec(AZURE_VIRTUAL_TPM_ROOT_2023.as_bytes()).unwrap();
+        let server_url = spawn_test_http_server(vec![
+            ("/primary.cer", 500, b"unavailable".to_vec()),
+            ("/secondary.cer", 200, root_der.clone()),
+        ]);
+
+        let fetched = fetch_first_available_issuer(&[
+            format!("{server_url}/primary.cer"),
+            format!("{server_url}/secondary.cer"),
+        ])
+        .unwrap();
+
+        assert!(fetched.is_self_signed);
+        assert_eq!(fetched.der, root_der);
+    }
+
+    #[test]
+    fn fetch_certificate_der_accepts_explicit_pem() {
+        let (_type_label, root_der) =
+            pem_rfc7468::decode_vec(AZURE_VIRTUAL_TPM_ROOT_2023.as_bytes()).unwrap();
+        let server_url = spawn_test_http_server(vec![(
+            "/root.pem",
+            200,
+            AZURE_VIRTUAL_TPM_ROOT_2023.as_bytes().to_vec(),
+        )]);
+
+        let fetched_der = fetch_certificate_der(&format!("{server_url}/root.pem")).unwrap();
+
+        assert_eq!(fetched_der, root_der);
+    }
+
+    fn spawn_test_http_server(routes: Vec<(&'static str, u16, Vec<u8>)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+
+        thread::spawn(move || {
+            for _ in 0..routes.len() {
+                let (mut stream, _peer) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+                let mut request = [0u8; 4096];
+                let bytes_read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..bytes_read]);
+                let path = request_path(&request);
+
+                let (status, body) = route_response(&routes, path);
+                write_http_response(&mut stream, status, body);
+            }
+        });
+
+        format!("http://{address}")
+    }
+
+    fn request_path(request: &str) -> &str {
+        // HTTP/1.1 request line format is: `<method> <request-target> <version>`.
+        // The local test server only needs the request target, e.g. `/root.pem`.
+        request.lines().next().and_then(|line| line.split_ascii_whitespace().nth(1)).unwrap_or("/")
+    }
+
+    fn route_response<'a>(
+        routes: &'a [(&'static str, u16, Vec<u8>)],
+        path: &str,
+    ) -> (u16, &'a [u8]) {
+        routes
+            .iter()
+            .find(|(route_path, _status, _body)| *route_path == path)
+            .map_or((404, b"not found".as_slice()), |(_route_path, status, body)| {
+                (*status, body.as_slice())
+            })
+    }
+
+    fn write_http_response(stream: &mut impl Write, status: u16, body: &[u8]) {
+        let headers = format!(
+            "HTTP/1.1 {status} {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            status_text(status),
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+    }
+
+    fn status_text(status: u16) -> &'static str {
+        match status {
+            200 => "OK",
+            500 => "Internal Server Error",
+            _ => "Not Found",
+        }
+    }
 }
