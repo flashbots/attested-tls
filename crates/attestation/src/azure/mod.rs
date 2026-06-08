@@ -562,6 +562,89 @@ pub enum MaaError {
 }
 
 #[cfg(test)]
+mod test_utils {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
+
+    use super::{AttestationDocument, create_azure_attestation};
+    use crate::dcap::PCS_URL;
+
+    /// Capture a complete Azure TDX attestation fixture from inside an
+    /// Azure TDX CVM.
+    ///
+    /// Run with:
+    ///
+    /// ```text
+    /// cargo test -p attestation --features azure capture_azure_fixture -- --ignored --nocapture
+    /// ```
+    ///
+    /// This writes two timestamped YAML files:
+    ///
+    /// - `azure-tdx-with-ak-intermediates-<timestamp>.yaml`
+    /// - `azure-collateral-with-ak-intermediates-<timestamp>.yaml`
+    ///
+    /// The first file is the full Azure attestation payload, including
+    /// observed vTPM AK intermediate certificates. The second file is
+    /// matching Intel DCAP collateral for the TDX quote embedded in
+    /// that payload, so the fixture can be verified offline by tests.
+    #[tokio::test]
+    #[ignore = "requires an Azure TDX CVM with vTPM access"]
+    async fn capture_azure_fixture() {
+        let output_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test-assets");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        // Keep this aligned with existing Azure fixture tests, which use zeroed
+        // report input data.
+        let attestation_json = create_azure_attestation([0u8; 64]).unwrap();
+        let attestation_document: AttestationDocument =
+            serde_json::from_slice(&attestation_json).unwrap();
+
+        let intermediate_count =
+            attestation_document.tpm_attestation.ak_intermediate_certificates_pem.len();
+        assert!(intermediate_count > 0, "captured attestation should include AK intermediates");
+
+        let quote_bytes = BASE64_URL_SAFE.decode(&attestation_document.tdx_quote_base64).unwrap();
+        let quote = dcap_qvl::quote::Quote::parse(&quote_bytes).unwrap();
+        let ca = quote.ca().unwrap();
+        let fmspc = hex::encode_upper(quote.fmspc().unwrap());
+        let collateral = dcap_qvl::collateral::get_collateral_for_fmspc(
+            PCS_URL,
+            fmspc.clone(),
+            ca,
+            false, // TDX, not SGX.
+        )
+        .await
+        .unwrap();
+
+        let timestamp =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let attestation_path =
+            output_dir.join(format!("azure-tdx-with-ak-intermediates-{timestamp}.yaml"));
+        let collateral_path =
+            output_dir.join(format!("azure-collateral-with-ak-intermediates-{timestamp}.yaml"));
+
+        let mut serializer_options = serde_saphyr::SerializerOptions::default();
+        // With compact list indentation enabled, serde_saphyr can emit an
+        // indentless empty sequence after a nested block sequence, e.g.
+        // `event_log:\n[]`, which its parser rejects. Disable compact list
+        // indentation for fixture output so nested/empty sequences are always
+        // indented under their mapping keys.
+        serializer_options.compact_list_indent = false;
+        std::fs::write(
+            &attestation_path,
+            serde_saphyr::to_string_with_options(&attestation_document, serializer_options)
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&collateral_path, serde_saphyr::to_string(&collateral).unwrap()).unwrap();
+
+        println!("wrote {}", attestation_path.display());
+        println!("wrote {}", collateral_path.display());
+        println!("quote fmspc={fmspc} ca={ca}");
+        println!("ak_intermediate_certificates_pem entries={intermediate_count}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::measurements::MeasurementPolicy;
@@ -655,6 +738,53 @@ mod tests {
 
         assert_eq!(async_measurements, sync_measurements);
         measurement_policy.check_measurement(&async_measurements).unwrap();
+    }
+
+    /// Verify a complete observed Azure attestation payload that includes
+    /// AK intermediates fetched from the leaf certificate's AIA URLs.
+    #[tokio::test]
+    async fn test_verify_with_observed_ak_intermediates() {
+        let attestation_bytes: &'static [u8] =
+            include_bytes!("../../test-assets/azure-tdx-with-ak-intermediates-1780922561.yaml");
+        let collateral_bytes: &'static [u8] = include_bytes!(
+            "../../test-assets/azure-collateral-with-ak-intermediates-1780922561.yaml"
+        );
+
+        // Fixed timestamp within the quote collateral and AK certificate
+        // validity windows, so this offline fixture test does not expire when
+        // wall-clock time advances.
+        let now = 1_780_922_561;
+
+        let attestation_document: AttestationDocument =
+            serde_saphyr::from_slice(attestation_bytes).unwrap();
+        assert_eq!(attestation_document.tpm_attestation.ak_intermediate_certificates_pem.len(), 2);
+
+        let attestation_json = serde_json::to_vec(&attestation_document).unwrap();
+        let async_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
+        let sync_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
+
+        let async_measurements = verify_azure_attestation_with_given_timestamp(
+            attestation_json.clone(),
+            [0; 64],
+            None,
+            Some(async_collateral),
+            now,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let sync_measurements = verify_azure_attestation_with_given_timestamp_sync(
+            attestation_json,
+            [0; 64],
+            Pccs::new_without_prewarm(None),
+            Some(sync_collateral),
+            now,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(async_measurements, sync_measurements);
     }
 
     #[tokio::test]

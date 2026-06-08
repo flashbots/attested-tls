@@ -192,44 +192,6 @@ impl webpki::ExtendedKeyUsageValidator for AnyEku {
 }
 
 #[cfg(test)]
-#[test]
-fn azure_ak_fixture_has_expected_aia_issuer_url() {
-    let (_type_label, ak_der) = pem_rfc7468::decode_vec(
-        include_bytes!("../../test-assets/azure-ak-leaf-westus3.pem").as_slice(),
-    )
-    .unwrap();
-    let (_, cert) = X509Certificate::from_der(&ak_der).unwrap();
-
-    assert_eq!(
-        first_ca_issuers_url(&cert).as_deref(),
-        Some(
-            "http://primary-cdn.pki.core.windows.net/westus3/cacerts/azurevtpmicapki/azurevtpmicausw3/cert.cer"
-        )
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn verifies_azure_ak_fixture_with_fixture_intermediates() {
-    let (_type_label, ak_der) = pem_rfc7468::decode_vec(
-        include_bytes!("../../test-assets/azure-ak-leaf-westus3.pem").as_slice(),
-    )
-    .unwrap();
-    let intermediates = [
-        include_bytes!("../../test-assets/azure-cloud-virtual-tpm-ca-24.pem").as_slice(),
-        include_bytes!("../../test-assets/azure-cloud-virtual-tpm-ca-2025.pem").as_slice(),
-    ]
-    .into_iter()
-    .map(|pem| pem_rfc7468::decode_vec(pem).unwrap().1)
-    .collect::<Vec<_>>();
-
-    // Fixed timestamp within the leaf and intermediate validity windows, so
-    // this offline fixture test does not expire when wall-clock time advances.
-    let june_5_2026 = 1_780_617_600;
-    verify_ak_cert_with_azure_roots(&ak_der, &intermediates, june_5_2026).unwrap();
-}
-
-#[cfg(test)]
 #[tokio::test]
 async fn root_should_be_fresh() {
     let response = reqwest::get(
