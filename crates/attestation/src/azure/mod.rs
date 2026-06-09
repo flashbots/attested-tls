@@ -89,6 +89,10 @@ where
     Ok(certificates)
 }
 
+fn unix_time_now_secs() -> Result<u64, MaaError> {
+    Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs())
+}
+
 /// Used during verification to support both sync and async verification
 /// paths without duplicating code
 struct PreparedAzureAttestation {
@@ -125,7 +129,9 @@ pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaErro
     let (remaining_bytes, ak_leaf_certificate) = X509Certificate::from_der(&ak_certificate_der)?;
     let leaf_len = ak_certificate_der.len() - remaining_bytes.len();
     let ak_leaf_certificate_der = &ak_certificate_der[..leaf_len];
-    let ak_intermediate_certificates_der = fetch_ak_intermediates_from_aia(&ak_leaf_certificate)?;
+    let now_secs = unix_time_now_secs()?;
+    let ak_intermediate_certificates_der =
+        fetch_ak_intermediates_from_aia(ak_leaf_certificate_der, &ak_leaf_certificate, now_secs)?;
 
     let tpm_attestation = TpmAttest {
         ak_certificate_pem: pem_rfc7468::encode_string(
@@ -161,10 +167,7 @@ pub async fn verify_azure_attestation(
     pccs: Option<Pccs>,
     override_azure_outdated_tcb: bool,
 ) -> Result<super::measurements::MultiMeasurements, MaaError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs();
+    let now = unix_time_now_secs()?;
 
     verify_azure_attestation_with_given_timestamp(
         input,
@@ -188,10 +191,7 @@ pub fn verify_azure_attestation_sync(
     pccs: Pccs,
     override_azure_outdated_tcb: bool,
 ) -> Result<super::measurements::MultiMeasurements, MaaError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs();
+    let now = unix_time_now_secs()?;
 
     verify_azure_attestation_with_given_timestamp_sync(
         input,
@@ -512,6 +512,8 @@ pub enum MaaError {
     Hcl(#[from] hcl::HclError),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("System time before Unix epoch: {0}")]
+    SystemTime(#[from] std::time::SystemTimeError),
     #[error("HTTP client: {0}")]
     Reqwest(#[from] reqwest::Error),
     #[error("AIA URL is not HTTP(S): {url}")]
@@ -522,7 +524,7 @@ pub enum MaaError {
         "Azure vTPM AK issuer chain exceeded maximum intermediate certificate count: {max_depth}"
     )]
     AkIssuerChainTooDeep { max_depth: usize },
-    #[error("Azure vTPM AK issuer chain ended before reaching a self-signed root certificate")]
+    #[error("Azure vTPM AK issuer chain could not be built to a pinned Azure root certificate")]
     AkIssuerChainIncomplete,
     #[error("IO: {0}")]
     Io(#[from] std::io::Error),

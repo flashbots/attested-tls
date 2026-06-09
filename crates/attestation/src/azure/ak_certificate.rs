@@ -38,13 +38,19 @@ const AZURE_VIRTUAL_TPM_ROOT_2023: &str =
 // Valid: 2025-04-24 to 2027-04-24
 const GLOBAL_VIRTUAL_TPMCA03_PEM: &str = include_str!("../../assets/global-virtual-tpm-ca-03.pem");
 
-/// Azure intermediate certificates bundled with this crate.
+/// Legacy Azure intermediate certificates bundled with this crate.
 ///
-/// This is kept only for backwards compatibility with older evidence that
-/// did not serialize AIA-fetched intermediates. New Azure vTPM evidence
-/// should carry the AK issuer chain fetched from AIA instead of relying on
-/// this bundled, eventually-stale list.
-static BUNDLED_AZURE_INTERMEDIATES: Lazy<Vec<CertificateDer<'static>>> = Lazy::new(|| {
+/// Deprecated verification-only fallback: this is kept only for backwards
+/// compatibility with older evidence that did not serialize AIA-fetched
+/// intermediates. New Azure vTPM evidence should carry the AK issuer chain
+/// fetched from AIA instead of relying on this bundled, eventually-stale
+/// list.
+///
+/// Do not use this when generating new evidence or when deciding whether an
+/// AIA-fetched issuer chain is complete. It should be removed once
+/// supporting legacy evidence without `ak_intermediate_certificates_pem` is
+/// no longer required.
+static LEGACY_BUNDLED_AZURE_INTERMEDIATES: Lazy<Vec<CertificateDer<'static>>> = Lazy::new(|| {
     let (_type_label, cert_der) =
         pem_rfc7468::decode_vec(GLOBAL_VIRTUAL_TPMCA03_PEM.as_bytes()).expect("Cannot decode PEM");
     vec![CertificateDer::from(cert_der)]
@@ -60,16 +66,50 @@ static AZURE_ROOT_ANCHORS: Lazy<Vec<TrustAnchor<'static>>> = Lazy::new(|| {
     ]
 });
 
-/// Verify an AK certificate against azure root CA
+/// Verify an AK certificate against pinned Azure root CAs.
+///
+/// This includes `LEGACY_BUNDLED_AZURE_INTERMEDIATES` as a
+/// verification-only fallback so older evidence captured before AIA-fetched
+/// intermediates were serialized continues to verify.
 pub(crate) fn verify_ak_cert_with_azure_roots(
     ak_cert_der: &[u8],
     intermediate_cert_ders: &[Vec<u8>],
     now_secs: u64,
 ) -> Result<(), MaaError> {
+    verify_ak_cert_with_azure_roots_inner(ak_cert_der, intermediate_cert_ders, now_secs, true)
+}
+
+/// Verify an AK certificate against pinned Azure root CAs using only the
+/// intermediates supplied by the caller.
+///
+/// This is used while following AIA URLs during evidence generation. After
+/// each fetched issuer is appended, we call this to check whether the
+/// fetched chain is already complete. It intentionally excludes the legacy
+/// bundled intermediates, otherwise generation could stop early because a
+/// hardcoded intermediate completed the path, and the serialized evidence
+/// would still depend on that legacy fallback.
+fn verify_ak_cert_with_provided_intermediates_only(
+    ak_cert_der: &[u8],
+    intermediate_cert_ders: &[Vec<u8>],
+    now_secs: u64,
+) -> Result<(), MaaError> {
+    verify_ak_cert_with_azure_roots_inner(ak_cert_der, intermediate_cert_ders, now_secs, false)
+}
+
+fn verify_ak_cert_with_azure_roots_inner(
+    ak_cert_der: &[u8],
+    intermediate_cert_ders: &[Vec<u8>],
+    now_secs: u64,
+    include_legacy_bundled_intermediates: bool,
+) -> Result<(), MaaError> {
     let ak_cert_der: CertificateDer = ak_cert_der.into();
     let end_entity_cert = EndEntityCert::try_from(&ak_cert_der)?;
 
-    let mut intermediates = BUNDLED_AZURE_INTERMEDIATES.clone();
+    let mut intermediates = if include_legacy_bundled_intermediates {
+        LEGACY_BUNDLED_AZURE_INTERMEDIATES.clone()
+    } else {
+        Vec::new()
+    };
     intermediates.extend(intermediate_cert_ders.iter().cloned().map(CertificateDer::from));
 
     let now = UnixTime::since_unix_epoch(Duration::from_secs(now_secs));
@@ -97,35 +137,37 @@ pub(crate) fn verify_ak_cert_with_azure_roots(
 /// AK certificate's AIA extension; see:
 /// https://learn.microsoft.com/en-us/answers/questions/5897616/download-intermediate-ca-cert-for-azure-cloud-virt
 ///
-/// The fetched certificates are untrusted evidence. Verification still pins
-/// the Azure vTPM root in `verify_ak_cert_with_azure_roots`.
+/// The fetched certificates are untrusted evidence. We stop as soon as the
+/// fetched chain verifies against pinned Azure roots.
 pub(crate) fn fetch_ak_intermediates_from_aia(
+    ak_cert_der: &[u8],
     ak_cert: &X509Certificate<'_>,
+    now_secs: u64,
 ) -> Result<Vec<Vec<u8>>, MaaError> {
     let mut intermediates = Vec::new();
+    if verify_ak_cert_with_provided_intermediates_only(ak_cert_der, &intermediates, now_secs)
+        .is_ok()
+    {
+        return Ok(intermediates);
+    }
+
     let mut issuer_urls = ca_issuers_urls(ak_cert);
 
     while !issuer_urls.is_empty() {
         let fetched_issuer = fetch_first_available_issuer(&issuer_urls)?;
 
-        // Stop before adding the self-signed root. The root is already pinned
-        // in AZURE_ROOT_ANCHORS and should not come from untrusted evidence.
-        if fetched_issuer.is_self_signed {
-            return Ok(intermediates);
-        }
+        issuer_urls = fetched_issuer.ca_issuers_urls;
+        intermediates.push(fetched_issuer.der);
 
-        // This check must happen after the root check above. The self-signed
-        // root is fetched to prove the AIA walk reached a trust anchor, but it
-        // is not serialized as evidence and does not count toward the
-        // intermediate certificate limit.
-        if intermediates.len() == MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES {
+        if verify_ak_cert_with_provided_intermediates_only(ak_cert_der, &intermediates, now_secs)
+            .is_ok()
+        {
+            return Ok(intermediates);
+        } else if intermediates.len() == MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES {
             return Err(MaaError::AkIssuerChainTooDeep {
                 max_depth: MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES,
             });
         }
-
-        issuer_urls = fetched_issuer.ca_issuers_urls;
-        intermediates.push(fetched_issuer.der);
     }
 
     Err(MaaError::AkIssuerChainIncomplete)
@@ -134,7 +176,6 @@ pub(crate) fn fetch_ak_intermediates_from_aia(
 struct FetchedIssuer {
     der: Vec<u8>,
     ca_issuers_urls: Vec<String>,
-    is_self_signed: bool,
 }
 
 fn fetch_first_available_issuer(urls: &[String]) -> Result<FetchedIssuer, MaaError> {
@@ -160,10 +201,9 @@ fn fetch_issuer(url: &str) -> Result<FetchedIssuer, MaaError> {
     let der = fetch_certificate_der(url)?;
     let (remaining_bytes, cert) = X509Certificate::from_der(&der)?;
     let cert_len = der.len() - remaining_bytes.len();
-    let is_self_signed = cert.subject() == cert.issuer();
     let ca_issuers_urls = ca_issuers_urls(&cert);
 
-    Ok(FetchedIssuer { der: der[..cert_len].to_vec(), ca_issuers_urls, is_self_signed })
+    Ok(FetchedIssuer { der: der[..cert_len].to_vec(), ca_issuers_urls })
 }
 
 /// Retrieve an AK certificate from the vTPM
@@ -282,7 +322,6 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(fetched.is_self_signed);
         assert_eq!(fetched.der, root_der);
     }
 
