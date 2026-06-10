@@ -3,7 +3,11 @@ mod ak_certificate;
 mod nv_index;
 use std::time::Duration;
 
-use ak_certificate::{read_ak_certificate_from_tpm, verify_ak_cert_with_azure_roots};
+use ak_certificate::{
+    fetch_ak_intermediates_from_aia,
+    read_ak_certificate_from_tpm,
+    verify_ak_cert_with_azure_roots,
+};
 use az_tdx_vtpm::{hcl, imds, vtpm};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
 use dcap_qvl::QuoteCollateralV3;
@@ -42,6 +46,11 @@ struct AttestationDocument {
 struct TpmAttest {
     /// Attestation Key certificate from vTPM
     ak_certificate_pem: String,
+    /// Intermediate CA certificates fetched from the AK leaf certificate's
+    /// AIA CA Issuers URLs. These are untrusted evidence; verification
+    /// pins the Azure vTPM root CA.
+    #[serde(default, deserialize_with = "deserialize_ak_intermediate_certificates_pem")]
+    ak_intermediate_certificates_pem: Vec<String>,
     /// vTPM quote
     quote: vtpm::Quote,
     /// Raw TCG event log bytes (UEFI + IMA) [currently not used]
@@ -54,6 +63,36 @@ struct TpmAttest {
     instance_info: Option<Vec<u8>>,
 }
 
+/// Maximum number of Azure vTPM AK intermediate certificates to fetch
+/// during generation and accept during verification.
+///
+/// This is a defensive resource/cycle bound for following untrusted AIA
+/// URLs and parsing peer-supplied evidence. Azure chains currently observed
+/// use 1-2 intermediates. Verification still pins Azure roots and fails
+/// closed if this bound prevents collecting a complete chain.
+const MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES: usize = 8;
+
+fn deserialize_ak_intermediate_certificates_pem<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let certificates = Vec::<String>::deserialize(deserializer)?;
+    if certificates.len() > MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES {
+        return Err(serde::de::Error::custom(format_args!(
+            "too many AK intermediate certificates in evidence: {} > {}",
+            certificates.len(),
+            MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES
+        )));
+    }
+    Ok(certificates)
+}
+
+fn unix_time_now_secs() -> Result<u64, MaaError> {
+    Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs())
+}
+
 /// Used during verification to support both sync and async verification
 /// paths without duplicating code
 struct PreparedAzureAttestation {
@@ -64,7 +103,17 @@ struct PreparedAzureAttestation {
     tpm_attestation: TpmAttest,
 }
 
-/// Generate a TDX attestation on Azure
+/// Generate a TDX attestation on Azure.
+///
+/// This may perform network calls. Azure's IMDS is queried for the TDX
+/// quote, and the vTPM AK certificate's Authority Information Access (AIA)
+/// CA Issuers URLs are followed to include the observed issuer
+/// intermediates in the evidence.
+///
+/// The intermediates are included as untrusted evidence so verifiers do not
+/// need network access or AIA-fetching logic. This keeps verification
+/// deterministic and easier to reuse in constrained verifier environments
+/// such as TEEs, onchain verification, or zero-knowledge proof generation.
 pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaError> {
     let hcl_report_bytes = vtpm::get_report_with_report_data(&input_data)?;
 
@@ -77,13 +126,25 @@ pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaErro
     let td_quote_bytes = imds::get_td_quote(&td_report_from_hcl)?;
 
     let ak_certificate_der = read_ak_certificate_from_tpm()?;
+    let (remaining_bytes, ak_leaf_certificate) = X509Certificate::from_der(&ak_certificate_der)?;
+    let leaf_len = ak_certificate_der.len() - remaining_bytes.len();
+    let ak_leaf_certificate_der = &ak_certificate_der[..leaf_len];
+    let now_secs = unix_time_now_secs()?;
+    let ak_intermediate_certificates_der =
+        fetch_ak_intermediates_from_aia(ak_leaf_certificate_der, &ak_leaf_certificate, now_secs)?;
 
     let tpm_attestation = TpmAttest {
         ak_certificate_pem: pem_rfc7468::encode_string(
             "CERTIFICATE",
             pem_rfc7468::LineEnding::default(),
-            &ak_certificate_der,
+            ak_leaf_certificate_der,
         )?,
+        ak_intermediate_certificates_pem: ak_intermediate_certificates_der
+            .iter()
+            .map(|der| {
+                pem_rfc7468::encode_string("CERTIFICATE", pem_rfc7468::LineEnding::default(), der)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         quote: vtpm::get_quote(&input_data[..32])?,
         event_log: Vec::new(),
         instance_info: None,
@@ -106,10 +167,7 @@ pub async fn verify_azure_attestation(
     pccs: Option<Pccs>,
     override_azure_outdated_tcb: bool,
 ) -> Result<super::measurements::MultiMeasurements, MaaError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs();
+    let now = unix_time_now_secs()?;
 
     verify_azure_attestation_with_given_timestamp(
         input,
@@ -133,10 +191,7 @@ pub fn verify_azure_attestation_sync(
     pccs: Pccs,
     override_azure_outdated_tcb: bool,
 ) -> Result<super::measurements::MultiMeasurements, MaaError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs();
+    let now = unix_time_now_secs()?;
 
     verify_azure_attestation_with_given_timestamp_sync(
         input,
@@ -296,8 +351,15 @@ fn finish_azure_attestation_verification(
     // Parse AK certificate
     let (_type_label, ak_certificate_der) =
         pem_rfc7468::decode_vec(tpm_attestation.ak_certificate_pem.as_bytes())?;
+    let ak_intermediate_certificate_ders = tpm_attestation
+        .ak_intermediate_certificates_pem
+        .iter()
+        .map(|pem| pem_rfc7468::decode_vec(pem.as_bytes()).map(|(_type_label, der)| der))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let (remaining_bytes, ak_certificate) = X509Certificate::from_der(&ak_certificate_der)?;
+    let leaf_len = ak_certificate_der.len() - remaining_bytes.len();
+    let ak_leaf_certificate_der = &ak_certificate_der[..leaf_len];
 
     // Check that AK public key matches that from TPM quote and HCL claims
     let ak_from_certificate = RsaPubKey::from_certificate(&ak_certificate)?;
@@ -309,12 +371,12 @@ fn finish_azure_attestation_verification(
         return Err(MaaError::AkFromClaimsNotEqualAkFromCertificate);
     }
 
-    // Strip trailing data from AK certificate
-    let leaf_len = ak_certificate_der.len() - remaining_bytes.len();
-    let ak_certificate_der_without_trailing_data = &ak_certificate_der[..leaf_len];
-
     // Verify the AK certificate against microsoft root cert
-    verify_ak_cert_with_azure_roots(ak_certificate_der_without_trailing_data, now)?;
+    verify_ak_cert_with_azure_roots(
+        ak_leaf_certificate_der,
+        &ak_intermediate_certificate_ders,
+        now,
+    )?;
 
     Ok(MultiMeasurements::from_pcrs(pcrs))
 }
@@ -450,8 +512,22 @@ pub enum MaaError {
     Hcl(#[from] hcl::HclError),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("System time before Unix epoch: {0}")]
+    SystemTime(#[from] std::time::SystemTimeError),
     #[error("HTTP client: {0}")]
     Reqwest(#[from] reqwest::Error),
+    #[error("AIA URL is not HTTP(S): {url}")]
+    UnsupportedAiaUrl { url: String },
+    #[error("Failed to fetch AIA issuer certificate from {url}: {source}")]
+    AiaFetch { url: String, source: Box<ureq::Error> },
+    #[error(
+        "Azure vTPM AK issuer chain exceeded maximum intermediate certificate count: {max_depth}"
+    )]
+    AkIssuerChainTooDeep { max_depth: usize },
+    #[error("Azure vTPM AK issuer chain could not be built to a pinned Azure root certificate")]
+    AkIssuerChainIncomplete,
+    #[error("IO: {0}")]
+    Io(#[from] std::io::Error),
     #[error("vTPM quote: {0}")]
     VtpmQuote(#[from] vtpm::QuoteError),
     #[error("AK public key: {0}")]
@@ -504,6 +580,89 @@ pub enum MaaError {
         "Azure metadata API returned a successful response with non-JSON content-type: {content_type:?}"
     )]
     AzureMetadataApiNonJsonResponse { content_type: Option<String> },
+}
+
+#[cfg(test)]
+mod test_utils {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
+
+    use super::{AttestationDocument, create_azure_attestation};
+    use crate::dcap::PCS_URL;
+
+    /// Capture a complete Azure TDX attestation fixture from inside an
+    /// Azure TDX CVM.
+    ///
+    /// Run with:
+    ///
+    /// ```text
+    /// cargo test -p attestation --features azure capture_azure_fixture -- --ignored --nocapture
+    /// ```
+    ///
+    /// This writes two timestamped YAML files:
+    ///
+    /// - `azure-tdx-with-ak-intermediates-<timestamp>.yaml`
+    /// - `azure-collateral-with-ak-intermediates-<timestamp>.yaml`
+    ///
+    /// The first file is the full Azure attestation payload, including
+    /// observed vTPM AK intermediate certificates. The second file is
+    /// matching Intel DCAP collateral for the TDX quote embedded in
+    /// that payload, so the fixture can be verified offline by tests.
+    #[tokio::test]
+    #[ignore = "requires an Azure TDX CVM with vTPM access"]
+    async fn capture_azure_fixture() {
+        let output_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test-assets");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        // Keep this aligned with existing Azure fixture tests, which use zeroed
+        // report input data.
+        let attestation_json = create_azure_attestation([0u8; 64]).unwrap();
+        let attestation_document: AttestationDocument =
+            serde_json::from_slice(&attestation_json).unwrap();
+
+        let intermediate_count =
+            attestation_document.tpm_attestation.ak_intermediate_certificates_pem.len();
+        assert!(intermediate_count > 0, "captured attestation should include AK intermediates");
+
+        let quote_bytes = BASE64_URL_SAFE.decode(&attestation_document.tdx_quote_base64).unwrap();
+        let quote = dcap_qvl::quote::Quote::parse(&quote_bytes).unwrap();
+        let ca = quote.ca().unwrap();
+        let fmspc = hex::encode_upper(quote.fmspc().unwrap());
+        let collateral = dcap_qvl::collateral::get_collateral_for_fmspc(
+            PCS_URL,
+            fmspc.clone(),
+            ca,
+            false, // TDX, not SGX.
+        )
+        .await
+        .unwrap();
+
+        let timestamp =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let attestation_path =
+            output_dir.join(format!("azure-tdx-with-ak-intermediates-{timestamp}.yaml"));
+        let collateral_path =
+            output_dir.join(format!("azure-collateral-with-ak-intermediates-{timestamp}.yaml"));
+
+        let mut serializer_options = serde_saphyr::SerializerOptions::default();
+        // With compact list indentation enabled, serde_saphyr can emit an
+        // indentless empty sequence after a nested block sequence, e.g.
+        // `event_log:\n[]`, which its parser rejects. Disable compact list
+        // indentation for fixture output so nested/empty sequences are always
+        // indented under their mapping keys.
+        serializer_options.compact_list_indent = false;
+        std::fs::write(
+            &attestation_path,
+            serde_saphyr::to_string_with_options(&attestation_document, serializer_options)
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&collateral_path, serde_saphyr::to_string(&collateral).unwrap()).unwrap();
+
+        println!("wrote {}", attestation_path.display());
+        println!("wrote {}", collateral_path.display());
+        println!("quote fmspc={fmspc} ca={ca}");
+        println!("ak_intermediate_certificates_pem entries={intermediate_count}");
+    }
 }
 
 #[cfg(test)]
@@ -600,6 +759,53 @@ mod tests {
 
         assert_eq!(async_measurements, sync_measurements);
         measurement_policy.check_measurement(&async_measurements).unwrap();
+    }
+
+    /// Verify a complete observed Azure attestation payload that includes
+    /// AK intermediates fetched from the leaf certificate's AIA URLs.
+    #[tokio::test]
+    async fn test_verify_with_observed_ak_intermediates() {
+        let attestation_bytes: &'static [u8] =
+            include_bytes!("../../test-assets/azure-tdx-with-ak-intermediates-1780922561.yaml");
+        let collateral_bytes: &'static [u8] = include_bytes!(
+            "../../test-assets/azure-collateral-with-ak-intermediates-1780922561.yaml"
+        );
+
+        // Fixed timestamp within the quote collateral and AK certificate
+        // validity windows, so this offline fixture test does not expire when
+        // wall-clock time advances.
+        let now = 1_780_922_561;
+
+        let attestation_document: AttestationDocument =
+            serde_saphyr::from_slice(attestation_bytes).unwrap();
+        assert_eq!(attestation_document.tpm_attestation.ak_intermediate_certificates_pem.len(), 2);
+
+        let attestation_json = serde_json::to_vec(&attestation_document).unwrap();
+        let async_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
+        let sync_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
+
+        let async_measurements = verify_azure_attestation_with_given_timestamp(
+            attestation_json.clone(),
+            [0; 64],
+            None,
+            Some(async_collateral),
+            now,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let sync_measurements = verify_azure_attestation_with_given_timestamp_sync(
+            attestation_json,
+            [0; 64],
+            Pccs::new_without_prewarm(None),
+            Some(sync_collateral),
+            now,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(async_measurements, sync_measurements);
     }
 
     #[tokio::test]
