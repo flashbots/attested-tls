@@ -15,8 +15,8 @@ tokio = { workspace = true, features = ["fs"] }
 tokio-rustls = { workspace = true, default-features = false }
 
 anyhow = "1.0.100"
-coset = "0.4.2"
-nsm-nitro-enclave-utils = { version = "0.1.3", default-features = false, features = ["nitro", "verify"] }
+coset = { version = "0.4.2", optional = true }
+nsm-nitro-enclave-utils = { version = "0.1.3", default-features = false, optional = true }
 nsm-nitro-enclave-utils-keygen = { version = "=0.1.3", optional = true }
 pem-rfc7468 = { version = "0.7.0", features = ["std"] }
 tdx-attest = { git = "https://github.com/Dstack-TEE/dstack.git", rev = "4f602dddc0542cd34da031c90ac0b3a560f316ed" }
@@ -44,22 +44,32 @@ openssl = { version = "0.10.79", optional = true }
 
 [dev-dependencies]
 mock-tdx = { workspace = true }
-nsm-nitro-enclave-utils = { version = "0.1.3", default-features = false, features = ["nitro", "pki", "seed", "verify"] }
-nsm-nitro-enclave-utils-keygen = "=0.1.3"
 tempfile = "3.23.0"
 tokio-rustls = { workspace = true, default-features = true }
 
 serde-saphyr = "0.0.22"
 
 [features]
-default = []
+default = ["nitro"]
 
 # Adds support for Microsoft Azure attestation generation and verification
 azure = ["tss-esapi", "az-tdx-vtpm", "openssl"]
 
+# Adds support for AWS Nitro Enclaves attestation generation and verification
+nitro = [
+    "dep:coset",
+    "dep:nsm-nitro-enclave-utils",
+    "nsm-nitro-enclave-utils/nitro",
+    "nsm-nitro-enclave-utils/verify",
+]
+
 # Allows mock quotes used in tests and exposes related functions for testing
-mock = [
-    "dep:mock-tdx",
+mock = ["dep:mock-tdx"]
+
+# Adds mock AWS Nitro attestations for tests and local development
+mock-nitro = [
+    "mock",
+    "nitro",
     "dep:nsm-nitro-enclave-utils-keygen",
     "nsm-nitro-enclave-utils/pki",
     "nsm-nitro-enclave-utils/seed",

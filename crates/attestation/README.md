@@ -24,6 +24,14 @@ Tokio-backed background tasks such as PCCS pre-warm and cache refresh.
 
 ## Feature flags
 
+### `nitro`
+
+Enables AWS Nitro Enclaves attestation support (generation, verification, and
+local platform detection), through the Nitro Secure Module at `/dev/nsm`.
+
+This feature is enabled by default. Disable default features to build without
+Nitro support or Nitro-specific dependencies.
+
 ### `azure`
 
 Enables Microsoft Azure vTPM attestation support (generation and verification),
@@ -51,6 +59,14 @@ must be explicitly enabled via the `override_azure_outdated_tcb` flag on
 
 Enables mock quote support via the local `mock-tdx` crate for tests and
 development on non-TDX hardware.
+
+Do not use in production. Disabled by default.
+
+### `mock-nitro`
+
+Enables locally signed mock Nitro attestation documents for tests and
+development on non-Nitro hardware. This feature also enables `mock` and
+`nitro`.
 
 Do not use in production. Disabled by default.
 

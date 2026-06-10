@@ -9,6 +9,8 @@ use thiserror::Error;
 
 use crate::{AttestationError, AttestationType, dcap::DcapVerificationError};
 
+pub(crate) const NITRO_PCR_LENGTH: usize = 48;
+
 /// Represents the measurement register types in a TDX quote
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -236,7 +238,7 @@ impl MultiMeasurements {
                     .into_iter()
                     .map(|(k, v)| {
                         let value = hex::decode(v)?;
-                        if value.len() != crate::nitro::NITRO_PCR_LENGTH {
+                        if value.len() != NITRO_PCR_LENGTH {
                             return Err(MeasurementFormatError::BadLength);
                         }
                         let value: [u8; 48] =
@@ -409,30 +411,36 @@ impl MeasurementPolicy {
     /// Expect mock measurements used in tests
     #[cfg(any(test, feature = "mock"))]
     pub fn mock() -> Self {
-        let nitro_measurements = match crate::nitro::mock_nitro_measurements() {
-            MultiMeasurements::Nitro(measurements) => {
-                measurements.into_iter().map(|(index, value)| (index, vec![value])).collect()
-            }
-            _ => unreachable!("mock_nitro_measurements must return Nitro measurements"),
+        let dcap_measurements = MeasurementRecord {
+            measurement_id: "test".to_string(),
+            measurements: ExpectedMeasurements::Dcap(HashMap::from([
+                (DcapMeasurementRegister::MRTD, vec![mock_tdx::MOCK_MRTD]),
+                (DcapMeasurementRegister::RTMR0, vec![mock_tdx::MOCK_RTMR0]),
+                (DcapMeasurementRegister::RTMR1, vec![mock_tdx::MOCK_RTMR1]),
+                (DcapMeasurementRegister::RTMR2, vec![mock_tdx::MOCK_RTMR2]),
+                (DcapMeasurementRegister::RTMR3, vec![mock_tdx::MOCK_RTMR3]),
+            ])),
         };
 
-        Self {
-            accepted_measurements: vec![
-                MeasurementRecord {
-                    measurement_id: "test".to_string(),
-                    measurements: ExpectedMeasurements::Dcap(HashMap::from([
-                        (DcapMeasurementRegister::MRTD, vec![mock_tdx::MOCK_MRTD]),
-                        (DcapMeasurementRegister::RTMR0, vec![mock_tdx::MOCK_RTMR0]),
-                        (DcapMeasurementRegister::RTMR1, vec![mock_tdx::MOCK_RTMR1]),
-                        (DcapMeasurementRegister::RTMR2, vec![mock_tdx::MOCK_RTMR2]),
-                        (DcapMeasurementRegister::RTMR3, vec![mock_tdx::MOCK_RTMR3]),
-                    ])),
-                },
-                MeasurementRecord {
-                    measurement_id: "test-nitro".to_string(),
-                    measurements: ExpectedMeasurements::Nitro(nitro_measurements),
-                },
-            ],
+        #[cfg(feature = "mock-nitro")]
+        {
+            let mut accepted_measurements = vec![dcap_measurements];
+            let nitro_measurements = match crate::nitro::mock_nitro_measurements() {
+                MultiMeasurements::Nitro(measurements) => {
+                    measurements.into_iter().map(|(index, value)| (index, vec![value])).collect()
+                }
+                _ => unreachable!("mock_nitro_measurements must return Nitro measurements"),
+            };
+            accepted_measurements.push(MeasurementRecord {
+                measurement_id: "test-nitro".to_string(),
+                measurements: ExpectedMeasurements::Nitro(nitro_measurements),
+            });
+            Self { accepted_measurements }
+        }
+
+        #[cfg(not(feature = "mock-nitro"))]
+        {
+            Self { accepted_measurements: vec![dcap_measurements] }
         }
     }
 
@@ -628,9 +636,7 @@ impl MeasurementPolicy {
                                 let index = parse_nitro_pcr_index(index_str)?;
                                 Ok((
                                     index,
-                                    parse_measurement_entry::<{ crate::nitro::NITRO_PCR_LENGTH }>(
-                                        entry, index_str,
-                                    )?,
+                                    parse_measurement_entry::<NITRO_PCR_LENGTH>(entry, index_str)?,
                                 ))
                             })
                             .collect::<Result<HashMap<u32, Vec<[u8; 48]>>, MeasurementFormatError>>(
@@ -1113,8 +1119,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_nitro_numeric_pcr_keys() {
-        let pcr0 = "11".repeat(crate::nitro::NITRO_PCR_LENGTH);
-        let pcr8 = "22".repeat(crate::nitro::NITRO_PCR_LENGTH);
+        let pcr0 = "11".repeat(NITRO_PCR_LENGTH);
+        let pcr8 = "22".repeat(NITRO_PCR_LENGTH);
         let json = format!(
             r#"[
                 {{
@@ -1140,7 +1146,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_nitro_rejects_prefixed_pcr_keys() {
-        let pcr0 = "11".repeat(crate::nitro::NITRO_PCR_LENGTH);
+        let pcr0 = "11".repeat(NITRO_PCR_LENGTH);
         let json = format!(
             r#"[
                 {{
@@ -1158,7 +1164,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_nitro_rejects_out_of_range_pcr_keys() {
-        let pcr32 = "11".repeat(crate::nitro::NITRO_PCR_LENGTH);
+        let pcr32 = "11".repeat(NITRO_PCR_LENGTH);
         let json = format!(
             r#"[
                 {{
@@ -1176,7 +1182,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_nitro_rejects_bad_value_lengths() {
-        let short_pcr = "11".repeat(crate::nitro::NITRO_PCR_LENGTH - 1);
+        let short_pcr = "11".repeat(NITRO_PCR_LENGTH - 1);
         let json = format!(
             r#"[
                 {{
@@ -1194,8 +1200,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_nitro_measurement_with_or_semantics() {
-        let first = "00".repeat(crate::nitro::NITRO_PCR_LENGTH);
-        let second = "11".repeat(crate::nitro::NITRO_PCR_LENGTH);
+        let first = "00".repeat(NITRO_PCR_LENGTH);
+        let second = "11".repeat(NITRO_PCR_LENGTH);
         let json = format!(
             r#"[
                 {{
@@ -1225,8 +1231,8 @@ mod tests {
     #[test]
     fn test_nitro_header_round_trip() {
         let measurements = MultiMeasurements::Nitro(HashMap::from([
-            (0, [0xabu8; crate::nitro::NITRO_PCR_LENGTH]),
-            (8, [0xcdu8; crate::nitro::NITRO_PCR_LENGTH]),
+            (0, [0xabu8; NITRO_PCR_LENGTH]),
+            (8, [0xcdu8; NITRO_PCR_LENGTH]),
         ]));
 
         let header = measurements.to_header_format().unwrap();
@@ -1260,7 +1266,7 @@ mod tests {
         assert!(azure_debug.contains(&hex::encode(azure_register_value)));
         assert!(!azure_debug.contains(&format!("{azure_register_value:?}")));
 
-        let nitro_register_value = [0xabu8; crate::nitro::NITRO_PCR_LENGTH];
+        let nitro_register_value = [0xabu8; NITRO_PCR_LENGTH];
         let nitro = MultiMeasurements::Nitro(HashMap::from([(8u32, nitro_register_value)]));
         let nitro_debug = format!("{nitro:?}");
         assert!(nitro_debug.contains("Nitro"));

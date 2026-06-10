@@ -14,10 +14,9 @@ use nsm_nitro_enclave_utils::{
 };
 use thiserror::Error;
 
-use crate::measurements::MultiMeasurements;
+use crate::measurements::{MultiMeasurements, NITRO_PCR_LENGTH};
 
 const AWS_ROOT_CERT_DER: &[u8] = include_bytes!("../assets/aws-nitro-enclaves-root-g1.der");
-pub(crate) const NITRO_PCR_LENGTH: usize = 48;
 
 /// Generate a Nitro attestation document using the Nitro Secure Module.
 pub fn create_nitro_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, NitroError> {
@@ -86,7 +85,7 @@ fn decode_with_accepted_roots(input: &[u8]) -> Result<AttestationDoc, NitroError
     match production_result {
         Ok(doc) => Ok(doc),
         Err(production_error) => {
-            #[cfg(any(test, feature = "mock"))]
+            #[cfg(feature = "mock-nitro")]
             {
                 let mock_root = mock_nitro_root_cert_der()?;
                 if let Ok(doc) = decode_with_root(input, &mock_root) {
@@ -149,7 +148,7 @@ fn measurements_from_doc(doc: &AttestationDoc) -> Result<MultiMeasurements, Nitr
 }
 
 /// Generate a mock Nitro root of trust certificate chain
-#[cfg(any(test, feature = "mock"))]
+#[cfg(feature = "mock-nitro")]
 fn mock_nitro_pki() -> &'static nsm_nitro_enclave_utils_keygen::NsmCertChain {
     use std::time::Duration;
 
@@ -163,7 +162,7 @@ fn mock_nitro_pki() -> &'static nsm_nitro_enclave_utils_keygen::NsmCertChain {
 }
 
 /// Get mock Nitro root of trust certificate encoded as DER
-#[cfg(any(test, feature = "mock"))]
+#[cfg(feature = "mock-nitro")]
 fn mock_nitro_root_cert_der() -> Result<Vec<u8>, NitroError> {
     use nsm_nitro_enclave_utils_keygen::DerEncodeExt;
 
@@ -171,7 +170,7 @@ fn mock_nitro_root_cert_der() -> Result<Vec<u8>, NitroError> {
 }
 
 /// PCR values for mock Nitro attestations
-#[cfg(any(test, feature = "mock"))]
+#[cfg(feature = "mock-nitro")]
 fn mock_nitro_pcrs() -> nsm_nitro_enclave_utils::pcr::Pcrs {
     use std::collections::BTreeMap;
 
@@ -189,7 +188,7 @@ fn mock_nitro_pcrs() -> nsm_nitro_enclave_utils::pcr::Pcrs {
 
 /// Create a locally signed mock Nitro attestation document for tests and
 /// local development.
-#[cfg(any(test, feature = "mock"))]
+#[cfg(feature = "mock-nitro")]
 pub fn create_mock_nitro_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, NitroError> {
     use nsm_nitro_enclave_utils::{api::SecretKey, driver::dev::DevNitro};
     use nsm_nitro_enclave_utils_keygen::DerEncodeExt;
@@ -215,7 +214,7 @@ pub fn create_mock_nitro_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, Ni
 }
 
 /// Mock Nitro PCR values used in tests and local development.
-#[cfg(any(test, feature = "mock"))]
+#[cfg(feature = "mock-nitro")]
 pub fn mock_nitro_measurements() -> MultiMeasurements {
     use nsm_nitro_enclave_utils::pcr::PcrIndex;
 
@@ -249,7 +248,7 @@ pub enum NitroError {
     InvalidPcrIndex(usize),
     #[error("Nitro PCR {index} has length {actual}, expected {expected}")]
     BadPcrLength { index: u32, expected: usize, actual: usize },
-    #[cfg(any(test, feature = "mock"))]
+    #[cfg(feature = "mock-nitro")]
     #[error("Mock Nitro PKI: {0}")]
     MockPki(String),
 }
@@ -257,7 +256,6 @@ pub enum NitroError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AttestationExchangeMessage, AttestationType, AttestationVerifier};
 
     #[test]
     fn aws_signed_attestation_fixture_has_expected_measurements() {
@@ -364,8 +362,11 @@ mod tests {
         assert_eq!(measurements, expected);
     }
 
+    #[cfg(feature = "mock-nitro")]
     #[tokio::test]
     async fn mock_nitro_verifier_supports_async_and_sync_verification() {
+        use crate::{AttestationExchangeMessage, AttestationType, AttestationVerifier};
+
         let input_data = [7u8; 64];
         let attestation = create_mock_nitro_attestation(input_data).unwrap();
         let exchange =
@@ -381,6 +382,7 @@ mod tests {
         assert_eq!(sync_measurements, mock_nitro_measurements());
     }
 
+    #[cfg(feature = "mock-nitro")]
     #[test]
     fn nonce_mismatch_is_rejected() {
         let attestation = create_mock_nitro_attestation([1u8; 64]).unwrap();

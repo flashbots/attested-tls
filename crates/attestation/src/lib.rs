@@ -4,6 +4,7 @@
 pub mod azure;
 pub mod dcap;
 pub mod measurements;
+#[cfg(feature = "nitro")]
 pub mod nitro;
 
 use std::{
@@ -19,7 +20,7 @@ use pccs::{Pccs, PccsError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy, nitro::NitroError};
+use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy};
 
 /// Used in attestation type detection to check if we are on GCP
 const GCP_METADATA_API: &str = "http://metadata.google.internal";
@@ -61,7 +62,16 @@ impl AttestationExchangeMessage {
                     .map_err(DcapVerificationError::from)?;
                 Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
             }
-            AttestationType::AwsNitro => Ok(Some(nitro::get_measurements(&self.attestation)?)),
+            AttestationType::AwsNitro => {
+                #[cfg(feature = "nitro")]
+                {
+                    Ok(Some(nitro::get_measurements(&self.attestation)?))
+                }
+                #[cfg(not(feature = "nitro"))]
+                {
+                    Err(AttestationError::AttestationTypeNotSupported)
+                }
+            }
         }
     }
 }
@@ -107,8 +117,11 @@ impl AttestationType {
                 return Ok(AttestationType::AzureTdx);
             }
         }
-        if nitro::running_on_nitro() {
-            return Ok(AttestationType::AwsNitro);
+        #[cfg(feature = "nitro")]
+        {
+            if nitro::running_on_nitro() {
+                return Ok(AttestationType::AwsNitro);
+            }
         }
         // Otherwise try DCAP quote - this internally checks that the quote provider
         // is `tdx_guest`
@@ -243,7 +256,19 @@ impl AttestationGenerator {
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
                 dcap::create_dcap_attestation(input_data)
             }
-            AttestationType::AwsNitro => Ok(nitro::create_nitro_attestation(input_data)?),
+            AttestationType::AwsNitro => {
+                #[cfg(feature = "nitro")]
+                {
+                    Ok(nitro::create_nitro_attestation(input_data)?)
+                }
+                #[cfg(not(feature = "nitro"))]
+                {
+                    tracing::error!(
+                        "Attempted to generate an AWS Nitro attestation but the `nitro` feature is not enabled"
+                    );
+                    Err(AttestationError::AttestationTypeNotSupported)
+                }
+            }
         }
     }
 
@@ -413,10 +438,19 @@ impl AttestationVerifier {
                 )
                 .await?
             }
-            AttestationType::AwsNitro => nitro::verify_nitro_attestation(
-                attestation_exchange_message.attestation,
-                expected_input_data,
-            )?,
+            AttestationType::AwsNitro => {
+                #[cfg(feature = "nitro")]
+                {
+                    nitro::verify_nitro_attestation(
+                        attestation_exchange_message.attestation,
+                        expected_input_data,
+                    )?
+                }
+                #[cfg(not(feature = "nitro"))]
+                {
+                    return Err(AttestationError::AttestationTypeNotSupported);
+                }
+            }
         };
 
         // Do a measurement / attestation type policy check
@@ -478,10 +512,19 @@ impl AttestationVerifier {
                     pccs,
                 )?
             }
-            AttestationType::AwsNitro => nitro::verify_nitro_attestation(
-                attestation_exchange_message.attestation,
-                expected_input_data,
-            )?,
+            AttestationType::AwsNitro => {
+                #[cfg(feature = "nitro")]
+                {
+                    nitro::verify_nitro_attestation(
+                        attestation_exchange_message.attestation,
+                        expected_input_data,
+                    )?
+                }
+                #[cfg(not(feature = "nitro"))]
+                {
+                    return Err(AttestationError::AttestationTypeNotSupported);
+                }
+            }
         };
 
         // Do a measurement / attestation type policy check
@@ -601,8 +644,9 @@ pub enum AttestationError {
     QuoteGeneration(#[from] tdx_attest::TdxAttestError),
     #[error("DCAP verification: {0}")]
     DcapVerification(#[from] DcapVerificationError),
+    #[cfg(feature = "nitro")]
     #[error("Nitro attestation: {0}")]
-    Nitro(#[from] NitroError),
+    Nitro(#[from] nitro::NitroError),
     #[error("Attestation type not supported")]
     AttestationTypeNotSupported,
     #[error("Attestation type not accepted")]
