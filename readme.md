@@ -46,6 +46,8 @@ More details in the individual READMEs of the provided crates:
 - [`mock-tdx`](./crates/mock-tdx) - generates deterministic mock TDX DCAP
   quotes, collateral, and trust roots for tests and development on non-TDX
   hardware.
+- [`attestation-provider-server`](./crates/attestation-provider-server) -
+  HTTP server and client for attestation generation and verification.
 
 The included `shell.nix` file can be used with `nix-shell`, `direnv`, or `nix
 develop` to add the dependencies needed by the optional `azure` feature of the
