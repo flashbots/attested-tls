@@ -668,7 +668,6 @@ mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::measurements::MeasurementPolicy;
 
     fn input_data_from_attestation(attestation_bytes: &[u8]) -> [u8; 64] {
         let attestation_document: AttestationDocument =
@@ -695,76 +694,11 @@ mod tests {
         assert_eq!(hex::decode(var_data_values["user-data"].as_str().unwrap()).unwrap().len(), 64);
     }
 
-    /// Verify a stored attestation from a test-deployment on azure
-    #[tokio::test]
-    async fn test_verify() {
-        let attestation_bytes: &'static [u8] =
-            include_bytes!("../../test-assets/azure-tdx-1764662251380464271.yaml");
-
-        // To avoid this test stopping working when the certificate is no longer
-        // valid we pass in a timestamp
-        let now = 1771423480;
-
-        let measurements_json = br#"
-        [{
-            "measurement_id": "cvm-image-azure-tdx.rootfs-20241107200854.wic.vhd",
-            "attestation_type": "azure-tdx",
-            "measurements": {
-                "4": {
-                    "expected": "c4a25a6d7704629f63db84d20ea8db0e9ce002b2801be9a340091fe7ac588699"
-                },
-                "9": {
-                    "expected": "9f4a5775122ca4703e135a9ae6041edead0064262e399df11ca85182b0f1541d"
-                },
-                "11": {
-                    "expected": "abd7c695ffdb6081e99636ee016d1322919c68d049b698b399d22ae215a121bf"
-                }
-            }
-        }]
-        "#;
-
-        let measurement_policy =
-            MeasurementPolicy::from_json_bytes(measurements_json.to_vec()).unwrap();
-
-        let collateral_bytes: &'static [u8] =
-            include_bytes!("../../test-assets/azure-collateral02.yaml");
-
-        let async_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
-        let sync_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
-        let attestation_json = serde_json::to_vec(
-            &serde_saphyr::from_slice::<AttestationDocument>(attestation_bytes).unwrap(),
-        )
-        .unwrap();
-
-        let async_measurements = verify_azure_attestation_with_given_timestamp(
-            attestation_json.clone(),
-            [0; 64], // Input data
-            None,
-            async_collateral,
-            now,
-            false,
-        )
-        .await
-        .unwrap();
-
-        let sync_measurements = verify_azure_attestation_with_given_timestamp_sync(
-            attestation_json,
-            [0; 64], // Input data
-            Pccs::new_without_prewarm(None),
-            sync_collateral,
-            now,
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(async_measurements, sync_measurements);
-        measurement_policy.check_measurement(&async_measurements).unwrap();
-    }
-
     /// Verify a complete observed Azure attestation payload that includes
     /// AK intermediates fetched from the leaf certificate's AIA URLs.
     #[tokio::test]
-    async fn test_verify_with_observed_ak_intermediates() {
+    async fn test_verify() {
+        // generated using [capture_azure_fixture] above.
         let attestation_bytes: &'static [u8] =
             include_bytes!("../../test-assets/azure-tdx-with-ak-intermediates-1780922561.yaml");
         let collateral_bytes: &'static [u8] = include_bytes!(
