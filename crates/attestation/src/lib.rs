@@ -23,6 +23,12 @@ use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy};
 /// Used in attestation type detection to check if we are on GCP
 const GCP_METADATA_API: &str = "http://metadata.google.internal";
 
+/// Maximum response size accepted from an external attestation provider.
+///
+/// This bounds untrusted provider responses so a malicious or buggy local
+/// service cannot force unbounded memory growth.
+const MAX_ATTESTATION_PROVIDER_RESPONSE_BYTES: u64 = 128 * 1024;
+
 /// An attestation payload together with its type
 #[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
 pub struct AttestationExchangeMessage {
@@ -247,15 +253,21 @@ impl AttestationGenerator {
     ) -> Result<AttestationExchangeMessage, AttestationError> {
         let url = format!("{}/attest/{}", url, hex::encode(input_data));
 
-        let mut response = ureq::get(&url)
+        let response = ureq::get(&url)
             .timeout(Duration::from_millis(1000))
             .call()
             .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?
             .into_reader();
         let mut body = Vec::new();
         response
+            .take(MAX_ATTESTATION_PROVIDER_RESPONSE_BYTES + 1)
             .read_to_end(&mut body)
             .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?;
+        if body.len() as u64 > MAX_ATTESTATION_PROVIDER_RESPONSE_BYTES {
+            return Err(AttestationError::AttestationProviderResponseTooLarge {
+                actual_bytes: body.len(),
+            });
+        }
 
         // If the response is not already wrapped in an attestation exchange
         // message, wrap it in one
@@ -599,6 +611,10 @@ pub enum AttestationError {
     AttestationTypeNotGiven,
     #[error("Attestation provider server: {0}")]
     AttestationProvider(String),
+    #[error(
+        "Attestation provider response too large: {actual_bytes} bytes (max {MAX_ATTESTATION_PROVIDER_RESPONSE_BYTES})"
+    )]
+    AttestationProviderResponseTooLarge { actual_bytes: usize },
     #[error("Attestation provider URL: {0}")]
     AttestationProviderUrl(String),
     #[error("JSON: {0}")]
@@ -686,6 +702,27 @@ mod tests {
         .unwrap();
         assert_eq!(wrapped.attestation_type, AttestationType::DcapTdx);
         assert_eq!(wrapped.attestation, vec![9, 8]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attestation_provider_response_is_capped() {
+        let input_data = [0u8; 64];
+        let oversized_body = vec![0u8; (MAX_ATTESTATION_PROVIDER_RESPONSE_BYTES as usize) + 1];
+        let addr = spawn_test_attestation_provider_server(oversized_body).await;
+        let url = format!("http://{addr}");
+
+        let err = AttestationGenerator::use_attestation_provider(
+            &url,
+            AttestationType::DcapTdx,
+            input_data,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            AttestationError::AttestationProviderResponseTooLarge { actual_bytes }
+                if actual_bytes == (MAX_ATTESTATION_PROVIDER_RESPONSE_BYTES as usize) + 1
+        ));
     }
 
     #[tokio::test]
