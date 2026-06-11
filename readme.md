@@ -51,3 +51,14 @@ The included `shell.nix` file can be used with `nix-shell`, `direnv`, or `nix
 develop` to add the dependencies needed by the optional `azure` feature of the
 `attestation` crate on Linux.  See the
 [`attestation` crate readme](./crates/attestation) for details.
+
+The root `flake.nix` also provides a Nitro benchmark image and a small vsock
+listener for the EC2 parent:
+
+```bash
+nix build .#nitro-attestation-bench-image
+nix run .#listen -- 5005
+```
+
+The enclave image runs `nitro_attestation_bench`, prints the summary locally,
+and forwards the same output over vsock to port `5005` on parent CID `3`.
