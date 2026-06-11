@@ -21,7 +21,7 @@ const AWS_ROOT_CERT_DER: &[u8] = include_bytes!("../assets/aws-nitro-enclaves-ro
 /// Generate a Nitro attestation document using the Nitro Secure Module.
 pub fn create_nitro_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, NitroError> {
     let nitro = Nitro::init();
-    request_attestation(&nitro, input_data)
+    create_nitro_attestation_with_driver(&nitro, input_data)
 }
 
 /// Return true if we can successfully talk to the Nitro Secure Module.
@@ -30,7 +30,13 @@ pub(crate) fn running_on_nitro() -> bool {
     matches!(nitro.process_request(Request::DescribeNSM), Response::DescribeNSM { .. })
 }
 
-fn request_attestation(driver: &impl Driver, input_data: [u8; 64]) -> Result<Vec<u8>, NitroError> {
+/// Generate a Nitro attestation with given Nitro driver.
+/// Re-using the Nitro when generating multiple attestations gives a very
+/// small performance gain as we keep the file descriptor for `/dev/nsm`.
+pub fn create_nitro_attestation_with_driver(
+    driver: &impl Driver,
+    input_data: [u8; 64],
+) -> Result<Vec<u8>, NitroError> {
     match driver.process_request(Request::Attestation {
         nonce: Some(ByteBuf::from(input_data.to_vec())),
         user_data: None,
