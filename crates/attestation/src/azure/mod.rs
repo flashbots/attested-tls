@@ -668,7 +668,7 @@ mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::measurements::MeasurementPolicy;
+    use crate::{AttestationType, measurements::MeasurementPolicy};
 
     fn input_data_from_attestation(attestation_bytes: &[u8]) -> [u8; 64] {
         let attestation_document: AttestationDocument =

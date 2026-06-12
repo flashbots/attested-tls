@@ -410,9 +410,8 @@ impl AttestationVerifier {
                 }
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                let attestation = attestation_exchange_message.attestation;
                 let (measurements, quote) = dcap::verify_dcap_attestation(
-                    attestation.clone(),
+                    attestation_exchange_message.attestation,
                     expected_input_data,
                     self.internal_pccs.clone(),
                 )
@@ -473,7 +472,6 @@ impl AttestationVerifier {
                 }
             }
             AttestationType::DcapTdx | AttestationType::QemuTdx | AttestationType::GcpTdx => {
-                let attestation = attestation_exchange_message.attestation;
                 #[cfg(any(test, feature = "mock"))]
                 let pccs =
                     self.internal_pccs.clone().unwrap_or_else(|| Pccs::new_without_prewarm(None));
@@ -481,7 +479,7 @@ impl AttestationVerifier {
                 let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
 
                 let (measurements, quote) = dcap::verify_dcap_attestation_sync(
-                    attestation.clone(),
+                    attestation_exchange_message.attestation,
                     expected_input_data,
                     pccs,
                 )?;
