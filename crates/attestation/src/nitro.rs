@@ -91,7 +91,7 @@ fn decode_with_accepted_roots(input: &[u8]) -> Result<AttestationDoc, NitroError
     match production_result {
         Ok(doc) => Ok(doc),
         Err(production_error) => {
-            #[cfg(feature = "mock-nitro")]
+            #[cfg(test)]
             {
                 let mock_root = mock_nitro_root_cert_der()?;
                 if let Ok(doc) = decode_with_root(input, &mock_root) {
@@ -154,7 +154,7 @@ fn measurements_from_doc(doc: &AttestationDoc) -> Result<MultiMeasurements, Nitr
 }
 
 /// Generate a mock Nitro root of trust certificate chain
-#[cfg(feature = "mock-nitro")]
+#[cfg(test)]
 fn mock_nitro_pki() -> &'static nsm_nitro_enclave_utils_keygen::NsmCertChain {
     use std::time::Duration;
 
@@ -168,7 +168,7 @@ fn mock_nitro_pki() -> &'static nsm_nitro_enclave_utils_keygen::NsmCertChain {
 }
 
 /// Get mock Nitro root of trust certificate encoded as DER
-#[cfg(feature = "mock-nitro")]
+#[cfg(test)]
 fn mock_nitro_root_cert_der() -> Result<Vec<u8>, NitroError> {
     use nsm_nitro_enclave_utils_keygen::DerEncodeExt;
 
@@ -176,7 +176,7 @@ fn mock_nitro_root_cert_der() -> Result<Vec<u8>, NitroError> {
 }
 
 /// PCR values for mock Nitro attestations
-#[cfg(feature = "mock-nitro")]
+#[cfg(test)]
 fn mock_nitro_pcrs() -> nsm_nitro_enclave_utils::pcr::Pcrs {
     use std::collections::BTreeMap;
 
@@ -192,10 +192,9 @@ fn mock_nitro_pcrs() -> nsm_nitro_enclave_utils::pcr::Pcrs {
     ]))
 }
 
-/// Create a locally signed mock Nitro attestation document for tests and
-/// local development.
-#[cfg(feature = "mock-nitro")]
-pub fn create_mock_nitro_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, NitroError> {
+/// Create a locally signed mock Nitro attestation document for tests.
+#[cfg(test)]
+fn create_mock_nitro_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, NitroError> {
     use nsm_nitro_enclave_utils::{api::SecretKey, driver::dev::DevNitro};
     use nsm_nitro_enclave_utils_keygen::DerEncodeExt;
 
@@ -216,12 +215,12 @@ pub fn create_mock_nitro_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, Ni
     .pcrs(mock_nitro_pcrs())
     .build();
 
-    request_attestation(&nitro, input_data)
+    create_nitro_attestation_with_driver(&nitro, input_data)
 }
 
-/// Mock Nitro PCR values used in tests and local development.
-#[cfg(feature = "mock-nitro")]
-pub fn mock_nitro_measurements() -> MultiMeasurements {
+/// Mock Nitro PCR values used in tests.
+#[cfg(test)]
+pub(crate) fn mock_nitro_measurements() -> MultiMeasurements {
     use nsm_nitro_enclave_utils::pcr::PcrIndex;
 
     let pcrs = mock_nitro_pcrs();
@@ -254,7 +253,7 @@ pub enum NitroError {
     InvalidPcrIndex(usize),
     #[error("Nitro PCR {index} has length {actual}, expected {expected}")]
     BadPcrLength { index: u32, expected: usize, actual: usize },
-    #[cfg(feature = "mock-nitro")]
+    #[cfg(test)]
     #[error("Mock Nitro PKI: {0}")]
     MockPki(String),
 }
@@ -368,7 +367,6 @@ mod tests {
         assert_eq!(measurements, expected);
     }
 
-    #[cfg(feature = "mock-nitro")]
     #[tokio::test]
     async fn mock_nitro_verifier_supports_async_and_sync_verification() {
         use crate::{AttestationExchangeMessage, AttestationType, AttestationVerifier};
@@ -388,7 +386,6 @@ mod tests {
         assert_eq!(sync_measurements, mock_nitro_measurements());
     }
 
-    #[cfg(feature = "mock-nitro")]
     #[test]
     fn nonce_mismatch_is_rejected() {
         let attestation = create_mock_nitro_attestation([1u8; 64]).unwrap();

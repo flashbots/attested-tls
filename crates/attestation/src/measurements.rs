@@ -422,23 +422,26 @@ impl MeasurementPolicy {
             ])),
         };
 
-        #[cfg(feature = "mock-nitro")]
+        #[cfg(test)]
         {
-            let mut accepted_measurements = vec![dcap_measurements];
             let nitro_measurements = match crate::nitro::mock_nitro_measurements() {
                 MultiMeasurements::Nitro(measurements) => {
                     measurements.into_iter().map(|(index, value)| (index, vec![value])).collect()
                 }
-                _ => unreachable!("mock_nitro_measurements must return Nitro measurements"),
+                _ => unreachable!(),
             };
-            accepted_measurements.push(MeasurementRecord {
-                measurement_id: "test-nitro".to_string(),
-                measurements: ExpectedMeasurements::Nitro(nitro_measurements),
-            });
-            Self { accepted_measurements }
+            Self {
+                accepted_measurements: vec![
+                    dcap_measurements,
+                    MeasurementRecord {
+                        measurement_id: "test-nitro".to_string(),
+                        measurements: ExpectedMeasurements::Nitro(nitro_measurements),
+                    },
+                ],
+            }
         }
 
-        #[cfg(not(feature = "mock-nitro"))]
+        #[cfg(not(test))]
         {
             Self { accepted_measurements: vec![dcap_measurements] }
         }

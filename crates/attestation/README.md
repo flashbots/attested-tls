@@ -62,13 +62,6 @@ development on non-TDX hardware.
 
 Do not use in production. Disabled by default.
 
-### `mock-nitro`
-
-Enables locally signed mock Nitro attestation documents for tests and
-development on non-Nitro hardware. This feature also enables `mock` and
-`nitro`.
-
-Do not use in production. Disabled by default.
 
 ## Attestation Types
 
