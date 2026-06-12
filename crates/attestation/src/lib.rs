@@ -21,7 +21,7 @@ use thiserror::Error;
 
 use crate::{
     dcap::DcapVerificationError,
-    gcp::GcpProvenanceError,
+    gcp::{GcpProvenanceChecker, GcpProvenanceError},
     measurements::MeasurementPolicy,
 };
 
@@ -289,6 +289,8 @@ pub struct AttestationVerifier {
     pub override_azure_outdated_tcb: bool,
     /// Internal cache for collateral
     pub internal_pccs: Option<Pccs>,
+    /// Internal cache for known GCP PPIDs
+    gcp_provenance_checker: GcpProvenanceChecker,
 }
 
 impl AttestationVerifier {
@@ -304,6 +306,7 @@ impl AttestationVerifier {
             dump_dcap_quotes,
             override_azure_outdated_tcb,
             internal_pccs: Some(Pccs::new(pccs_url)),
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -316,6 +319,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: None,
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -328,6 +332,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: None,
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -340,6 +345,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: Some(Pccs::new(Some(pccs_url))),
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -413,7 +419,7 @@ impl AttestationVerifier {
                 .await?;
 
                 if attestation_type == AttestationType::GcpTdx {
-                    gcp::verify_provenance(quote).await?;
+                    self.gcp_provenance_checker.verify_provenance(quote).await?;
                 }
 
                 measurements
@@ -481,7 +487,7 @@ impl AttestationVerifier {
                 )?;
 
                 if attestation_type == AttestationType::GcpTdx {
-                    gcp::verify_provenance_sync(&quote)?;
+                    self.gcp_provenance_checker.verify_provenance_sync(&quote)?;
                 }
 
                 measurements

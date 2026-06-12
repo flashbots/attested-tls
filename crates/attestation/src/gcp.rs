@@ -1,4 +1,9 @@
-use std::{io::Read, time::Duration};
+use std::{
+    collections::HashSet,
+    io::Read,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use dcap_qvl::{intel, quote::Quote};
 use serde_json::Value;
@@ -11,32 +16,61 @@ const GCP_PROVENANCE_REGISTRY_URL: &str =
 /// Maximum size in bytes of GCP provenance documents
 const GCP_PROVENANCE_DOCUMENT_MAX_BYTES: u64 = 16 * 1024;
 
-/// Given a DCAP TDX quote, check if the associated PPID has a 'provenance
-/// document' from GCP
-pub(crate) async fn verify_provenance(quote: Quote) -> Result<(), GcpProvenanceError> {
-    tokio::task::spawn_blocking(move || {
-        verify_provenance_with_registry_url_sync(&quote, GCP_PROVENANCE_REGISTRY_URL)
-    })
-    .await
-    .map_err(|err| GcpProvenanceError::TaskJoin(err.to_string()))?
+#[derive(Clone, Debug)]
+pub(crate) struct GcpProvenanceChecker {
+    known_gcp_ppids: Arc<RwLock<HashSet<Vec<u8>>>>,
 }
 
-/// Given a DCAP TDX quote, check if the associated PPID has a 'provenance
-/// document' from GCP
-pub(crate) fn verify_provenance_sync(quote: &Quote) -> Result<(), GcpProvenanceError> {
-    verify_provenance_with_registry_url_sync(quote, GCP_PROVENANCE_REGISTRY_URL)
-}
+impl GcpProvenanceChecker {
+    pub(crate) fn new() -> Self {
+        Self { known_gcp_ppids: Default::default() }
+    }
 
-fn verify_provenance_with_registry_url_sync(
-    quote: &Quote,
-    registry_url: &str,
-) -> Result<(), GcpProvenanceError> {
-    let ppid = extract_ppid_from_quote(quote)?;
-    let provenance_url = format!("{}/{}", registry_url.trim_end_matches('/'), hex::encode(ppid));
-    let document = fetch_provenance_document(&provenance_url)?;
-    validate_provenance_document(&document)?;
+    /// Given a DCAP TDX quote, check if the associated PPID has a
+    /// 'provenance document' from GCP
+    pub(crate) async fn verify_provenance(&self, quote: Quote) -> Result<(), GcpProvenanceError> {
+        let checker = self.clone();
+        tokio::task::spawn_blocking(move || {
+            checker.verify_provenance_with_registry_url_sync(&quote, GCP_PROVENANCE_REGISTRY_URL)
+        })
+        .await
+        .map_err(|err| GcpProvenanceError::TaskJoin(err.to_string()))?
+    }
 
-    Ok(())
+    /// Given a DCAP TDX quote, check if the associated PPID has a
+    /// 'provenance document' from GCP
+    pub(crate) fn verify_provenance_sync(&self, quote: &Quote) -> Result<(), GcpProvenanceError> {
+        self.verify_provenance_with_registry_url_sync(quote, GCP_PROVENANCE_REGISTRY_URL)
+    }
+
+    fn verify_provenance_with_registry_url_sync(
+        &self,
+        quote: &Quote,
+        registry_url: &str,
+    ) -> Result<(), GcpProvenanceError> {
+        let ppid = extract_ppid_from_quote(quote)?;
+        {
+            let known_gcp_ppids = self
+                .known_gcp_ppids
+                .read()
+                .map_err(|err| GcpProvenanceError::CacheLock(err.to_string()))?;
+            if known_gcp_ppids.contains(&ppid) {
+                return Ok(());
+            }
+        }
+
+        let provenance_url =
+            format!("{}/{}", registry_url.trim_end_matches('/'), hex::encode(&ppid));
+        let document = fetch_provenance_document(&provenance_url)?;
+        validate_provenance_document(&document)?;
+
+        self.known_gcp_ppids
+            .write()
+            .map_err(|err| GcpProvenanceError::CacheLock(err.to_string()))?
+            .insert(ppid);
+
+        Ok(())
+    }
 }
 
 fn extract_ppid_from_quote(quote: &Quote) -> Result<Vec<u8>, GcpProvenanceError> {
@@ -103,6 +137,8 @@ pub enum GcpProvenanceError {
     DocumentTooLarge,
     #[error("provenance document JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("provenance cache lock: {0}")]
+    CacheLock(String),
     #[error("blocking task join: {0}")]
     TaskJoin(String),
 }
@@ -163,7 +199,27 @@ mod tests {
             r#"{"zone":"projects/test/zones/us-central1-a","timestamp":"2026-06-11T00:00:00Z"}"#,
         );
 
-        verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}")).unwrap();
+        GcpProvenanceChecker::new()
+            .verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}"))
+            .unwrap();
+
+        let request = request_handle.join().unwrap();
+        assert!(request.starts_with(&format!("GET /{MOCK_PPID_HEX} HTTP/1.1")));
+    }
+
+    #[test]
+    fn provenance_check_caches_known_gcp_ppids() {
+        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let quote = Quote::parse(&attestation).unwrap();
+        let (addr, request_handle) = spawn_test_registry_server(
+            200,
+            r#"{"zone":"projects/test/zones/us-central1-a","timestamp":"2026-06-11T00:00:00Z"}"#,
+        );
+        let checker = GcpProvenanceChecker::new();
+        let registry_url = format!("http://{addr}");
+
+        checker.verify_provenance_with_registry_url_sync(&quote, &registry_url).unwrap();
+        checker.verify_provenance_with_registry_url_sync(&quote, &registry_url).unwrap();
 
         let request = request_handle.join().unwrap();
         assert!(request.starts_with(&format!("GET /{MOCK_PPID_HEX} HTTP/1.1")));
@@ -175,7 +231,8 @@ mod tests {
         let quote = Quote::parse(&attestation).unwrap();
         let (addr, request_handle) = spawn_test_registry_server(404, "not found");
 
-        let err = verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}"))
+        let err = GcpProvenanceChecker::new()
+            .verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}"))
             .unwrap_err();
 
         request_handle.join().unwrap();
@@ -188,7 +245,8 @@ mod tests {
         let quote = Quote::parse(&attestation).unwrap();
         let (addr, request_handle) = spawn_test_registry_server(200, r#"{"zone":""}"#);
 
-        let err = verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}"))
+        let err = GcpProvenanceChecker::new()
+            .verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}"))
             .unwrap_err();
 
         request_handle.join().unwrap();
@@ -202,7 +260,8 @@ mod tests {
         let oversized_body = "x".repeat((GCP_PROVENANCE_DOCUMENT_MAX_BYTES + 1) as usize);
         let (addr, request_handle) = spawn_test_registry_server(200, oversized_body);
 
-        let err = verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}"))
+        let err = GcpProvenanceChecker::new()
+            .verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}"))
             .unwrap_err();
 
         request_handle.join().unwrap();
