@@ -62,7 +62,6 @@ development on non-TDX hardware.
 
 Do not use in production. Disabled by default.
 
-
 ## Attestation Types
 
 These are the attestation type names used in the measurements file.

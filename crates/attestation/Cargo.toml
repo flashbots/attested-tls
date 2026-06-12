@@ -67,6 +67,5 @@ nitro = [
 # Allows mock quotes used in tests and exposes related functions for testing
 mock = ["dep:mock-tdx"]
 
-
 [lints]
 workspace = true

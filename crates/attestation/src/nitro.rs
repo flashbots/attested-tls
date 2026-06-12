@@ -84,9 +84,10 @@ fn decode_without_verification(input: &[u8]) -> Result<AttestationDoc, NitroErro
 }
 
 /// Decode an attestation document, checking against AWS root of trust, or
-/// mock root of trust if compiled in test or mock mode
+/// mock root of trust in test mode.
 fn decode_with_accepted_roots(input: &[u8]) -> Result<AttestationDoc, NitroError> {
     let production_result = decode_with_root(input, AWS_ROOT_CERT_DER);
+    // cfg-gated test fallback in the Err arm requires the match form
     #[allow(clippy::needless_match)]
     match production_result {
         Ok(doc) => Ok(doc),
