@@ -63,6 +63,22 @@ struct TpmAttest {
     instance_info: Option<Vec<u8>>,
 }
 
+/// Maximum serialized Azure attestation evidence payload size produced
+/// during generation and accepted during verification.
+///
+/// Observed Azure TDX vTPM payloads, including AIA-fetched AK
+/// intermediates, are about 30 KiB. This limit leaves headroom for normal
+/// chain/quote growth while rejecting oversized JSON/base64/PEM blobs
+/// before deserializing them into owned strings and byte vectors.
+///
+/// Transports are expected to bound reads at the network edge, before the
+/// payload is ever buffered (e.g. rustls currently caps TLS certificates,
+/// which carry this evidence, at 64 KiB). This check is the library's own
+/// explicit fail-closed limit, so verification stays safe regardless of
+/// which transport delivered the evidence and of transport-internal limits
+/// changing.
+const MAX_AZURE_ATTESTATION_PAYLOAD_SIZE: usize = 128 * 1024;
+
 /// Maximum number of Azure vTPM AK intermediate certificates to fetch
 /// during generation and accept during verification.
 ///
@@ -71,6 +87,17 @@ struct TpmAttest {
 /// use 1-2 intermediates. Verification still pins Azure roots and fails
 /// closed if this bound prevents collecting a complete chain.
 const MAX_EVIDENCE_AK_INTERMEDIATE_CERTIFICATES: usize = 8;
+
+fn ensure_azure_attestation_payload_size(input: &[u8]) -> Result<(), MaaError> {
+    if input.len() > MAX_AZURE_ATTESTATION_PAYLOAD_SIZE {
+        return Err(MaaError::AzureAttestationPayloadTooLarge {
+            actual: input.len(),
+            max: MAX_AZURE_ATTESTATION_PAYLOAD_SIZE,
+        });
+    }
+
+    Ok(())
+}
 
 fn deserialize_ak_intermediate_certificates_pem<'de, D>(
     deserializer: D,
@@ -157,7 +184,11 @@ pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaErro
     };
 
     tracing::info!("Successfully generated azure attestation: {attestation_document:?}");
-    Ok(serde_json::to_vec(&attestation_document)?)
+    let attestation_json = serde_json::to_vec(&attestation_document)?;
+    // If this ever fails, then we have a problem and probably just need to
+    // increase MAX_AZURE_ATTESTATION_PAYLOAD_SIZE
+    ensure_azure_attestation_payload_size(&attestation_json)?;
+    Ok(attestation_json)
 }
 
 /// Verify a TDX attestation from Azure
@@ -278,6 +309,8 @@ fn verify_azure_attestation_with_given_timestamp_sync(
 
 /// Parses the attestation during verification
 fn prepare_azure_attestation(input: Vec<u8>) -> Result<PreparedAzureAttestation, MaaError> {
+    ensure_azure_attestation_payload_size(&input)?;
+
     let attestation_document: AttestationDocument = serde_json::from_slice(&input)?;
     tracing::info!("Attempting to verify azure attestation: {attestation_document:?}");
 
@@ -382,8 +415,11 @@ fn finish_azure_attestation_verification(
 }
 
 /// Extract the measurements from the attestation, but do not verify
-/// anything
+/// anything. input must be < [MAX_AZURE_ATTESTATION_PAYLOAD_SIZE],
+/// otherwise an error is returned.
 pub fn get_measurements(input: &[u8]) -> Result<MultiMeasurements, MaaError> {
+    ensure_azure_attestation_payload_size(input)?;
+
     let attestation_document: AttestationDocument = serde_json::from_slice(input)?;
     let vtpm_quote = attestation_document.tpm_attestation.quote;
     let pcrs = vtpm_quote.pcrs_sha256();
@@ -510,6 +546,8 @@ pub enum MaaError {
     VtpmReport(#[from] az_tdx_vtpm::vtpm::ReportError),
     #[error("HCL: {0}")]
     Hcl(#[from] hcl::HclError),
+    #[error("Azure attestation evidence payload is too large: {actual} bytes > {max} bytes")]
+    AzureAttestationPayloadTooLarge { actual: usize, max: usize },
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("System time before Unix epoch: {0}")]
@@ -679,6 +717,73 @@ mod tests {
         let claims: HclRuntimeClaims = serde_json::from_slice(hcl_report.var_data()).unwrap();
         let user_data_hex = claims.user_data.unwrap();
         hex::decode(user_data_hex).unwrap().try_into().unwrap()
+    }
+
+    fn assert_payload_too_large(err: MaaError, actual: usize) {
+        match err {
+            MaaError::AzureAttestationPayloadTooLarge { actual: got, max } => {
+                assert_eq!(got, actual);
+                assert_eq!(max, MAX_AZURE_ATTESTATION_PAYLOAD_SIZE);
+            }
+            err => panic!("unexpected error: {err}"),
+        }
+    }
+
+    #[test]
+    fn get_measurements_rejects_oversized_payload_before_deserialize() {
+        let actual = MAX_AZURE_ATTESTATION_PAYLOAD_SIZE + 1;
+        let input = vec![b'{'; actual];
+
+        let err = match get_measurements(&input) {
+            Ok(_) => panic!("oversized payload should fail"),
+            Err(err) => err,
+        };
+
+        assert_payload_too_large(err, actual);
+    }
+
+    /// All verification entry points must reject an oversized payload, and
+    /// must do so before attempting DCAP verification (no collateral or
+    /// usable PCCS is provided here).
+    #[tokio::test]
+    async fn verify_rejects_oversized_payload_before_deserialize() {
+        let actual = MAX_AZURE_ATTESTATION_PAYLOAD_SIZE + 1;
+        let input = vec![b'{'; actual];
+
+        let err = verify_azure_attestation(input.clone(), [0; 64], None, false).await.unwrap_err();
+        assert_payload_too_large(err, actual);
+
+        let err = verify_azure_attestation_sync(
+            input.clone(),
+            [0; 64],
+            Pccs::new_without_prewarm(None),
+            false,
+        )
+        .unwrap_err();
+        assert_payload_too_large(err, actual);
+
+        let err = verify_azure_attestation_with_given_timestamp(
+            input.clone(),
+            [0; 64],
+            None,
+            None,
+            0,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_payload_too_large(err, actual);
+
+        let err = verify_azure_attestation_with_given_timestamp_sync(
+            input,
+            [0; 64],
+            Pccs::new_without_prewarm(None),
+            None,
+            0,
+            false,
+        )
+        .unwrap_err();
+        assert_payload_too_large(err, actual);
     }
 
     #[tokio::test]
