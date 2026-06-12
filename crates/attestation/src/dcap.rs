@@ -298,7 +298,7 @@ mod tests {
     use mock_tdx::{MockPcsConfig, spawn_mock_pcs_server};
 
     use super::*;
-    use crate::measurements::MeasurementPolicy;
+    use crate::{AttestationType, measurements::MeasurementPolicy};
 
     #[tokio::test]
     async fn test_dcap_verify() {
@@ -364,7 +364,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(async_measurements, sync_measurements);
-        measurement_policy.check_measurement(&async_measurements).unwrap();
+        measurement_policy
+            .check_measurement(AttestationType::DcapTdx, &async_measurements)
+            .unwrap();
     }
 
     // This specifically tests a quote which has outdated TCB level from Azure
