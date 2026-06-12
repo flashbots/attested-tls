@@ -3,6 +3,7 @@
 #[cfg(feature = "azure")]
 pub mod azure;
 pub mod dcap;
+mod gcp;
 pub mod measurements;
 
 use std::{
@@ -12,23 +13,20 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use dcap_qvl::{intel, quote::Quote};
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
 use pccs::{Pccs, PccsError};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use thiserror::Error;
 
-use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy};
+use crate::{
+    dcap::DcapVerificationError,
+    gcp::GcpProvenanceError,
+    measurements::MeasurementPolicy,
+};
 
 /// Used in attestation type detection to check if we are on GCP
 const GCP_METADATA_API: &str = "http://metadata.google.internal";
-/// Public registry of GCP Confidential VM TDX PPIDs.
-const GCP_PROVENANCE_REGISTRY_URL: &str =
-    "https://storage.googleapis.com/confidential-host-registry";
-/// GCP provenance documents are small JSON payloads. Cap reads defensively.
-const GCP_PROVENANCE_DOCUMENT_MAX_BYTES: u64 = 16 * 1024;
 
 /// An attestation payload together with its type
 #[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
@@ -407,15 +405,17 @@ impl AttestationVerifier {
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
                 let attestation = attestation_exchange_message.attestation;
-                let measurements = dcap::verify_dcap_attestation(
+                let (measurements, quote) = dcap::verify_dcap_attestation(
                     attestation.clone(),
                     expected_input_data,
                     self.internal_pccs.clone(),
                 )
                 .await?;
+
                 if attestation_type == AttestationType::GcpTdx {
-                    verify_gcp_provenance(attestation).await?;
+                    gcp::verify_provenance(quote).await?;
                 }
+
                 measurements
             }
         };
@@ -474,14 +474,16 @@ impl AttestationVerifier {
                 #[cfg(not(any(test, feature = "mock")))]
                 let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
 
-                let measurements = dcap::verify_dcap_attestation_sync(
+                let (measurements, quote) = dcap::verify_dcap_attestation_sync(
                     attestation.clone(),
                     expected_input_data,
                     pccs,
                 )?;
+
                 if attestation_type == AttestationType::GcpTdx {
-                    verify_gcp_provenance_sync(&attestation)?;
+                    gcp::verify_provenance_sync(&quote)?;
                 }
+
                 measurements
             }
         };
@@ -588,101 +590,6 @@ fn is_local_ip(ip: IpAddr) -> bool {
     }
 }
 
-async fn verify_gcp_provenance(quote_bytes: Vec<u8>) -> Result<(), GcpProvenanceError> {
-    tokio::task::spawn_blocking(move || {
-        verify_gcp_provenance_with_registry_url_sync(&quote_bytes, GCP_PROVENANCE_REGISTRY_URL)
-    })
-    .await
-    .map_err(|err| GcpProvenanceError::TaskJoin(err.to_string()))?
-}
-
-fn verify_gcp_provenance_sync(quote_bytes: &[u8]) -> Result<(), GcpProvenanceError> {
-    verify_gcp_provenance_with_registry_url_sync(quote_bytes, GCP_PROVENANCE_REGISTRY_URL)
-}
-
-fn verify_gcp_provenance_with_registry_url_sync(
-    quote_bytes: &[u8],
-    registry_url: &str,
-) -> Result<(), GcpProvenanceError> {
-    let quote =
-        Quote::parse(quote_bytes).map_err(|err| GcpProvenanceError::Quote(err.to_string()))?;
-
-    let ppid = extract_ppid_from_quote(&quote)?;
-    let provenance_url = format!("{}/{}", registry_url.trim_end_matches('/'), hex::encode(ppid));
-    let document = fetch_gcp_provenance_document(&provenance_url)?;
-    validate_gcp_provenance_document(&document)?;
-
-    Ok(())
-}
-
-fn extract_ppid_from_quote(quote: &Quote) -> Result<Vec<u8>, GcpProvenanceError> {
-    let cert_chain = intel::extract_cert_chain(quote)
-        .map_err(|err| GcpProvenanceError::PpidExtraction(err.to_string()))?;
-    let leaf = cert_chain.first().ok_or(GcpProvenanceError::NoPckCertificate)?;
-    let extension = intel::parse_pck_extension(leaf)
-        .map_err(|err| GcpProvenanceError::PpidExtraction(err.to_string()))?;
-
-    if extension.ppid.is_empty() {
-        return Err(GcpProvenanceError::EmptyPpid);
-    }
-
-    Ok(extension.ppid)
-}
-
-fn fetch_gcp_provenance_document(url: &str) -> Result<String, GcpProvenanceError> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).build();
-    let response =
-        agent.get(url).call().map_err(|err| GcpProvenanceError::RegistryFetch(err.to_string()))?;
-
-    let mut limited_reader = response.into_reader().take(GCP_PROVENANCE_DOCUMENT_MAX_BYTES + 1);
-    let mut document = String::new();
-    limited_reader
-        .read_to_string(&mut document)
-        .map_err(|err| GcpProvenanceError::RegistryFetch(err.to_string()))?;
-
-    if document.len() as u64 > GCP_PROVENANCE_DOCUMENT_MAX_BYTES {
-        return Err(GcpProvenanceError::DocumentTooLarge);
-    }
-
-    Ok(document)
-}
-
-fn validate_gcp_provenance_document(document: &str) -> Result<(), GcpProvenanceError> {
-    let value: Value = serde_json::from_str(document)?;
-    let object = value.as_object().ok_or(GcpProvenanceError::InvalidDocument)?;
-
-    let has_zone = object.get("zone").and_then(Value::as_str).is_some_and(|zone| !zone.is_empty());
-    let has_timestamp = object.get("timestamp").is_some_and(|timestamp| match timestamp {
-        Value::String(timestamp) => !timestamp.is_empty(),
-        Value::Number(_) => true,
-        _ => false,
-    });
-
-    if has_zone && has_timestamp { Ok(()) } else { Err(GcpProvenanceError::InvalidDocument) }
-}
-
-#[derive(Error, Debug)]
-pub enum GcpProvenanceError {
-    #[error("quote parse: {0}")]
-    Quote(String),
-    #[error("PCK certificate chain is empty")]
-    NoPckCertificate,
-    #[error("PPID is empty")]
-    EmptyPpid,
-    #[error("PPID extraction: {0}")]
-    PpidExtraction(String),
-    #[error("registry fetch: {0}")]
-    RegistryFetch(String),
-    #[error("provenance document is invalid")]
-    InvalidDocument,
-    #[error("provenance document exceeds maximum size")]
-    DocumentTooLarge,
-    #[error("provenance document JSON: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("blocking task join: {0}")]
-    TaskJoin(String),
-}
-
 /// An error when generating or verifying an attestation
 #[derive(Error, Debug)]
 pub enum AttestationError {
@@ -727,12 +634,6 @@ pub enum AttestationError {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read as StdRead, Write},
-        net::SocketAddr,
-        thread,
-    };
-
     use mock_tdx::mock_pcs::{MockPcsConfig, spawn_mock_pcs_server};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -740,8 +641,6 @@ mod tests {
     };
 
     use super::*;
-
-    const MOCK_PPID_HEX: &str = "d04ec06d4e6d92dc90d0ad3cf5ee2ddf";
 
     async fn spawn_test_attestation_provider_server(body: Vec<u8>) -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -765,31 +664,6 @@ mod tests {
         addr
     }
 
-    fn spawn_test_registry_server(
-        status: u16,
-        body: impl Into<String>,
-    ) -> (SocketAddr, thread::JoinHandle<String>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let body = body.into();
-
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 1024];
-            let bytes_read = stream.read(&mut buf).unwrap();
-            let request = String::from_utf8_lossy(&buf[..bytes_read]).to_string();
-            let status_text = if status == 200 { "OK" } else { "Not Found" };
-            let response = format!(
-                "HTTP/1.1 {status} {status_text}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-            request
-        });
-
-        (addr, handle)
-    }
-
     #[test]
     fn attestation_detection_does_not_panic() {
         // We dont enforce what platform the test is run on, only that the function
@@ -800,70 +674,6 @@ mod tests {
     #[test]
     fn running_on_gcp_check_does_not_panic() {
         let _ = running_on_gcp();
-    }
-
-    #[test]
-    fn extracts_ppid_from_mock_tdx_quote() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
-        let quote = Quote::parse(&attestation).unwrap();
-        let ppid = extract_ppid_from_quote(&quote).unwrap();
-
-        assert_eq!(hex::encode(ppid), MOCK_PPID_HEX);
-    }
-
-    #[test]
-    fn gcp_provenance_check_fetches_registry_document_for_ppid() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
-        let (addr, request_handle) = spawn_test_registry_server(
-            200,
-            r#"{"zone":"projects/test/zones/us-central1-a","timestamp":"2026-06-11T00:00:00Z"}"#,
-        );
-
-        verify_gcp_provenance_with_registry_url_sync(&attestation, &format!("http://{addr}"))
-            .unwrap();
-
-        let request = request_handle.join().unwrap();
-        assert!(request.starts_with(&format!("GET /{MOCK_PPID_HEX} HTTP/1.1")));
-    }
-
-    #[test]
-    fn gcp_provenance_check_fails_closed_on_registry_miss() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
-        let (addr, request_handle) = spawn_test_registry_server(404, "not found");
-
-        let err =
-            verify_gcp_provenance_with_registry_url_sync(&attestation, &format!("http://{addr}"))
-                .unwrap_err();
-
-        request_handle.join().unwrap();
-        assert!(matches!(err, GcpProvenanceError::RegistryFetch(_)));
-    }
-
-    #[test]
-    fn gcp_provenance_check_fails_closed_on_invalid_document() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
-        let (addr, request_handle) = spawn_test_registry_server(200, r#"{"zone":""}"#);
-
-        let err =
-            verify_gcp_provenance_with_registry_url_sync(&attestation, &format!("http://{addr}"))
-                .unwrap_err();
-
-        request_handle.join().unwrap();
-        assert!(matches!(err, GcpProvenanceError::InvalidDocument));
-    }
-
-    #[test]
-    fn gcp_provenance_check_fails_closed_on_oversized_document() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
-        let oversized_body = "x".repeat((GCP_PROVENANCE_DOCUMENT_MAX_BYTES + 1) as usize);
-        let (addr, request_handle) = spawn_test_registry_server(200, oversized_body);
-
-        let err =
-            verify_gcp_provenance_with_registry_url_sync(&attestation, &format!("http://{addr}"))
-                .unwrap_err();
-
-        request_handle.join().unwrap();
-        assert!(matches!(err, GcpProvenanceError::DocumentTooLarge));
     }
 
     #[tokio::test(flavor = "multi_thread")]
