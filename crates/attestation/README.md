@@ -5,9 +5,10 @@ policy handling.
 
 This crate provides:
 
-- Attestation type detection (`none`, `dcap-tdx`, `gcp-tdx`, and `azure-tdx`
-  when enabled)
-- Attestation generation and verification for DCAP and (optionally) Azure
+- Attestation type detection (`none`, `dcap-tdx`, `gcp-tdx`, `qemu-tdx`,
+  `aws-nitro`, and `azure-tdx` when enabled)
+- Attestation generation and verification for DCAP, AWS Nitro Enclaves, and
+  (optionally) Azure
 - Parsing and evaluation of measurement policies
 
 ## Runtime Requirements
@@ -22,6 +23,14 @@ example `verify_attestation_sync`), still their functionality depends on
 Tokio-backed background tasks such as PCCS pre-warm and cache refresh.
 
 ## Feature flags
+
+### `nitro`
+
+Enables AWS Nitro Enclaves attestation support (generation, verification, and
+local platform detection), through the Nitro Secure Module at `/dev/nsm`.
+
+This feature is enabled by default. Disable default features to build without
+Nitro support or Nitro-specific dependencies.
 
 ### `azure`
 
@@ -62,10 +71,12 @@ These are the attestation type names used in the measurements file.
 - `azure-tdx` - TDX on Azure, with vTPM attestation
 - `qemu-tdx` - TDX on Qemu (no cloud platform)
 - `dcap-tdx` - DCAP TDX (platform not specified)
+- `aws-nitro` - AWS Nitro Enclaves attestation
 
 Local attestation types can be automatically detected. This works by initially
-attempting an Azure attestation, and if it fails attempting a DCAP attestation,
-and if that fails assume no CVM attestation.  On detecting DCAP, a call to the
+attempting an Azure attestation when the `azure` feature is enabled, then
+checking for an AWS Nitro Secure Module, then attempting a DCAP attestation, and
+if that fails assuming no CVM attestation. On detecting DCAP, a call to the
 Google Cloud metadata API is used to detect whether we are on Google Cloud.
 
 In the case of attestation types `dcap-tdx`, `gcp-tdx`, and `qemu-tdx`, a
@@ -74,6 +85,14 @@ interface. This means that the binary must be run with access to
 `/sys/kernel/config/tsm/report` which on many systems requires sudo.  If
 configfs-tsm is unavailable, quote generation via vSOCK to the QGS will be
 attempted.
+
+In the case of attestation type `aws-nitro`, an AWS Nitro Enclaves attestation
+document is generated using the Nitro Secure Module exposed at `/dev/nsm`. The
+certificate hash used by this crate is placed in the attestation document
+`nonce` field and checked during verification. Nitro verification validates the
+document signature and certificate chain against the AWS Nitro Enclaves root of
+trust bundled with this crate, checks certificate validity using the local
+system time, and extracts SHA384 PCR measurements from the signed document.
 
 Alternatively, an external 'attestation provider service' URL can be provided
 which outsources the attestation generation to another process.
@@ -99,8 +118,8 @@ These objects have the following fields:
 - `attestation_type` - a string containing one of the attestation types
   (confidential computing platforms) described below.
 - `measurements` - an object with fields referring to the five measurement
-  registers. Field names are the same as for the measurement headers (see
-  below).
+  registers or PCRs for the selected attestation type. Field names are the same
+  as for the measurement headers (see below).
 
 Each measurement register entry supports two mutually exclusive fields:
 
@@ -218,8 +237,42 @@ Legacy numeric field names are still supported for backwards compatibility:
 - `"11"` - PCR 11
 - and so on for valid PCR indices `0` through `23`
 
-All other attestation types are DCAP based. In measurement-policy JSON, the
-preferred field names are the register names and they are matched
+For AWS Nitro Enclaves attestations, field names are bare numeric PCR indexes.
+PCR values are SHA384 digests and must be 48 bytes, encoded as 96 hex
+characters. The Nitro attestation document format allows PCR indices `0`
+through `31`, and this crate accepts that range. AWS Nitro Enclaves currently
+documents six enclave measurements that are typically useful for policy:
+PCR0, PCR1, PCR2, PCR3, PCR4, and PCR8.
+
+```JSON
+[
+  {
+    "measurement_id": "aws-nitro-enclave-example",
+    "attestation_type": "aws-nitro",
+    "measurements": {
+      "0": {
+        "expected_any": [
+          "5fd25293fa7f5682ab2290f0850da91ff42e7e37f79498a7f133dac86a66e678e3c399891a119d82ab35b2fca0d647fe"
+        ]
+      },
+      "1": {
+        "expected_any": [
+          "0343b056cd8485ca7890ddd833476d78460aed2aa161548e4e26bedf321726696257d623e8805f3f605946b3d8b0c6aa"
+        ]
+      },
+      "2": {
+        "expected_any": [
+          "c48f4b4ddb0711cac8c94de79f3e96e387eb52693cc3b1fb664ef90c7f9c5df602a16e7dabe6cad52e8791223ddf602b"
+        ]
+      }
+    }
+  }
+]
+```
+
+DCAP-based attestation types use TDX measurement registers. In
+measurement-policy JSON, the preferred field names are the register names and
+they are matched
 case-insensitively:
 
 - `mrtd` - MRTD

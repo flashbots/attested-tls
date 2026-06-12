@@ -9,6 +9,8 @@ use thiserror::Error;
 
 use crate::{AttestationError, AttestationType, dcap::DcapVerificationError};
 
+pub(crate) const NITRO_PCR_LENGTH: usize = 48;
+
 /// Represents the measurement register types in a TDX quote
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -75,12 +77,23 @@ fn parse_azure_pcr_index(value: &str) -> Result<u32, MeasurementFormatError> {
     Ok(index)
 }
 
+fn parse_nitro_pcr_index(value: &str) -> Result<u32, MeasurementFormatError> {
+    let index = value.parse::<u32>()?;
+
+    if index > 31 {
+        return Err(MeasurementFormatError::BadRegisterIndex);
+    }
+
+    Ok(index)
+}
+
 /// Represents a set of measurements values for one of the supported CVM
 /// platforms
 #[derive(Clone, PartialEq)]
 pub enum MultiMeasurements {
     Dcap(HashMap<DcapMeasurementRegister, [u8; 48]>),
     Azure(HashMap<u32, [u8; 32]>),
+    Nitro(HashMap<u32, [u8; 48]>),
     NoAttestation,
 }
 
@@ -92,6 +105,9 @@ impl fmt::Debug for MultiMeasurements {
             }
             Self::Azure(measurements) => {
                 f.debug_tuple("Azure").field(&AzureHexDebug(measurements)).finish()
+            }
+            Self::Nitro(measurements) => {
+                f.debug_tuple("Nitro").field(&NitroHexDebug(measurements)).finish()
             }
             Self::NoAttestation => f.write_str("NoAttestation"),
         }
@@ -132,11 +148,29 @@ impl fmt::Debug for AzureHexDebug<'_> {
     }
 }
 
+/// Used to display Nitro measurements as hex
+struct NitroHexDebug<'a>(&'a HashMap<u32, [u8; 48]>);
+
+impl fmt::Debug for NitroHexDebug<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut entries: Vec<_> = self.0.iter().collect();
+        entries.sort_by_key(|(index, _)| **index);
+
+        let mut map = f.debug_map();
+        for (index, value) in entries {
+            let hex_value = hex::encode(value);
+            map.entry(index, &hex_value);
+        }
+        map.finish()
+    }
+}
+
 /// Expected measurement values for policy enforcement
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExpectedMeasurements {
     Dcap(HashMap<DcapMeasurementRegister, Vec<[u8; 48]>>),
     Azure(HashMap<u32, Vec<[u8; 32]>>),
+    Nitro(HashMap<u32, Vec<[u8; 48]>>),
     NoAttestation,
 }
 
@@ -152,6 +186,10 @@ impl MultiMeasurements {
                 .iter()
                 .map(|(index, value)| (index.to_string(), hex::encode(value)))
                 .collect(),
+            MultiMeasurements::Nitro(nitro_measurements) => nitro_measurements
+                .iter()
+                .map(|(index, value)| (index.to_string(), hex::encode(value)))
+                .collect(),
             MultiMeasurements::NoAttestation => HashMap::new(),
         };
 
@@ -163,7 +201,7 @@ impl MultiMeasurements {
         input: &str,
         attestation_type: AttestationType,
     ) -> Result<Self, MeasurementFormatError> {
-        let measurements_map: HashMap<u8, String> = serde_json::from_str(input)?;
+        let measurements_map: HashMap<String, String> = serde_json::from_str(input)?;
 
         Ok(match attestation_type {
             AttestationType::None => Self::NoAttestation,
@@ -172,7 +210,7 @@ impl MultiMeasurements {
                     .into_iter()
                     .map(|(k, v)| {
                         Ok((
-                            k as u32,
+                            k.parse::<u8>()? as u32,
                             hex::decode(v)?
                                 .try_into()
                                 .map_err(|_| MeasurementFormatError::BadLength)?,
@@ -184,8 +222,9 @@ impl MultiMeasurements {
                 let measurements_map = measurements_map
                     .into_iter()
                     .map(|(k, v)| {
+                        let index = k.parse::<u8>()?;
                         Ok((
-                            k.try_into()?,
+                            index.try_into()?,
                             hex::decode(v)?
                                 .try_into()
                                 .map_err(|_| MeasurementFormatError::BadLength)?,
@@ -194,6 +233,20 @@ impl MultiMeasurements {
                     .collect::<Result<_, MeasurementFormatError>>()?;
                 Self::Dcap(measurements_map)
             }
+            AttestationType::AwsNitro => Self::Nitro(
+                measurements_map
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let value = hex::decode(v)?;
+                        if value.len() != NITRO_PCR_LENGTH {
+                            return Err(MeasurementFormatError::BadLength);
+                        }
+                        let value: [u8; 48] =
+                            value.try_into().map_err(|_| MeasurementFormatError::BadLength)?;
+                        Ok((parse_nitro_pcr_index(&k)?, value))
+                    })
+                    .collect::<Result<_, MeasurementFormatError>>()?,
+            ),
         })
     }
 
@@ -249,9 +302,9 @@ pub enum MeasurementFormatError {
     AttestationTypeNotValid,
     #[error("Hex: {0}")]
     Hex(#[from] hex::FromHexError),
-    #[error("Expected 48 byte value")]
+    #[error("Unexpected measurement value length")]
     BadLength,
-    #[error("TDX quote register index must be in the ranger 0-3")]
+    #[error("Invalid measurement register index")]
     BadRegisterIndex,
     #[error("ParseInt: {0}")]
     ParseInt(#[from] std::num::ParseIntError),
@@ -296,6 +349,7 @@ impl MeasurementRecord {
                 AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
                     ExpectedMeasurements::Dcap(HashMap::new())
                 }
+                AttestationType::AwsNitro => ExpectedMeasurements::Nitro(HashMap::new()),
             },
         }
     }
@@ -337,6 +391,7 @@ impl MeasurementPolicy {
                 MeasurementRecord::allow_any_measurement(AttestationType::QemuTdx),
                 MeasurementRecord::allow_any_measurement(AttestationType::GcpTdx),
                 MeasurementRecord::allow_any_measurement(AttestationType::AzureTdx),
+                MeasurementRecord::allow_any_measurement(AttestationType::AwsNitro),
             ],
         }
     }
@@ -356,17 +411,39 @@ impl MeasurementPolicy {
     /// Expect mock measurements used in tests
     #[cfg(any(test, feature = "mock"))]
     pub fn mock() -> Self {
-        Self {
-            accepted_measurements: vec![MeasurementRecord {
-                measurement_id: "test".to_string(),
-                measurements: ExpectedMeasurements::Dcap(HashMap::from([
-                    (DcapMeasurementRegister::MRTD, vec![mock_tdx::MOCK_MRTD]),
-                    (DcapMeasurementRegister::RTMR0, vec![mock_tdx::MOCK_RTMR0]),
-                    (DcapMeasurementRegister::RTMR1, vec![mock_tdx::MOCK_RTMR1]),
-                    (DcapMeasurementRegister::RTMR2, vec![mock_tdx::MOCK_RTMR2]),
-                    (DcapMeasurementRegister::RTMR3, vec![mock_tdx::MOCK_RTMR3]),
-                ])),
-            }],
+        let dcap_measurements = MeasurementRecord {
+            measurement_id: "test".to_string(),
+            measurements: ExpectedMeasurements::Dcap(HashMap::from([
+                (DcapMeasurementRegister::MRTD, vec![mock_tdx::MOCK_MRTD]),
+                (DcapMeasurementRegister::RTMR0, vec![mock_tdx::MOCK_RTMR0]),
+                (DcapMeasurementRegister::RTMR1, vec![mock_tdx::MOCK_RTMR1]),
+                (DcapMeasurementRegister::RTMR2, vec![mock_tdx::MOCK_RTMR2]),
+                (DcapMeasurementRegister::RTMR3, vec![mock_tdx::MOCK_RTMR3]),
+            ])),
+        };
+
+        #[cfg(test)]
+        {
+            let nitro_measurements = match crate::nitro::mock_nitro_measurements() {
+                MultiMeasurements::Nitro(measurements) => {
+                    measurements.into_iter().map(|(index, value)| (index, vec![value])).collect()
+                }
+                _ => unreachable!(),
+            };
+            Self {
+                accepted_measurements: vec![
+                    dcap_measurements,
+                    MeasurementRecord {
+                        measurement_id: "test-nitro".to_string(),
+                        measurements: ExpectedMeasurements::Nitro(nitro_measurements),
+                    },
+                ],
+            }
+        }
+
+        #[cfg(not(test))]
+        {
+            Self { accepted_measurements: vec![dcap_measurements] }
         }
     }
 
@@ -394,6 +471,18 @@ impl MeasurementPolicy {
                 if let ExpectedMeasurements::Azure(expected) = &measurement_record.measurements {
                     for (k, v) in expected.iter() {
                         match azure_measurements.get(k) {
+                            Some(actual_value) if v.iter().any(|v| actual_value == v) => {}
+                            _ => return false,
+                        }
+                    }
+                    return true;
+                }
+                false
+            }
+            MultiMeasurements::Nitro(nitro_measurements) => {
+                if let ExpectedMeasurements::Nitro(expected) = &measurement_record.measurements {
+                    for (k, v) in expected.iter() {
+                        match nitro_measurements.get(k) {
                             Some(actual_value) if v.iter().any(|v| actual_value == v) => {}
                             _ => return false,
                         }
@@ -542,6 +631,19 @@ impl MeasurementPolicy {
                                 HashMap<DcapMeasurementRegister, Vec<[u8; 48]>>,
                                 MeasurementFormatError,
                             >>()?,
+                    ),
+                    AttestationType::AwsNitro => ExpectedMeasurements::Nitro(
+                        measurements
+                            .iter()
+                            .map(|(index_str, entry)| {
+                                let index = parse_nitro_pcr_index(index_str)?;
+                                Ok((
+                                    index,
+                                    parse_measurement_entry::<NITRO_PCR_LENGTH>(entry, index_str)?,
+                                ))
+                            })
+                            .collect::<Result<HashMap<u32, Vec<[u8; 48]>>, MeasurementFormatError>>(
+                            )?,
                     ),
                 };
 
@@ -1018,6 +1120,134 @@ mod tests {
         assert!(matches!(result, Err(MeasurementFormatError::BadRegisterIndex)));
     }
 
+    #[tokio::test]
+    async fn test_parse_nitro_numeric_pcr_keys() {
+        let pcr0 = "11".repeat(NITRO_PCR_LENGTH);
+        let pcr8 = "22".repeat(NITRO_PCR_LENGTH);
+        let json = format!(
+            r#"[
+                {{
+                    "measurement_id": "nitro-pcrs",
+                    "attestation_type": "aws-nitro",
+                    "measurements": {{
+                        "0": {{ "expected_any": ["{pcr0}"] }},
+                        "8": {{ "expected_any": ["{pcr8}"] }}
+                    }}
+                }}
+            ]"#
+        );
+
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
+        let record = &policy.accepted_measurements[0];
+
+        if let ExpectedMeasurements::Nitro(nitro) = &record.measurements {
+            assert_eq!(nitro.keys().collect::<HashSet<_>>(), HashSet::from([&0, &8]));
+        } else {
+            panic!("Expected ExpectedMeasurements::Nitro");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_nitro_rejects_prefixed_pcr_keys() {
+        let pcr0 = "11".repeat(NITRO_PCR_LENGTH);
+        let json = format!(
+            r#"[
+                {{
+                    "attestation_type": "aws-nitro",
+                    "measurements": {{
+                        "pcr0": {{ "expected_any": ["{pcr0}"] }}
+                    }}
+                }}
+            ]"#
+        );
+
+        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec());
+        assert!(matches!(result, Err(MeasurementFormatError::ParseInt(_))));
+    }
+
+    #[tokio::test]
+    async fn test_parse_nitro_rejects_out_of_range_pcr_keys() {
+        let pcr32 = "11".repeat(NITRO_PCR_LENGTH);
+        let json = format!(
+            r#"[
+                {{
+                    "attestation_type": "aws-nitro",
+                    "measurements": {{
+                        "32": {{ "expected_any": ["{pcr32}"] }}
+                    }}
+                }}
+            ]"#
+        );
+
+        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec());
+        assert!(matches!(result, Err(MeasurementFormatError::BadRegisterIndex)));
+    }
+
+    #[tokio::test]
+    async fn test_parse_nitro_rejects_bad_value_lengths() {
+        let short_pcr = "11".repeat(NITRO_PCR_LENGTH - 1);
+        let json = format!(
+            r#"[
+                {{
+                    "attestation_type": "aws-nitro",
+                    "measurements": {{
+                        "0": {{ "expected_any": ["{short_pcr}"] }}
+                    }}
+                }}
+            ]"#
+        );
+
+        let result = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec());
+        assert!(matches!(result, Err(MeasurementFormatError::BadLength)));
+    }
+
+    #[tokio::test]
+    async fn test_check_nitro_measurement_with_or_semantics() {
+        let first = "00".repeat(NITRO_PCR_LENGTH);
+        let second = "11".repeat(NITRO_PCR_LENGTH);
+        let json = format!(
+            r#"[
+                {{
+                    "measurement_id": "nitro-or",
+                    "attestation_type": "aws-nitro",
+                    "measurements": {{
+                        "0": {{
+                            "expected_any": ["{first}", "{second}"]
+                        }}
+                    }}
+                }}
+            ]"#
+        );
+
+        let policy = MeasurementPolicy::from_json_bytes(json.as_bytes().to_vec()).unwrap();
+
+        let measurements1 = MultiMeasurements::Nitro(HashMap::from([(0, [0u8; 48])]));
+        assert!(policy.check_measurement(&measurements1).is_ok());
+
+        let measurements2 = MultiMeasurements::Nitro(HashMap::from([(0, [0x11u8; 48])]));
+        assert!(policy.check_measurement(&measurements2).is_ok());
+
+        let measurements3 = MultiMeasurements::Nitro(HashMap::from([(0, [0x22u8; 48])]));
+        assert!(policy.check_measurement(&measurements3).is_err());
+    }
+
+    #[test]
+    fn test_nitro_header_round_trip() {
+        let measurements = MultiMeasurements::Nitro(HashMap::from([
+            (0, [0xabu8; NITRO_PCR_LENGTH]),
+            (8, [0xcdu8; NITRO_PCR_LENGTH]),
+        ]));
+
+        let header = measurements.to_header_format().unwrap();
+        let parsed = MultiMeasurements::from_header_format(
+            header.to_str().unwrap(),
+            AttestationType::AwsNitro,
+        )
+        .unwrap();
+
+        assert_eq!(parsed, measurements);
+    }
+
     /// Checks that the Debug implementation for MultiMeasurements displays
     /// them as hex
     #[test]
@@ -1038,6 +1268,13 @@ mod tests {
         assert!(azure_debug.contains("Azure"));
         assert!(azure_debug.contains(&hex::encode(azure_register_value)));
         assert!(!azure_debug.contains(&format!("{azure_register_value:?}")));
+
+        let nitro_register_value = [0xabu8; NITRO_PCR_LENGTH];
+        let nitro = MultiMeasurements::Nitro(HashMap::from([(8u32, nitro_register_value)]));
+        let nitro_debug = format!("{nitro:?}");
+        assert!(nitro_debug.contains("Nitro"));
+        assert!(nitro_debug.contains(&hex::encode(nitro_register_value)));
+        assert!(!nitro_debug.contains(&format!("{nitro_register_value:?}")));
     }
 
     #[tokio::test]
