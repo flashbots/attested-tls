@@ -7,6 +7,7 @@ members = [
     "crates/attestation",
     "crates/pccs",
     "crates/mock-tdx",
+    "crates/attestation-provider-server",
 ]
 
 [workspace.lints.rust]
