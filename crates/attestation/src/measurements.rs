@@ -8,6 +8,7 @@ use dcap_qvl::quote::Report;
 use http::{HeaderValue, header::InvalidHeaderValue, uri::InvalidUri};
 use serde::Deserialize;
 use thiserror::Error;
+use tracing::warn;
 
 use crate::{AttestationError, AttestationType, dcap::DcapVerificationError};
 
@@ -402,11 +403,17 @@ impl MeasurementPolicy {
                                 let Some(mrtd) =
                                     dcap_measurements.get(&DcapMeasurementRegister::MRTD)
                                 else {
+                                    warn!(
+                                        "Could not match image hash measurement due to missing MRTD"
+                                    );
                                     return false;
                                 };
                                 match DcapFirmware::from_google(*mrtd) {
                                     Ok(firmware) => Some(firmware),
-                                    Err(_) => return false,
+                                    Err(err) => {
+                                        warn!("Could not match image hash measurement - failed to fetch or verify Google firmware: {err:?}");
+                                        return false
+                                    },
                                 }
                             }
                             ImageAttestationType::SelfHostedTdx => None,
