@@ -398,7 +398,17 @@ impl MeasurementPolicy {
                             return false;
                         };
                         let firmware = match platform_metadata.attestation_type {
-                            ImageAttestationType::GcpTdx => Some(DcapFirmware::gcp_hardcoded()),
+                            ImageAttestationType::GcpTdx => {
+                                let Some(mrtd) =
+                                    dcap_measurements.get(&DcapMeasurementRegister::MRTD)
+                                else {
+                                    return false;
+                                };
+                                match DcapFirmware::from_google(*mrtd) {
+                                    Ok(firmware) => Some(firmware),
+                                    Err(_) => return false,
+                                }
+                            }
                             ImageAttestationType::SelfHostedTdx => None,
                             ImageAttestationType::AzureTdx => return false,
                         };
@@ -630,8 +640,34 @@ mod tests {
 
     use attest_measure::dcap::expected_dcap_registers;
     use attest_types::AcpiHashes;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
     use super::*;
+
+    /// MRTD from the pinned GCP firmware snapshot test asset
+    const GCP_FIRMWARE_MRTD: &str = "feb7486608382c1ff0e15b4648ddc0acea6ca974eb53e3529f4c4bd5ffbaa20bf335cb75965cea65fe473aed9647c162";
+    /// CFV from the same pinned GCP firmware snapshot test asset
+    const GCP_FIRMWARE_CFV: &str = "9cb6bf09aea7b4acb8549e328d0edd6f15defc0b00d744bb9fb5bab0962bc5c70f69d233e96dbc7c1105ba085781dc88";
+    /// Base64-encoded HOB template from the historical GCP firmware asset
+    /// in the attest repo.
+    const GCP_HOB_TEMPLATE_B64: &str = "AQA4AAAAAAAJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAASJKAAAAAAAADADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwAAAAAA4v8AAAAAAAAeAAAAAAADADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwAAAAAA4P8AAAAAAAACAAAAAAADADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwAAAAAAgQAAAAAAAAABAAAAAAADADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwAAAACwgAAAAAAAACAAAAAAAAADADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwAAAACQgAAAAAAAACAAAAAAAAADADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwAAAAAAgAAAAAAAAGAAAAAAAAADADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAABwAAEAAAAAAAAAAAAACAAAAAAAADADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAABwAAEABggAAAAAAAADAAAAAAAAADADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAABwAAEADQgAAAAAAAADAAAAAAAAADADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAABwAAEAAAggAAAAAAAAB+vwAAAAADADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAABwAAEAAAAAABAAAAAAAAQAMAAAA=";
+    /// Offset used by the historical HOB template to patch the RAM length
+    /// field.
+    const GCP_HOB_LENGTH_OFFSET: usize = 0x240;
+    /// RAM threshold embedded in the historical GCP HOB template snapshot.
+    const GCP_RAM_THRESHOLD: u64 = 3 << 30;
+
+    fn gcp_firmware_fixture() -> DcapFirmware {
+        DcapFirmware {
+            mrtd: hex::decode(GCP_FIRMWARE_MRTD).unwrap().try_into().unwrap(),
+            cfv: hex::decode(GCP_FIRMWARE_CFV).unwrap().try_into().unwrap(),
+            hob: attest_measure::dcap::HobTemplate {
+                bytes: BASE64_STANDARD.decode(GCP_HOB_TEMPLATE_B64).unwrap(),
+                length_offset: GCP_HOB_LENGTH_OFFSET,
+                ram_threshold: GCP_RAM_THRESHOLD,
+            },
+        }
+    }
 
     #[tokio::test]
     async fn test_read_measurements_file() {
@@ -742,7 +778,7 @@ mod tests {
             num_disks: 1,
             acpi: Some(AcpiHashes { loader: [0x11; 48], rsdp: [0x22; 48], tables: [0x33; 48] }),
         };
-        let firmware = DcapFirmware::gcp_hardcoded();
+        let firmware = gcp_firmware_fixture();
         let expected_measurements =
             expected_dcap_registers(&image_hashes, &platform_metadata, Some(&firmware)).unwrap();
 
