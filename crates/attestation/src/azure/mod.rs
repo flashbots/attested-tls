@@ -863,7 +863,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(async_measurements, sync_measurements);
-        measurement_policy.check_measurement(&async_measurements, None).unwrap();
+        measurement_policy.check_measurement(&async_measurements, None, None).unwrap();
     }
 
     /// Verify a complete observed Azure attestation payload that includes
