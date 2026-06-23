@@ -1,8 +1,8 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     io::Read,
     sync::{Arc, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use dcap_qvl::{intel, quote::Quote};
@@ -15,10 +15,15 @@ const GCP_PROVENANCE_REGISTRY_URL: &str =
 
 /// Maximum size in bytes of GCP provenance documents
 const GCP_PROVENANCE_DOCUMENT_MAX_BYTES: u64 = 16 * 1024;
+/// How long a cached PPID remains trusted before revalidation
+const GCP_PROVENANCE_CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// Checks PPIDs extracted from DCAP quotes against Googles public bucket,
+/// to establish whether this is a GCP machine
 #[derive(Clone, Debug)]
 pub(crate) struct GcpProvenanceChecker {
-    known_gcp_ppids: Arc<RwLock<HashSet<Vec<u8>>>>,
+    /// Cached entries with retrieval timestamp
+    known_gcp_ppids: Arc<RwLock<HashMap<Vec<u8>, Instant>>>,
 }
 
 impl GcpProvenanceChecker {
@@ -29,9 +34,14 @@ impl GcpProvenanceChecker {
     /// Given a DCAP TDX quote, check if the associated PPID has a
     /// 'provenance document' from GCP
     pub(crate) async fn verify_provenance(&self, quote: Quote) -> Result<(), GcpProvenanceError> {
+        let now = Instant::now();
         let checker = self.clone();
         tokio::task::spawn_blocking(move || {
-            checker.verify_provenance_with_registry_url_sync(&quote, GCP_PROVENANCE_REGISTRY_URL)
+            checker.verify_provenance_with_registry_url_sync_at(
+                &quote,
+                GCP_PROVENANCE_REGISTRY_URL,
+                now,
+            )
         })
         .await
         .map_err(|err| GcpProvenanceError::TaskJoin(err.to_string()))?
@@ -40,13 +50,18 @@ impl GcpProvenanceChecker {
     /// Given a DCAP TDX quote, check if the associated PPID has a
     /// 'provenance document' from GCP
     pub(crate) fn verify_provenance_sync(&self, quote: &Quote) -> Result<(), GcpProvenanceError> {
-        self.verify_provenance_with_registry_url_sync(quote, GCP_PROVENANCE_REGISTRY_URL)
+        self.verify_provenance_with_registry_url_sync_at(
+            quote,
+            GCP_PROVENANCE_REGISTRY_URL,
+            Instant::now(),
+        )
     }
 
-    fn verify_provenance_with_registry_url_sync(
+    fn verify_provenance_with_registry_url_sync_at(
         &self,
         quote: &Quote,
         registry_url: &str,
+        now: Instant,
     ) -> Result<(), GcpProvenanceError> {
         let ppid = extract_ppid_from_quote(quote)?;
         {
@@ -54,7 +69,24 @@ impl GcpProvenanceChecker {
                 .known_gcp_ppids
                 .read()
                 .map_err(|err| GcpProvenanceError::CacheLock(err.to_string()))?;
-            if known_gcp_ppids.contains(&ppid) {
+            if let Some(stored_at) = known_gcp_ppids.get(&ppid) &&
+                is_cache_entry_fresh(*stored_at, now)
+            {
+                return Ok(());
+            }
+        }
+
+        {
+            let mut known_gcp_ppids = self
+                .known_gcp_ppids
+                .write()
+                .map_err(|err| GcpProvenanceError::CacheLock(err.to_string()))?;
+            if known_gcp_ppids
+                .get(&ppid)
+                .is_some_and(|stored_at| !is_cache_entry_fresh(*stored_at, now))
+            {
+                known_gcp_ppids.remove(&ppid);
+            } else if known_gcp_ppids.contains_key(&ppid) {
                 return Ok(());
             }
         }
@@ -67,10 +99,14 @@ impl GcpProvenanceChecker {
         self.known_gcp_ppids
             .write()
             .map_err(|err| GcpProvenanceError::CacheLock(err.to_string()))?
-            .insert(ppid);
+            .insert(ppid, now);
 
         Ok(())
     }
+}
+
+fn is_cache_entry_fresh(stored_at: Instant, now: Instant) -> bool {
+    now.checked_duration_since(stored_at).is_some_and(|age| age <= GCP_PROVENANCE_CACHE_TTL)
 }
 
 fn extract_ppid_from_quote(quote: &Quote) -> Result<Vec<u8>, GcpProvenanceError> {
@@ -149,6 +185,7 @@ mod tests {
         io::{Read as _, Write as _},
         net::SocketAddr,
         thread,
+        time::{Duration, Instant},
     };
 
     use super::*;
@@ -176,6 +213,36 @@ mod tests {
             );
             stream.write_all(response.as_bytes()).unwrap();
             request
+        });
+
+        (addr, handle)
+    }
+
+    fn spawn_test_registry_server_n(
+        status: u16,
+        body: impl Into<String>,
+        expected_requests: usize,
+    ) -> (SocketAddr, thread::JoinHandle<Vec<String>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.into();
+
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::with_capacity(expected_requests);
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 1024];
+                let bytes_read = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..bytes_read]).to_string();
+                let status_text = if status == 200 { "OK" } else { "Not Found" };
+                let response = format!(
+                    "HTTP/1.1 {status} {status_text}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                requests.push(request);
+            }
+            requests
         });
 
         (addr, handle)
@@ -210,7 +277,11 @@ mod tests {
         );
 
         GcpProvenanceChecker::new()
-            .verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}"))
+            .verify_provenance_with_registry_url_sync_at(
+                &quote,
+                &format!("http://{addr}"),
+                Instant::now(),
+            )
             .unwrap();
 
         let request = request_handle.join().unwrap();
@@ -228,11 +299,45 @@ mod tests {
         let checker = GcpProvenanceChecker::new();
         let registry_url = format!("http://{addr}");
 
-        checker.verify_provenance_with_registry_url_sync(&quote, &registry_url).unwrap();
-        checker.verify_provenance_with_registry_url_sync(&quote, &registry_url).unwrap();
+        checker
+            .verify_provenance_with_registry_url_sync_at(&quote, &registry_url, Instant::now())
+            .unwrap();
+        checker
+            .verify_provenance_with_registry_url_sync_at(&quote, &registry_url, Instant::now())
+            .unwrap();
 
         let request = request_handle.join().unwrap();
         assert!(request.starts_with(&format!("GET /{MOCK_PPID_HEX} HTTP/1.1")));
+    }
+
+    #[test]
+    fn provenance_check_revalidates_stale_cached_ppids() {
+        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let quote = Quote::parse(&attestation).unwrap();
+        let (addr, request_handle) = spawn_test_registry_server_n(
+            200,
+            r#"{"zone":"projects/test/zones/us-central1-a","timestamp":"2026-06-11T00:00:00Z"}"#,
+            2,
+        );
+        let checker = GcpProvenanceChecker::new();
+        let registry_url = format!("http://{addr}");
+        let cached_at = Instant::now();
+        let stale_now = cached_at + GCP_PROVENANCE_CACHE_TTL + Duration::from_secs(1);
+
+        checker
+            .verify_provenance_with_registry_url_sync_at(&quote, &registry_url, cached_at)
+            .unwrap();
+        checker
+            .verify_provenance_with_registry_url_sync_at(&quote, &registry_url, stale_now)
+            .unwrap();
+
+        let requests = request_handle.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.starts_with(&format!("GET /{MOCK_PPID_HEX} HTTP/1.1")))
+        );
     }
 
     #[test]
@@ -242,7 +347,11 @@ mod tests {
         let (addr, request_handle) = spawn_test_registry_server(404, "not found");
 
         let err = GcpProvenanceChecker::new()
-            .verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}"))
+            .verify_provenance_with_registry_url_sync_at(
+                &quote,
+                &format!("http://{addr}"),
+                Instant::now(),
+            )
             .unwrap_err();
 
         request_handle.join().unwrap();
@@ -256,7 +365,11 @@ mod tests {
         let (addr, request_handle) = spawn_test_registry_server(200, r#"{"zone":""}"#);
 
         let err = GcpProvenanceChecker::new()
-            .verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}"))
+            .verify_provenance_with_registry_url_sync_at(
+                &quote,
+                &format!("http://{addr}"),
+                Instant::now(),
+            )
             .unwrap_err();
 
         request_handle.join().unwrap();
@@ -271,7 +384,11 @@ mod tests {
         let (addr, request_handle) = spawn_test_registry_server(200, oversized_body);
 
         let err = GcpProvenanceChecker::new()
-            .verify_provenance_with_registry_url_sync(&quote, &format!("http://{addr}"))
+            .verify_provenance_with_registry_url_sync_at(
+                &quote,
+                &format!("http://{addr}"),
+                Instant::now(),
+            )
             .unwrap_err();
 
         request_handle.join().unwrap();
