@@ -2,7 +2,8 @@
 //! verification
 use dcap_qvl::{
     QuoteCollateralV3,
-    collateral::get_collateral_for_fmspc,
+    collateral::CollateralClient,
+    intel::{quote_ca, quote_fmspc},
     quote::{Quote, Report},
     tcb_info::TcbInfo,
 };
@@ -87,8 +88,8 @@ pub fn verify_dcap_attestation_with_timestamp_sync(
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let quote = Quote::parse(&input)?;
 
-    let ca = quote.ca()?;
-    let fmspc = hex::encode_upper(quote.fmspc()?);
+    let ca = quote_ca(&quote)?.as_id_str();
+    let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
 
     let collateral = if let Some(given_collateral) = collateral {
         given_collateral
@@ -121,8 +122,8 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let quote = Quote::parse(&input)?;
 
-    let ca = quote.ca()?;
-    let fmspc = hex::encode_upper(quote.fmspc()?);
+    let ca = quote_ca(&quote)?.as_id_str();
+    let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
 
     let collateral = if let Some(given_collateral) = collateral {
         given_collateral
@@ -130,13 +131,9 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
         let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
         collateral
     } else {
-        get_collateral_for_fmspc(
-            PCS_URL,
-            fmspc.clone(),
-            ca,
-            false, // Indicates not SGX
-        )
-        .await?
+        CollateralClient::with_default_http(PCS_URL)?
+            .fetch_for_fmspc_without_pck_chain(&fmspc, ca, false)
+            .await?
     };
 
     verify_dcap_attestation_with_collateral_and_timestamp(
@@ -159,7 +156,7 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     tracing::info!("Verifying DCAP attestation: {quote:?}");
 
-    let fmspc = hex::encode_upper(quote.fmspc()?);
+    let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
 
     // Override outdated TCB only if we are on Azure and the FMSPC is known to
     // be outdated
@@ -211,8 +208,8 @@ pub async fn verify_dcap_attestation(
     pccs: Option<Pccs>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let quote = Quote::parse(&input)?;
-    let ca = quote.ca()?;
-    let fmspc = hex::encode_upper(quote.fmspc()?);
+    let ca = quote_ca(&quote)?.as_id_str();
+    let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let collateral = if let Some(ref pccs) = pccs {
         let (collateral, _is_fresh) = pccs.get_collateral(fmspc, ca, now).await?;
@@ -238,8 +235,8 @@ pub fn verify_dcap_attestation_sync(
     pccs: Pccs,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let quote = Quote::parse(&input)?;
-    let ca = quote.ca()?;
-    let fmspc = hex::encode_upper(quote.fmspc()?);
+    let ca = quote_ca(&quote)?.as_id_str();
+    let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let collateral = pccs.get_collateral_sync(fmspc, ca, now)?;
     let verifier = mock_tdx::mock_dcap_verifier();
