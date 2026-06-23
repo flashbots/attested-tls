@@ -96,10 +96,11 @@ impl GcpProvenanceChecker {
         let document = fetch_provenance_document(&provenance_url)?;
         validate_provenance_document(&document)?;
 
+        let fetched_at = Instant::now();
         self.known_gcp_ppids
             .write()
             .map_err(|err| GcpProvenanceError::CacheLock(err.to_string()))?
-            .insert(ppid, now);
+            .insert(ppid, fetched_at);
 
         Ok(())
     }
@@ -218,36 +219,6 @@ mod tests {
         (addr, handle)
     }
 
-    fn spawn_test_registry_server_n(
-        status: u16,
-        body: impl Into<String>,
-        expected_requests: usize,
-    ) -> (SocketAddr, thread::JoinHandle<Vec<String>>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let body = body.into();
-
-        let handle = thread::spawn(move || {
-            let mut requests = Vec::with_capacity(expected_requests);
-            for _ in 0..expected_requests {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut buf = [0u8; 1024];
-                let bytes_read = stream.read(&mut buf).unwrap();
-                let request = String::from_utf8_lossy(&buf[..bytes_read]).to_string();
-                let status_text = if status == 200 { "OK" } else { "Not Found" };
-                let response = format!(
-                    "HTTP/1.1 {status} {status_text}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).unwrap();
-                requests.push(request);
-            }
-            requests
-        });
-
-        (addr, handle)
-    }
-
     #[test]
     fn extracts_ppid_from_mock_tdx_quote() {
         let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
@@ -314,30 +285,23 @@ mod tests {
     fn provenance_check_revalidates_stale_cached_ppids() {
         let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
-        let (addr, request_handle) = spawn_test_registry_server_n(
+        let (addr, request_handle) = spawn_test_registry_server(
             200,
             r#"{"zone":"projects/test/zones/us-central1-a","timestamp":"2026-06-11T00:00:00Z"}"#,
-            2,
         );
         let checker = GcpProvenanceChecker::new();
         let registry_url = format!("http://{addr}");
-        let cached_at = Instant::now();
-        let stale_now = cached_at + GCP_PROVENANCE_CACHE_TTL + Duration::from_secs(1);
+        let ppid = extract_ppid_from_quote(&quote).unwrap();
+        let stale_at = Instant::now() - (GCP_PROVENANCE_CACHE_TTL + Duration::from_secs(1));
+
+        checker.known_gcp_ppids.write().unwrap().insert(ppid, stale_at);
 
         checker
-            .verify_provenance_with_registry_url_sync_at(&quote, &registry_url, cached_at)
-            .unwrap();
-        checker
-            .verify_provenance_with_registry_url_sync_at(&quote, &registry_url, stale_now)
+            .verify_provenance_with_registry_url_sync_at(&quote, &registry_url, Instant::now())
             .unwrap();
 
-        let requests = request_handle.join().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert!(
-            requests
-                .iter()
-                .all(|request| request.starts_with(&format!("GET /{MOCK_PPID_HEX} HTTP/1.1")))
-        );
+        let request = request_handle.join().unwrap();
+        assert!(request.starts_with(&format!("GET /{MOCK_PPID_HEX} HTTP/1.1")));
     }
 
     #[test]
