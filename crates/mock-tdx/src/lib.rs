@@ -32,6 +32,8 @@ const EMBEDDED_ROOT_CA_DER: &[u8] = include_bytes!("../assets/mock-root-ca.der")
 const EMBEDDED_PCK_KEY_PEM: &str = include_str!("../assets/mock-pck-key.pem");
 /// Embedded PCK chain PEM contents
 const EMBEDDED_PCK_CHAIN_PEM: &str = include_str!("../assets/mock-pck-chain.pem");
+/// Deterministic TCB signer secret key bytes
+pub(crate) const TCB_SIGNER_SK: [u8; 32] = [0x33; 32];
 
 /// Deterministic attestation secret key bytes
 const ATTESTATION_SK: [u8; 32] = [0x55; 32];

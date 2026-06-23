@@ -5,6 +5,7 @@ use dcap_qvl::{
     collateral::get_collateral_for_fmspc,
     quote::{Quote, Report},
     tcb_info::TcbInfo,
+    verify::VerifiedReport,
 };
 #[cfg(any(test, feature = "mock"))]
 use mock_tdx::generate_mock_tdx_quote;
@@ -186,14 +187,7 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
         override_outdated_tcb,
     )?;
 
-    if verified_report.status != "UpToDate" {
-        tracing::warn!(
-            status = %verified_report.status,
-            advisory_ids = ?verified_report.advisory_ids,
-            fmspc,
-            "DCAP verification succeeded with non-UpToDate TCB status"
-        );
-    }
+    ensure_up_to_date_tcb(verified_report, fmspc)?;
 
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
 
@@ -202,6 +196,36 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
     }
 
     Ok(measurements)
+}
+
+/// This returns an error if the TCB status associated with the attestation
+/// is not marked 'UpToDate'.
+///
+/// dcap-qvl's verification already rejects 'revoked' TCB status, so this
+/// serves to reject the following remaining non-up-to-date variants:
+/// - SWHardeningNeeded
+/// - ConfigurationNeeded
+/// - ConfigurationAndSWHardeningNeeded
+/// - OutOfDate
+/// - OutOfDateConfigurationNeeded
+fn ensure_up_to_date_tcb(
+    verified_report: VerifiedReport,
+    fmspc: String,
+) -> Result<(), DcapVerificationError> {
+    if verified_report.status != "UpToDate" {
+        tracing::warn!(
+            status = %verified_report.status,
+            advisory_ids = ?verified_report.advisory_ids,
+            fmspc,
+            "DCAP verification succeeded with non-UpToDate TCB status"
+        );
+        return Err(DcapVerificationError::BadTcbStatus(
+            verified_report.status,
+            verified_report.advisory_ids,
+            fmspc,
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(any(test, feature = "mock"))]
@@ -215,13 +239,17 @@ pub async fn verify_dcap_attestation(
     let fmspc = hex::encode_upper(quote.fmspc()?);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let collateral = if let Some(ref pccs) = pccs {
-        let (collateral, _is_fresh) = pccs.get_collateral(fmspc, ca, now).await?;
+        let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
         collateral
     } else {
         mock_tdx::mock_collateral()
     };
     let verifier = mock_tdx::mock_dcap_verifier();
-    verifier.verify(&input, &collateral, now)?;
+    let verified_report =
+        verifier
+            .dangerous_verify_with_tcb_override(&input, &collateral, now, |tcb_info| tcb_info)?;
+
+    ensure_up_to_date_tcb(verified_report, fmspc)?;
 
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
     if get_quote_input_data(quote.report) != expected_input_data {
@@ -243,7 +271,11 @@ pub fn verify_dcap_attestation_sync(
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let collateral = pccs.get_collateral_sync(fmspc, ca, now)?;
     let verifier = mock_tdx::mock_dcap_verifier();
-    verifier.verify(&input, &collateral, now)?;
+    let verified_report =
+        verifier
+            .dangerous_verify_with_tcb_override(&input, &collateral, now, |tcb_info| tcb_info)?;
+
+    ensure_up_to_date_tcb(verified_report, hex::encode_upper(quote.fmspc()?))?;
 
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
     if get_quote_input_data(quote.report.clone()) != expected_input_data {
@@ -290,10 +322,13 @@ pub enum DcapVerificationError {
     Pccs(#[from] PccsError),
     #[error("Timestamp exceeds i64 range")]
     TimeStampExceedsI64,
+    #[error("Bad TCB status: {0}, Advisory IDs: {1:?}, FMSPC: {2}")]
+    BadTcbStatus(String, Vec<String>, String),
 }
 
 #[cfg(test)]
 mod tests {
+    use dcap_qvl::tcb_info::TcbStatus;
     use mock_tdx::{MockPcsConfig, spawn_mock_pcs_server};
 
     use super::*;
@@ -415,6 +450,36 @@ mod tests {
                 .unwrap();
 
         assert_eq!(measurements, crate::measurements::mock_dcap_measurements());
+        assert_eq!(mock_pcs.tcb_call_count(), 1);
+        assert_eq!(mock_pcs.qe_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_mock_dcap_verify_rejects_non_up_to_date_tcb_collateral() {
+        let mock_pcs = spawn_mock_pcs_server(MockPcsConfig {
+            include_fmspcs_listing: false,
+            tcb_status: Some(TcbStatus::OutOfDate),
+            tcb_advisory_ids: vec!["INTEL-SA-MOCK".to_string()],
+            ..MockPcsConfig::default()
+        })
+        .await
+        .unwrap();
+        let pccs = Pccs::new_without_prewarm(Some(mock_pcs.base_url.clone()));
+        let expected_input_data = [0xB6; 64];
+        let attestation_bytes = create_dcap_attestation(expected_input_data).unwrap();
+
+        let err = verify_dcap_attestation(attestation_bytes, expected_input_data, Some(pccs))
+            .await
+            .unwrap_err();
+
+        match err {
+            DcapVerificationError::BadTcbStatus(status, advisory_ids, fmspc) => {
+                assert_eq!(status, "OutOfDate");
+                assert_eq!(advisory_ids, vec!["INTEL-SA-MOCK"]);
+                assert_eq!(fmspc, "00906EA10000");
+            }
+            other => panic!("unexpected verification error: {other:?}"),
+        }
         assert_eq!(mock_pcs.tcb_call_count(), 1);
         assert_eq!(mock_pcs.qe_call_count(), 1);
     }
