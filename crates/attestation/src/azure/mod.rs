@@ -663,16 +663,13 @@ mod test_utils {
 
         let quote_bytes = BASE64_URL_SAFE.decode(&attestation_document.tdx_quote_base64).unwrap();
         let quote = dcap_qvl::quote::Quote::parse(&quote_bytes).unwrap();
-        let ca = quote.ca().unwrap();
-        let fmspc = hex::encode_upper(quote.fmspc().unwrap());
-        let collateral = dcap_qvl::collateral::get_collateral_for_fmspc(
-            PCS_URL,
-            fmspc.clone(),
-            ca,
-            false, // TDX, not SGX.
-        )
-        .await
-        .unwrap();
+        let ca = dcap_qvl::intel::quote_ca(&quote).unwrap().as_id_str();
+        let fmspc = hex::encode_upper(dcap_qvl::intel::quote_fmspc(&quote).unwrap());
+        let collateral = dcap_qvl::collateral::CollateralClient::with_default_http(PCS_URL)
+            .unwrap()
+            .fetch_for_fmspc_without_pck_chain(&fmspc, ca, false)
+            .await
+            .unwrap();
 
         let timestamp =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();

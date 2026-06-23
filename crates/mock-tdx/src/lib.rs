@@ -1,5 +1,7 @@
 pub mod mock_pcs;
 
+#[cfg(test)]
+use dcap_qvl::intel::{quote_ca, quote_fmspc};
 use dcap_qvl::{
     QuoteCollateralV3,
     quote::{
@@ -85,10 +87,7 @@ pub const MOCK_RTMR3: [u8; 48] = [0x80; 48];
 
 /// Get a DCAP quote verifier with the mock PCK root-of-trust
 pub fn mock_dcap_verifier() -> dcap_qvl::verify::QuoteVerifier {
-    dcap_qvl::verify::QuoteVerifier::new(
-        EMBEDDED_ROOT_CA_DER.to_vec(),
-        dcap_qvl::verify::rustcrypto::backend(),
-    )
+    dcap_qvl::verify::QuoteVerifier::new(EMBEDDED_ROOT_CA_DER.to_vec())
 }
 
 /// Get mock collateral for verifying generated mock quotes
@@ -257,8 +256,8 @@ mod tests {
 
         let collateral = mock_collateral();
         let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).unwrap();
-        assert_eq!(hex::encode_upper(quote.fmspc().unwrap()), tcb_info.fmspc);
-        assert_eq!(quote.ca().unwrap(), "processor");
+        assert_eq!(hex::encode_upper(quote_fmspc(&quote).unwrap()), tcb_info.fmspc);
+        assert_eq!(quote_ca(&quote).unwrap().as_id_str(), "processor");
 
         let verifier = mock_dcap_verifier();
         let verified = verifier.verify(&quote_bytes, &collateral, FIXTURE_TIME).unwrap();
@@ -296,7 +295,7 @@ mod tests {
 
         let quote_bytes = generate_mock_tdx_quote([0xEF; 64]).unwrap();
         let quote = Quote::parse(&quote_bytes).unwrap();
-        assert_eq!(hex::encode_upper(quote.fmspc().unwrap()), tcb_info.fmspc);
+        assert_eq!(hex::encode_upper(quote_fmspc(&quote).unwrap()), tcb_info.fmspc);
         assert_eq!(quote.header.pce_svn, tcb_info.tcb_levels[0].tcb.pce_svn);
 
         verifier.verify(&quote_bytes, &collateral, FIXTURE_TIME).unwrap();

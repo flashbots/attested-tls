@@ -9,7 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use dcap_qvl::{QuoteCollateralV3, collateral::get_collateral_for_fmspc, tcb_info::TcbInfo};
+use dcap_qvl::{QuoteCollateralV3, collateral::CollateralClient, tcb_info::TcbInfo};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
@@ -424,11 +424,10 @@ async fn fetch_collateral(
     fmspc: String,
     ca: &'static str,
 ) -> Result<QuoteCollateralV3, PccsError> {
-    get_collateral_for_fmspc(
-        url, fmspc, ca, false, // Indicates not SGX
-    )
-    .await
-    .map_err(Into::into)
+    CollateralClient::with_default_http(url)?
+        .fetch_for_fmspc_without_pck_chain(&fmspc, ca, false)
+        .await
+        .map_err(Into::into)
 }
 
 /// Extracts the earliest next update timestamp from collateral metadata
