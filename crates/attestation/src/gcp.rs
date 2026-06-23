@@ -191,6 +191,16 @@ mod tests {
     }
 
     #[test]
+    fn extracts_ppid_from_fixture_dcap_quote() {
+        let attestation = include_bytes!("../test-assets/dcap-tdx-1766059550570652607");
+        let quote = Quote::parse(attestation).unwrap();
+        let ppid = extract_ppid_from_quote(&quote).unwrap();
+
+        assert_eq!(ppid.len(), 16);
+        assert!(!ppid.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
     fn provenance_check_fetches_registry_document_for_ppid() {
         let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
