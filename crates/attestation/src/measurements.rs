@@ -10,7 +10,12 @@ use serde::Deserialize;
 use thiserror::Error;
 use tracing::warn;
 
-use crate::{AttestationError, AttestationType, dcap::DcapVerificationError};
+use crate::{
+    AttestationError,
+    AttestationType,
+    dcap::DcapVerificationError,
+    gcp::{GcpFirmwareCache, GcpFirmwareCacheError},
+};
 
 /// Represents the measurement register types in a TDX quote
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -381,6 +386,15 @@ impl MeasurementPolicy {
         measurements: &MultiMeasurements,
         platform_metadata: Option<PlatformMetadata>,
     ) -> Result<(), AttestationError> {
+        self.check_measurement_with_gcp_cache(measurements, platform_metadata, None)
+    }
+
+    pub(crate) fn check_measurement_with_gcp_cache(
+        &self,
+        measurements: &MultiMeasurements,
+        platform_metadata: Option<PlatformMetadata>,
+        known_gcp_firmware: Option<&GcpFirmwareCache>,
+    ) -> Result<(), AttestationError> {
         if self.accepted_measurements.iter().any(|measurement_record| match measurements {
             MultiMeasurements::Dcap(dcap_measurements) => {
                 match &measurement_record.measurements {
@@ -408,24 +422,37 @@ impl MeasurementPolicy {
                                     );
                                     return false;
                                 };
-                                match DcapFirmware::from_google(*mrtd) {
+
+                                let result = if let Some(cache) = known_gcp_firmware {
+                                    cache.get_or_fetch(*mrtd)
+                                } else {
+                                    DcapFirmware::from_google(*mrtd)
+                                        .map_err(GcpFirmwareCacheError::from)
+                                };
+                                match result {
                                     Ok(firmware) => Some(firmware),
                                     Err(err) => {
-                                        warn!("Could not match image hash measurement - failed to fetch or verify Google firmware: {err:?}");
-                                        return false
-                                    },
+                                        warn!(
+                                            "Could not match image hash measurement - failed to fetch or verify Google firmware: {err:?}"
+                                        );
+                                        return false;
+                                    }
                                 }
                             }
                             ImageAttestationType::SelfHostedTdx => None,
                             ImageAttestationType::AzureTdx => return false,
                         };
 
-                        let Ok(expected_measurements) = expected_dcap_registers(
+                        let expected_measurements = match expected_dcap_registers(
                             image_hashes,
                             platform_metadata,
                             firmware.as_ref(),
-                        ) else {
-                            return false; // TODO should we bail here
+                        )  {
+                            Ok(expected) => expected,
+                            Err(err) => {
+                                warn!("Failed to compute expected DCAP registers: {err:?}");
+                                return false; // TODO should we bail here
+                            }
                         };
 
                         if let Some(expected_mrtd) = expected_measurements.mrtd {

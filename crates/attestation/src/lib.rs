@@ -3,8 +3,8 @@
 #[cfg(feature = "azure")]
 pub mod azure;
 pub mod dcap;
+mod gcp;
 pub mod measurements;
-
 use std::{
     fmt::{self, Display, Formatter},
     io::Read,
@@ -345,14 +345,17 @@ pub struct AttestationVerifier {
     pub override_azure_outdated_tcb: bool,
     /// Internal cache for collateral
     pub internal_pccs: Option<Pccs>,
+    /// Cached GCP firmware blobs indexed by MRTD
+    known_gcp_firmware: gcp::GcpFirmwareCache,
 }
 
 impl AttestationVerifier {
-    pub fn new(
+    fn build(
         measurement_policy: MeasurementPolicy,
         pccs_url: Option<String>,
         dump_dcap_quotes: bool,
         override_azure_outdated_tcb: bool,
+        known_gcp_firmware: gcp::GcpFirmwareCache,
     ) -> Self {
         Self {
             measurement_policy,
@@ -360,7 +363,23 @@ impl AttestationVerifier {
             dump_dcap_quotes,
             override_azure_outdated_tcb,
             internal_pccs: Some(Pccs::new(pccs_url)),
+            known_gcp_firmware,
         }
+    }
+
+    pub fn new(
+        measurement_policy: MeasurementPolicy,
+        pccs_url: Option<String>,
+        dump_dcap_quotes: bool,
+        override_azure_outdated_tcb: bool,
+    ) -> Self {
+        Self::build(
+            measurement_policy,
+            pccs_url,
+            dump_dcap_quotes,
+            override_azure_outdated_tcb,
+            gcp::GcpFirmwareCache::new(),
+        )
     }
 
     /// Create an [AttestationVerifier] which will only allow no attestation
@@ -372,6 +391,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: None,
+            known_gcp_firmware: gcp::GcpFirmwareCache::new(),
         }
     }
 
@@ -384,6 +404,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: None,
+            known_gcp_firmware: gcp::GcpFirmwareCache::new(),
         }
     }
 
@@ -396,6 +417,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: Some(Pccs::new(Some(pccs_url))),
+            known_gcp_firmware: gcp::GcpFirmwareCache::new(),
         }
     }
 
@@ -482,7 +504,11 @@ impl AttestationVerifier {
             .attestation_evidence
             .as_ref()
             .map(|evidence| evidence.platform.clone());
-        self.measurement_policy.check_measurement(&measurements, platform_metadata)?;
+        self.measurement_policy.check_measurement_with_gcp_cache(
+            &measurements,
+            platform_metadata,
+            Some(&self.known_gcp_firmware),
+        )?;
 
         tracing::debug!("Verification successful");
         Ok(Some(measurements))
@@ -555,7 +581,11 @@ impl AttestationVerifier {
             .attestation_evidence
             .as_ref()
             .map(|evidence| evidence.platform.clone());
-        self.measurement_policy.check_measurement(&measurements, platform_metadata)?;
+        self.measurement_policy.check_measurement_with_gcp_cache(
+            &measurements,
+            platform_metadata,
+            Some(&self.known_gcp_firmware),
+        )?;
 
         tracing::debug!("Verification successful");
         Ok(Some(measurements))
