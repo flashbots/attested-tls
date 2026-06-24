@@ -3,6 +3,7 @@
 #[cfg(feature = "azure")]
 pub mod azure;
 pub mod dcap;
+mod gcp;
 pub mod measurements;
 
 use std::{
@@ -18,7 +19,11 @@ use pccs::{Pccs, PccsError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy};
+use crate::{
+    dcap::DcapVerificationError,
+    gcp::{GcpProvenanceChecker, GcpProvenanceError},
+    measurements::MeasurementPolicy,
+};
 
 /// Used in attestation type detection to check if we are on GCP
 const GCP_METADATA_API: &str = "http://metadata.google.internal";
@@ -284,6 +289,8 @@ pub struct AttestationVerifier {
     pub override_azure_outdated_tcb: bool,
     /// Internal cache for collateral
     pub internal_pccs: Option<Pccs>,
+    /// Internal cache for known GCP PPIDs
+    gcp_provenance_checker: GcpProvenanceChecker,
 }
 
 impl AttestationVerifier {
@@ -299,6 +306,7 @@ impl AttestationVerifier {
             dump_dcap_quotes,
             override_azure_outdated_tcb,
             internal_pccs: Some(Pccs::new(pccs_url)),
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -311,6 +319,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: None,
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -323,6 +332,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: None,
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -335,6 +345,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: Some(Pccs::new(Some(pccs_url))),
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -399,17 +410,23 @@ impl AttestationVerifier {
                 }
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                dcap::verify_dcap_attestation(
+                let (measurements, quote) = dcap::verify_dcap_attestation(
                     attestation_exchange_message.attestation,
                     expected_input_data,
                     self.internal_pccs.clone(),
                 )
-                .await?
+                .await?;
+
+                if attestation_type == AttestationType::GcpTdx {
+                    self.gcp_provenance_checker.verify_provenance(quote).await?;
+                }
+
+                measurements
             }
         };
 
         // Do a measurement / attestation type policy check
-        self.measurement_policy.check_measurement(&measurements)?;
+        self.measurement_policy.check_measurement(attestation_type, &measurements)?;
 
         tracing::debug!("Verification successful");
         Ok(Some(measurements))
@@ -461,16 +478,22 @@ impl AttestationVerifier {
                 #[cfg(not(any(test, feature = "mock")))]
                 let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
 
-                dcap::verify_dcap_attestation_sync(
+                let (measurements, quote) = dcap::verify_dcap_attestation_sync(
                     attestation_exchange_message.attestation,
                     expected_input_data,
                     pccs,
-                )?
+                )?;
+
+                if attestation_type == AttestationType::GcpTdx {
+                    self.gcp_provenance_checker.verify_provenance_sync(&quote)?;
+                }
+
+                measurements
             }
         };
 
         // Do a measurement / attestation type policy check
-        self.measurement_policy.check_measurement(&measurements)?;
+        self.measurement_policy.check_measurement(attestation_type, &measurements)?;
 
         tracing::debug!("Verification successful");
         Ok(Some(measurements))
@@ -586,6 +609,8 @@ pub enum AttestationError {
     QuoteGeneration(#[from] tdx_attest::TdxAttestError),
     #[error("DCAP verification: {0}")]
     DcapVerification(#[from] DcapVerificationError),
+    #[error("GCP provenance: {0}")]
+    GcpProvenance(#[from] GcpProvenanceError),
     #[error("Attestation type not supported")]
     AttestationTypeNotSupported,
     #[error("Attestation type not accepted")]

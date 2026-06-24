@@ -802,7 +802,7 @@ mod tests {
     /// Verify a complete observed Azure attestation payload that includes
     /// AK intermediates fetched from the leaf certificate's AIA URLs.
     #[tokio::test]
-    async fn test_verify() {
+    async fn test_verify_with_ak_intermediates() {
         // generated using [capture_azure_fixture] above.
         let attestation_bytes: &'static [u8] =
             include_bytes!("../../test-assets/azure-tdx-with-ak-intermediates-1780922561.yaml");
