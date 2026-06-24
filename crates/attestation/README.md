@@ -28,6 +28,11 @@ Tokio-backed background tasks such as PCCS pre-warm and cache refresh.
 Enables Microsoft Azure vTPM attestation support (generation and verification),
 through `tss-esapi`.
 
+**Note:** Azure support is currently **not actively maintained** as we do not
+have production CVMs deployed on Azure and so are unlikely to notice when this
+implementation of Azure attestation generation or verification ceases to work.
+Use at your own risk.
+
 This feature requires [tpm2](https://tpm2-software.github.io) and `openssl` to
 be installed. On Debian-based systems tpm2 is provided by
 [`libtss2-dev`](https://packages.debian.org/trixie/libtss2-dev), and on nix
