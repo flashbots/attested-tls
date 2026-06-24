@@ -738,7 +738,7 @@ mod tests {
         // Will not match mock measurements
         assert!(matches!(
             specific_measurements
-                .check_measurement(&mock_dcap_measurements(), None, None)
+                .check_measurement(&mock_dcap_measurements(), None)
                 .unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
@@ -746,7 +746,7 @@ mod tests {
         // Will not match another attestation type
         assert!(matches!(
             specific_measurements
-                .check_measurement(&MultiMeasurements::NoAttestation, None, None)
+                .check_measurement(&MultiMeasurements::NoAttestation, None)
                 .unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
@@ -754,7 +754,7 @@ mod tests {
         // A non-specific measurement fails
         assert!(matches!(
             specific_measurements
-                .check_measurement(&MultiMeasurements::Azure(HashMap::new()), None, None)
+                .check_measurement(&MultiMeasurements::Azure(HashMap::new()), None)
                 .unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
@@ -767,12 +767,12 @@ mod tests {
         let allowed_attestation_type =
             MeasurementPolicy::from_file("test-assets/measurements_2.json".into()).await.unwrap();
 
-        allowed_attestation_type.check_measurement(&mock_dcap_measurements(), None, None).unwrap();
+        allowed_attestation_type.check_measurement(&mock_dcap_measurements(), None).unwrap();
 
         // Will not match another attestation type
         assert!(matches!(
             allowed_attestation_type
-                .check_measurement(&MultiMeasurements::NoAttestation, None, None)
+                .check_measurement(&MultiMeasurements::NoAttestation, None)
                 .unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
@@ -826,7 +826,7 @@ mod tests {
             (DcapMeasurementRegister::RTMR3, mock_tdx::MOCK_RTMR3),
         ]));
 
-        policy.check_measurement(&measurements, Some(platform_metadata), None).unwrap();
+        policy.check_measurement(&measurements, Some(platform_metadata)).unwrap();
     }
 
     #[tokio::test]
@@ -842,14 +842,14 @@ mod tests {
         assert!(!policy.accepted_measurements.is_empty());
 
         assert!(matches!(
-            policy.check_measurement(&MultiMeasurements::NoAttestation, None, None).unwrap_err(),
+            policy.check_measurement(&MultiMeasurements::NoAttestation, None).unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
 
         // A non-specific measurement fails
         assert!(matches!(
             policy
-                .check_measurement(&MultiMeasurements::Azure(HashMap::new()), None, None)
+                .check_measurement(&MultiMeasurements::Azure(HashMap::new()), None)
                 .unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
@@ -906,17 +906,17 @@ mod tests {
         // First value should match
         let measurements1 =
             MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, [0u8; 48])]));
-        assert!(policy.check_measurement(&measurements1, None, None).is_ok());
+        assert!(policy.check_measurement(&measurements1, None).is_ok());
 
         // Second value should also match
         let measurements2 =
             MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, [0x11u8; 48])]));
-        assert!(policy.check_measurement(&measurements2, None, None).is_ok());
+        assert!(policy.check_measurement(&measurements2, None).is_ok());
 
         // Different value should not match
         let measurements3 =
             MultiMeasurements::Dcap(HashMap::from([(DcapMeasurementRegister::MRTD, [0x22u8; 48])]));
-        assert!(policy.check_measurement(&measurements3, None, None).is_err());
+        assert!(policy.check_measurement(&measurements3, None).is_err());
     }
 
     #[tokio::test]
@@ -996,21 +996,21 @@ mod tests {
             (DcapMeasurementRegister::MRTD, [0u8; 48]),
             (DcapMeasurementRegister::RTMR0, [0x11u8; 48]),
         ]));
-        assert!(policy.check_measurement(&measurements1, None, None).is_ok());
+        assert!(policy.check_measurement(&measurements1, None).is_ok());
 
         // Both match (single + second of any)
         let measurements2 = MultiMeasurements::Dcap(HashMap::from([
             (DcapMeasurementRegister::MRTD, [0u8; 48]),
             (DcapMeasurementRegister::RTMR0, [0x22u8; 48]),
         ]));
-        assert!(policy.check_measurement(&measurements2, None, None).is_ok());
+        assert!(policy.check_measurement(&measurements2, None).is_ok());
 
         // Single matches but any doesn't
         let measurements3 = MultiMeasurements::Dcap(HashMap::from([
             (DcapMeasurementRegister::MRTD, [0u8; 48]),
             (DcapMeasurementRegister::RTMR0, [0x33u8; 48]),
         ]));
-        assert!(policy.check_measurement(&measurements3, None, None).is_err());
+        assert!(policy.check_measurement(&measurements3, None).is_err());
     }
 
     #[tokio::test]
