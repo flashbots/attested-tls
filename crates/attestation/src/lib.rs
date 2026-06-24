@@ -14,7 +14,6 @@ use std::{
 
 use attest_measure::platform::PlatformError;
 pub use attest_types::{AttestationEvidence, PlatformMetadata};
-pub use gcp::GcpFirmwareCacheError;
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
 use pccs::{Pccs, PccsError};
@@ -383,21 +382,6 @@ impl AttestationVerifier {
         )
     }
 
-    pub fn new_prewarmed(
-        measurement_policy: MeasurementPolicy,
-        pccs_url: Option<String>,
-        dump_dcap_quotes: bool,
-        override_azure_outdated_tcb: bool,
-    ) -> Result<Self, GcpFirmwareCacheError> {
-        Ok(Self::build(
-            measurement_policy,
-            pccs_url,
-            dump_dcap_quotes,
-            override_azure_outdated_tcb,
-            gcp::GcpFirmwareCache::prewarm()?,
-        ))
-    }
-
     /// Create an [AttestationVerifier] which will only allow no attestation
     /// and will reject if one is given
     pub fn expect_none() -> Self {
@@ -645,8 +629,8 @@ fn running_on_gcp() -> Result<bool, AttestationError> {
     let resp = agent.get(GCP_METADATA_API).call();
 
     if let Ok(r) = resp {
-        return Ok(r.status() == 200 &&
-            r.header("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
+        return Ok(r.status() == 200
+            && r.header("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
     }
 
     Ok(false)

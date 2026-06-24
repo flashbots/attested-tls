@@ -14,7 +14,7 @@ use crate::{
     AttestationError,
     AttestationType,
     dcap::DcapVerificationError,
-    gcp::GcpFirmwareCache,
+    gcp::{GcpFirmwareCache, GcpFirmwareCacheError},
 };
 
 /// Represents the measurement register types in a TDX quote
@@ -419,6 +419,7 @@ impl MeasurementPolicy {
                                     cache.get_or_fetch(*mrtd)
                                 } else {
                                     DcapFirmware::from_google(*mrtd)
+                                        .map_err(GcpFirmwareCacheError::from)
                                 };
                                 match result {
                                     Ok(firmware) => Some(firmware),
