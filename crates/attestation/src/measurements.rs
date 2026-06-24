@@ -737,9 +737,7 @@ mod tests {
 
         // Will not match mock measurements
         assert!(matches!(
-            specific_measurements
-                .check_measurement(&mock_dcap_measurements(), None)
-                .unwrap_err(),
+            specific_measurements.check_measurement(&mock_dcap_measurements(), None).unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
 
@@ -848,9 +846,7 @@ mod tests {
 
         // A non-specific measurement fails
         assert!(matches!(
-            policy
-                .check_measurement(&MultiMeasurements::Azure(HashMap::new()), None)
-                .unwrap_err(),
+            policy.check_measurement(&MultiMeasurements::Azure(HashMap::new()), None).unwrap_err(),
             AttestationError::MeasurementsNotAccepted
         ));
     }
