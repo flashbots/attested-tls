@@ -42,6 +42,6 @@ impl GcpFirmwareCache {
 pub(crate) enum GcpFirmwareCacheError {
     #[error("Cache lock poisoned")]
     CacheLock,
-    #[error("firmware: {0}")]
+    #[error("Firmware fetch: {0}")]
     Firmware(#[from] attest_measure::dcap::GoogleError),
 }

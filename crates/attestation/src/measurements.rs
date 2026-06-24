@@ -381,7 +381,15 @@ impl MeasurementPolicy {
 
     /// Given an attestation type and set of measurements, check whether
     /// they are acceptable
-    pub(crate) fn check_measurement(
+    pub fn check_measurement(
+        &self,
+        measurements: &MultiMeasurements,
+        platform_metadata: Option<PlatformMetadata>,
+    ) -> Result<(), AttestationError> {
+        self.check_measurement_with_gcp_cache(measurements, platform_metadata, None)
+    }
+
+    pub(crate) fn check_measurement_with_gcp_cache(
         &self,
         measurements: &MultiMeasurements,
         platform_metadata: Option<PlatformMetadata>,
