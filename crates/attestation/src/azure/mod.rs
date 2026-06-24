@@ -856,8 +856,9 @@ mod tests {
         let mut expected_input_data = input_data_from_attestation(attestation_bytes);
         expected_input_data[63] ^= 0x01;
 
-        let collateral_bytes: &'static [u8] =
-            include_bytes!("../../test-assets/azure-collateral-with-ak-intermediates-1780922561.yaml");
+        let collateral_bytes: &'static [u8] = include_bytes!(
+            "../../test-assets/azure-collateral-with-ak-intermediates-1780922561.yaml"
+        );
         let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
         let attestation_json = serde_json::to_vec(
             &serde_saphyr::from_slice::<AttestationDocument>(attestation_bytes).unwrap(),
