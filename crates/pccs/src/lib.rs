@@ -33,6 +33,10 @@ pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 const REFRESH_MARGIN_SECS: i64 = 300;
 /// How long to wait before retrying when failing to fetch collateral
 const REFRESH_RETRY_SECS: u64 = 60;
+/// Keep this short: sync collateral fetches can run inside rustls verifier
+/// callbacks during TLS handshakes, where blocking stalls handshake
+/// progress.
+const SYNC_COLLATERAL_FETCH_TIMEOUT_SECS: u64 = 2;
 /// How many collateral fetches to perform concurrently during initial
 /// pre-warm
 const STARTUP_PREWARM_CONCURRENCY: usize = 8;
@@ -425,7 +429,11 @@ struct UreqHttp {
 
 impl UreqHttp {
     fn new() -> Self {
-        Self { agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build() }
+        Self {
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(SYNC_COLLATERAL_FETCH_TIMEOUT_SECS))
+                .build(),
+        }
     }
 
     fn response_to_http_response(response: ureq::Response) -> anyhow::Result<HttpResponse> {
