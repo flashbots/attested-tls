@@ -24,5 +24,6 @@ For Intel's terminology and architecture, see the Intel documentation for the
 This crate expects to be used from within a Tokio runtime.
 
 The above applies even when calling synchronous-looking APIs such as
-`get_collateral_sync()` because cache miss repair, proactive refresh, and
-startup pre-warm are all driven by Tokio background tasks.
+`get_collateral_sync()` because proactive refresh and startup pre-warm are
+driven by Tokio background tasks. Cache misses in `get_collateral_sync()`
+are fetched synchronously with a `ureq` transport.
