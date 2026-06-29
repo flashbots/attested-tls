@@ -623,6 +623,7 @@ pub enum MaaError {
 #[cfg(test)]
 mod test_utils {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
+    use dcap_qvl::collateral::CollateralClient;
 
     use super::{AttestationDocument, create_azure_attestation};
     use crate::dcap::PCS_URL;
@@ -662,17 +663,11 @@ mod test_utils {
         assert!(intermediate_count > 0, "captured attestation should include AK intermediates");
 
         let quote_bytes = BASE64_URL_SAFE.decode(&attestation_document.tdx_quote_base64).unwrap();
-        let quote = dcap_qvl::quote::Quote::parse(&quote_bytes).unwrap();
-        let ca = quote.ca().unwrap();
-        let fmspc = hex::encode_upper(quote.fmspc().unwrap());
-        let collateral = dcap_qvl::collateral::get_collateral_for_fmspc(
-            PCS_URL,
-            fmspc.clone(),
-            ca,
-            false, // TDX, not SGX.
-        )
-        .await
-        .unwrap();
+        let collateral = CollateralClient::with_default_http(PCS_URL)
+            .unwrap()
+            .fetch(&quote_bytes)
+            .await
+            .unwrap();
 
         let timestamp =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
@@ -698,7 +693,6 @@ mod test_utils {
 
         println!("wrote {}", attestation_path.display());
         println!("wrote {}", collateral_path.display());
-        println!("quote fmspc={fmspc} ca={ca}");
         println!("ak_intermediate_certificates_pem entries={intermediate_count}");
     }
 }

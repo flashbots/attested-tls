@@ -19,7 +19,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 async fn nested_tls_uses_attested_tls_for_inner_session() {
     let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
     let (outer_server, outer_client) = plain_tls_config_pair(provider.clone());
-    let inner_server = attested_server_config("localhost", provider.clone());
+    let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig {
+        include_fmspcs_listing: false,
+        ..MockPcsConfig::default()
+    })
+    .await
+    .unwrap();
+    let attestation_generator = AttestationGenerator::new_with_pccs_url(
+        AttestationType::DcapTdx,
+        None,
+        Some(mock_pcs_server.base_url.clone()),
+    )
+    .unwrap();
+    let inner_server = attested_server_config("localhost", provider.clone(), attestation_generator);
     let inner_client = attested_client_config(provider.clone()).await;
 
     let acceptor = NestingTlsAcceptor::new(Arc::new(outer_server), Arc::new(inner_server));
@@ -84,16 +96,17 @@ fn plain_tls_config_pair(provider: Arc<CryptoProvider>) -> (ServerConfig, Client
 
 /// Create attested server TLS config with mock DCAP attestation and
 /// self-signed certs
-fn attested_server_config(server_name: &str, provider: Arc<CryptoProvider>) -> ServerConfig {
+fn attested_server_config(
+    server_name: &str,
+    provider: Arc<CryptoProvider>,
+    attestation_generator: AttestationGenerator,
+) -> ServerConfig {
     let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
-    let resolver = AttestedCertificateResolver::build(
-        server_name,
-        AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
-    )
-    .with_crypto_provider(provider.clone())
-    .with_key_pair(&key_pair)
-    .finish()
-    .unwrap();
+    let resolver = AttestedCertificateResolver::build(server_name, attestation_generator)
+        .with_crypto_provider(provider.clone())
+        .with_key_pair(&key_pair)
+        .finish()
+        .unwrap();
 
     ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
