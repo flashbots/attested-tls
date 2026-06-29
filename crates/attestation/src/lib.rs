@@ -12,6 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use dcap_qvl::QuoteCollateralV3;
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
 use pccs::{Pccs, PccsError};
@@ -31,6 +32,14 @@ pub struct AttestationExchangeMessage {
     /// The attestation evidence as bytes - in the case of DCAP this is a
     /// quote
     pub attestation: Vec<u8>,
+}
+
+/// DCAP attestation evidence bundled with the collateral required to verify
+/// it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DcapWithCollateral {
+    pub quote: Vec<u8>,
+    pub collateral: QuoteCollateralV3,
 }
 
 impl AttestationExchangeMessage {
@@ -56,8 +65,7 @@ impl AttestationExchangeMessage {
                 }
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                let quote = dcap_qvl::verify::Quote::parse(&self.attestation)
-                    .map_err(DcapVerificationError::from)?;
+                let quote = dcap::quote_from_dcap_attestation(&self.attestation)?;
                 Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
             }
         }
@@ -143,6 +151,7 @@ impl Display for AttestationType {
 pub struct AttestationGenerator {
     pub attestation_type: AttestationType,
     attestation_provider_url: Option<String>,
+    internal_pccs: Option<Pccs>,
 }
 
 impl AttestationGenerator {
@@ -151,12 +160,34 @@ impl AttestationGenerator {
         attestation_type: AttestationType,
         attestation_provider_url: Option<String>,
     ) -> Result<Self, AttestationError> {
+        Self::new_with_pccs_url(attestation_type, attestation_provider_url, None)
+    }
+
+    /// Create an attestation generator with given attestation type and a
+    /// PCCS URL to use when bundling DCAP collateral.
+    pub fn new_with_pccs_url(
+        attestation_type: AttestationType,
+        attestation_provider_url: Option<String>,
+        pccs_url: Option<String>,
+    ) -> Result<Self, AttestationError> {
         // If an attestation provider is given, normalize the URL and check that it
         // looks like a local IP
         let attestation_provider_url =
             attestation_provider_url.map(map_attestation_provider_url).transpose()?;
 
-        Ok(Self { attestation_type, attestation_provider_url })
+        let internal_pccs = if attestation_provider_url.is_some() {
+            None
+        } else {
+            match attestation_type {
+                AttestationType::DcapTdx |
+                AttestationType::GcpTdx |
+                AttestationType::QemuTdx |
+                AttestationType::AzureTdx => Some(Pccs::new_without_prewarm(pccs_url)),
+                AttestationType::None => None,
+            }
+        };
+
+        Ok(Self { attestation_type, attestation_provider_url, internal_pccs })
     }
 
     /// Detect what confidential compute platform is present and create the
@@ -165,9 +196,20 @@ impl AttestationGenerator {
         Self::new_with_detection(None, None)
     }
 
+    /// Detect what confidential compute platform is present and create the
+    /// appropriate attestation generator, using the provided PCCS URL for
+    /// bundled DCAP collateral.
+    pub fn detect_with_pccs_url(pccs_url: Option<String>) -> Result<Self, AttestationError> {
+        Self::new_with_detection_and_pccs_url(None, None, pccs_url)
+    }
+
     /// Do not generate attestations
     pub fn with_no_attestation() -> Self {
-        Self { attestation_type: AttestationType::None, attestation_provider_url: None }
+        Self {
+            attestation_type: AttestationType::None,
+            attestation_provider_url: None,
+            internal_pccs: None,
+        }
     }
 
     /// Create an [AttestationGenerator] detecting the attestation type if
@@ -176,12 +218,26 @@ impl AttestationGenerator {
         attestation_type_string: Option<String>,
         attestation_provider_url: Option<String>,
     ) -> Result<Self, AttestationError> {
+        Self::new_with_detection_and_pccs_url(
+            attestation_type_string,
+            attestation_provider_url,
+            None,
+        )
+    }
+
+    /// Create an [AttestationGenerator] detecting the attestation type if
+    /// it is not given, with a PCCS URL for bundled DCAP collateral.
+    pub fn new_with_detection_and_pccs_url(
+        attestation_type_string: Option<String>,
+        attestation_provider_url: Option<String>,
+        pccs_url: Option<String>,
+    ) -> Result<Self, AttestationError> {
         if attestation_provider_url.is_some() {
             // If a remote provide is used, dont do detection
             let attestation_type = serde_json::from_value(serde_json::Value::String(
                 attestation_type_string.ok_or(AttestationError::AttestationTypeNotGiven)?,
             ))?;
-            return Self::new(attestation_type, attestation_provider_url);
+            return Self::new_with_pccs_url(attestation_type, attestation_provider_url, pccs_url);
         };
 
         let attestation_type_string = attestation_type_string.unwrap_or_else(|| "auto".to_string());
@@ -193,7 +249,7 @@ impl AttestationGenerator {
         };
         tracing::info!("Local platform: {attestation_type}");
 
-        Self::new(attestation_type, None)
+        Self::new_with_pccs_url(attestation_type, None, pccs_url)
     }
 
     /// Generate an attestation exchange message with given input data
@@ -233,7 +289,7 @@ impl AttestationGenerator {
                 }
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                dcap::create_dcap_attestation(input_data)
+                dcap::create_dcap_attestation(input_data, self.internal_pccs.as_ref())
             }
         }
     }
@@ -688,12 +744,13 @@ mod tests {
         assert_eq!(wrapped.attestation, vec![9, 8]);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn mock_verifier_supports_sync_verification() {
         let input_data = [7u8; 64];
-        let attestation = dcap::create_dcap_attestation(input_data).unwrap();
-
         let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
+        let pccs = Pccs::new(Some(mock_pcs_server.base_url.clone()));
+        pccs.ready().await.unwrap();
+        let attestation = dcap::create_dcap_attestation(input_data, Some(&pccs)).unwrap();
 
         let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
         if let Some(ref pccs) = verifier.internal_pccs {

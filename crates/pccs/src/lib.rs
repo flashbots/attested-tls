@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         Arc,
         RwLock,
@@ -9,7 +9,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use dcap_qvl::{QuoteCollateralV3, collateral::get_collateral_for_fmspc, tcb_info::TcbInfo};
+use dcap_qvl::{
+    QuoteCollateralV3,
+    collateral::CollateralClient,
+    configs::DefaultConfig,
+    http::{HttpClient, HttpResponse},
+    tcb_info::TcbInfo,
+};
+use futures_executor::block_on;
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
@@ -29,6 +36,9 @@ const REFRESH_RETRY_SECS: u64 = 60;
 /// How many collateral fetches to perform concurrently during initial
 /// pre-warm
 const STARTUP_PREWARM_CONCURRENCY: usize = 8;
+/// Keep this short: sync collateral fetches may run on TLS handshake paths,
+/// so a long timeout can stall handshake progress.
+const SYNC_COLLATERAL_FETCH_TIMEOUT_SECS: u64 = 2;
 
 /// PCCS collateral cache with proactive background refresh
 #[derive(Clone)]
@@ -37,8 +47,6 @@ pub struct Pccs {
     url: String,
     /// The internal cache
     cache: Arc<RwLock<HashMap<PccsInput, CacheEntry>>>,
-    /// Dedupes one-shot background refreshes for cache misses
-    pending_refreshes: Arc<RwLock<HashSet<PccsInput>>>,
     /// The state of the initial pre-warm fetch
     prewarm_stats: Arc<PrewarmStats>,
     /// Completion signal for startup pre-warm, shared across all clones
@@ -84,7 +92,6 @@ impl Pccs {
         Self {
             url,
             cache: RwLock::new(HashMap::new()).into(),
-            pending_refreshes: RwLock::new(HashSet::new()).into(),
             prewarm_stats: Arc::new(PrewarmStats::default()),
             prewarm_outcome_tx: None,
         }
@@ -151,15 +158,14 @@ impl Pccs {
 
             upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
         }
-        self.ensure_refresh_task(&cache_key).await;
+        self.ensure_refresh_task(&cache_key);
         Ok((collateral, true))
     }
 
     /// A synchronous method to get collateral from the cache.
     ///
     /// If the requested collateral is not present in the cache, this will
-    /// return an error rather than waiting to fetch it.  But it does
-    /// begin fetching it in a background task.
+    /// fetch it synchronously and cache it before returning.
     ///
     /// If the collateral is out of date, this will log a warning and return
     /// it anyway on a best-effort basis.
@@ -171,32 +177,68 @@ impl Pccs {
     ) -> Result<QuoteCollateralV3, PccsError> {
         let now = i64::try_from(now).map_err(|_| PccsError::TimeStampExceedsI64)?;
         let cache_key = PccsInput::new(fmspc.clone(), ca);
-        let cache = self.cache.read().map_err(|_| PccsError::CachePoisoned)?;
-        if let Some(entry) = cache.get(&cache_key) {
-            if now >= entry.next_update {
-                let collateral = entry.collateral.clone();
-                tracing::warn!(
-                    fmspc,
-                    next_update = entry.next_update,
-                    now,
-                    "Cached collateral expired"
-                );
-                drop(cache);
+        {
+            let cache = self.cache.read().map_err(|_| PccsError::CachePoisoned)?;
+            if let Some(entry) = cache.get(&cache_key) {
+                if now >= entry.next_update {
+                    let collateral = entry.collateral.clone();
+                    tracing::warn!(
+                        fmspc,
+                        next_update = entry.next_update,
+                        now,
+                        "Cached collateral expired"
+                    );
+                    drop(cache);
 
-                // Start a background task to renew
-                let pccs = self.clone();
-                tokio::spawn(async move {
-                    pccs.ensure_refresh_task(&cache_key).await;
-                });
+                    // Start a background task to renew
+                    let pccs = self.clone();
+                    tokio::spawn(async move {
+                        pccs.ensure_refresh_task(&cache_key);
+                    });
 
-                return Ok(collateral);
+                    return Ok(collateral);
+                }
+                return Ok(entry.collateral.clone());
             }
-            Ok(entry.collateral.clone())
-        } else {
-            drop(cache);
-            self.spawn_background_refresh_for_cache_miss(cache_key.clone());
-            Err(PccsError::NoCollateralForFmspc(format!("{cache_key:?}")))
         }
+
+        let collateral = fetch_collateral_sync(&self.url, fmspc.clone(), ca)?;
+        let next_update = extract_next_update(&collateral, now)?;
+
+        {
+            let mut cache = self.cache.write().map_err(|_| PccsError::CachePoisoned)?;
+            if let Some(existing) = cache.get(&cache_key) &&
+                now < existing.next_update
+            {
+                return Ok(existing.collateral.clone());
+            }
+
+            upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
+        }
+        self.ensure_refresh_task(&cache_key);
+        Ok(collateral)
+    }
+
+    /// Fetches collateral for a quote using this PCCS/PCS URL.
+    pub async fn get_collateral_for_quote(
+        &self,
+        quote: &[u8],
+    ) -> Result<QuoteCollateralV3, PccsError> {
+        CollateralClient::with_default_http(self.url.clone())?
+            .fetch(quote)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Synchronously fetches collateral for a quote using this PCCS/PCS
+    /// URL.
+    pub fn get_collateral_for_quote_sync(
+        &self,
+        quote: &[u8],
+    ) -> Result<QuoteCollateralV3, PccsError> {
+        let http = UreqHttp::new();
+        let client = CollateralClient::<DefaultConfig, UreqHttp>::new(http, self.url.clone());
+        block_on(async move { client.fetch(quote).await }).map_err(Into::into)
     }
 
     /// Fetches fresh collateral, overwrites cache, and ensures proactive
@@ -215,13 +257,13 @@ impl Pccs {
             let mut cache = self.cache.write().map_err(|_| PccsError::CachePoisoned)?;
             upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
         }
-        self.ensure_refresh_task(&cache_key).await;
+        self.ensure_refresh_task(&cache_key);
         Ok(collateral)
     }
 
     /// Starts a background refresh loop for a cache key when no task is
     /// active
-    async fn ensure_refresh_task(&self, cache_key: &PccsInput) {
+    fn ensure_refresh_task(&self, cache_key: &PccsInput) {
         let Ok(mut cache) = self.cache.write() else {
             tracing::warn!("PCCS cache lock poisoned, cannot ensure refresh task");
             return;
@@ -239,46 +281,6 @@ impl Pccs {
         entry.refresh_task = Some(tokio::spawn(async move {
             refresh_loop(weak_cache, url, key).await;
         }));
-    }
-
-    /// Starts a one-shot background fetch to populate a missing cache entry
-    fn spawn_background_refresh_for_cache_miss(&self, cache_key: PccsInput) {
-        {
-            let Ok(mut pending_refreshes) = self.pending_refreshes.write() else {
-                tracing::warn!("PCCS pending-refresh lock poisoned, cannot start sync refresh");
-                return;
-            };
-            if !pending_refreshes.insert(cache_key.clone()) {
-                return;
-            }
-        }
-
-        let pccs = self.clone();
-        tokio::spawn(async move {
-            let result = pccs
-                .refresh_collateral(
-                    cache_key.fmspc.clone(),
-                    ca_as_static(&cache_key.ca).expect("unsupported CA in pending refresh"),
-                )
-                .await;
-
-            if let Err(err) = result {
-                tracing::warn!(
-                    fmspc = cache_key.fmspc,
-                    ca = cache_key.ca,
-                    error = %err,
-                    "Sync-triggered PCCS cache repair failed"
-                );
-            }
-
-            // Always clear the dedupe marker so a later sync miss can
-            // retry if this repair attempt failed.
-            if let Ok(mut pending_refreshes) = pccs.pending_refreshes.write() {
-                pending_refreshes.remove(&cache_key);
-            } else {
-                tracing::warn!("PCCS pending-refresh lock poisoned during cleanup");
-            }
-        });
     }
 
     /// Pre-provisions TDX collateral for discovered FMSPC values to reduce
@@ -424,11 +426,57 @@ async fn fetch_collateral(
     fmspc: String,
     ca: &'static str,
 ) -> Result<QuoteCollateralV3, PccsError> {
-    get_collateral_for_fmspc(
-        url, fmspc, ca, false, // Indicates not SGX
-    )
-    .await
-    .map_err(Into::into)
+    CollateralClient::with_default_http(url.to_string())?
+        .fetch_for_fmspc_without_pck_chain(&fmspc, ca, false)
+        .await
+        .map_err(Into::into)
+}
+
+struct UreqHttp {
+    agent: ureq::Agent,
+}
+
+impl UreqHttp {
+    fn new() -> Self {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(SYNC_COLLATERAL_FETCH_TIMEOUT_SECS))
+            .build();
+        Self { agent }
+    }
+}
+
+impl Clone for UreqHttp {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl HttpClient for UreqHttp {
+    async fn get(&self, url: &str) -> anyhow::Result<HttpResponse> {
+        let response = self.agent.get(url).call().map_err(|err| anyhow::anyhow!(err))?;
+        let status = response.status();
+        let headers = response
+            .headers_names()
+            .into_iter()
+            .filter_map(|name| response.header(&name).map(|value| (name, value.to_string())))
+            .collect();
+        let mut body = Vec::new();
+        let mut reader = response.into_reader();
+        use std::io::Read;
+        reader.read_to_end(&mut body)?;
+        Ok(HttpResponse { status, headers, body })
+    }
+}
+
+fn fetch_collateral_sync(
+    url: &str,
+    fmspc: String,
+    ca: &'static str,
+) -> Result<QuoteCollateralV3, PccsError> {
+    let http = UreqHttp::new();
+    let client = CollateralClient::<DefaultConfig, UreqHttp>::new(http, url.to_string());
+    block_on(async move { client.fetch_for_fmspc_without_pck_chain(&fmspc, ca, false).await })
+        .map_err(Into::into)
 }
 
 /// Extracts the earliest next update timestamp from collateral metadata
@@ -718,8 +766,6 @@ pub enum PccsError {
     TimeStampExceedsI64,
     #[error("PCCS cache lock poisoned")]
     CachePoisoned,
-    #[error("No collateral in cache for FMSPC {0}")]
-    NoCollateralForFmspc(String),
 }
 
 #[cfg(test)]
@@ -898,8 +944,8 @@ mod tests {
         assert!(matches!(ready_result, Err(PccsError::PrewarmDisabled)));
     }
 
-    #[tokio::test]
-    async fn test_get_collateral_sync_repairs_cache_miss_in_background() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_get_collateral_sync_repairs_cache_miss_inline() {
         let fmspc = mock_tdx_fmspc();
         let mock = spawn_mock_pcs_server(MockPcsConfig {
             include_fmspcs_listing: false,
@@ -914,18 +960,13 @@ mod tests {
         let pccs = Pccs::new_without_prewarm(Some(mock.base_url.clone()));
         let now = unix_now().unwrap() as u64;
 
-        let err = pccs.get_collateral_sync(fmspc.clone(), "processor", now);
-        assert!(matches!(err, Err(PccsError::NoCollateralForFmspc(_))));
-
-        for _ in 0..50 {
-            if pccs.get_collateral_sync(fmspc.clone(), "processor", now).is_ok() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let collateral = pccs.get_collateral_sync(fmspc.clone(), "processor", now);
+        assert!(collateral.is_ok(), "expected sync miss fetch to populate cache: {collateral:?}");
+        assert_eq!(mock.tcb_call_count(), 1);
+        assert_eq!(mock.qe_call_count(), 1);
 
         let collateral = pccs.get_collateral_sync(fmspc, "processor", now);
-        assert!(collateral.is_ok(), "expected sync miss repair to populate cache");
+        assert!(collateral.is_ok(), "expected sync hit to use cache");
         assert_eq!(mock.tcb_call_count(), 1);
         assert_eq!(mock.qe_call_count(), 1);
     }

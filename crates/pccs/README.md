@@ -3,8 +3,8 @@
 An internal Provisioning Certificate Caching Service implementation for DCAP
 collateral fetching and caching.
 
-This crate is used by attestation verification code that needs Intel TDX/SGX
-collateral such as TCB info, QE identity, and certificate revocation lists.
+This crate is used by attestation code that needs Intel TDX/SGX collateral such
+as TCB info, QE identity, and certificate revocation lists.
 
 It can:
 
@@ -23,6 +23,6 @@ For Intel's terminology and architecture, see the Intel documentation for the
 
 This crate expects to be used from within a Tokio runtime.
 
-The above applies even when calling synchronous-looking APIs such as
-`get_collateral_sync()` because cache miss repair, proactive refresh, and
-startup pre-warm are all driven by Tokio background tasks.
+The above applies to startup pre-warm and proactive refresh. Synchronous cache
+miss paths can fetch collateral directly, but they should be kept off hot
+request paths unless the caller has a strict timeout.
