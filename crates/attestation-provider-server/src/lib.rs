@@ -55,7 +55,7 @@ pub async fn attestation_provider_client(
         .await?;
 
     let remote_attestation_message = AttestationExchangeMessage::decode(&mut &response[..])?;
-    let remote_attestation_type = remote_attestation_message.attestation_type;
+    let remote_attestation_type = remote_attestation_message.attestation_type();
 
     println!("Remote attestation type: {remote_attestation_type}");
 

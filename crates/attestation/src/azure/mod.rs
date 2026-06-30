@@ -802,7 +802,7 @@ mod tests {
     /// Verify a complete observed Azure attestation payload that includes
     /// AK intermediates fetched from the leaf certificate's AIA URLs.
     #[tokio::test]
-    async fn test_verify() {
+    async fn test_verify_attestation_with_ak_intermediates() {
         // generated using [capture_azure_fixture] above.
         let attestation_bytes: &'static [u8] =
             include_bytes!("../../test-assets/azure-tdx-with-ak-intermediates-1780922561.yaml");
@@ -850,14 +850,15 @@ mod tests {
     #[tokio::test]
     async fn test_verify_fails_on_input_mismatch() {
         let attestation_bytes: &'static [u8] =
-            include_bytes!("../../test-assets/azure-tdx-1764662251380464271.yaml");
-        let now = 1771423480;
+            include_bytes!("../../test-assets/azure-tdx-with-ak-intermediates-1780922561.yaml");
+        let now = 1_780_922_561;
 
         let mut expected_input_data = input_data_from_attestation(attestation_bytes);
         expected_input_data[63] ^= 0x01;
 
-        let collateral_bytes: &'static [u8] =
-            include_bytes!("../../test-assets/azure-collateral02.yaml");
+        let collateral_bytes: &'static [u8] = include_bytes!(
+            "../../test-assets/azure-collateral-with-ak-intermediates-1780922561.yaml"
+        );
         let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
         let attestation_json = serde_json::to_vec(
             &serde_saphyr::from_slice::<AttestationDocument>(attestation_bytes).unwrap(),

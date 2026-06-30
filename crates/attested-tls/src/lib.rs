@@ -7,10 +7,12 @@ use std::{
 };
 
 pub use attestation::{
+    AttestationEvidence,
     AttestationExchangeMessage,
     AttestationGenerator,
     AttestationType,
     AttestationVerifier,
+    PlatformMetadata,
 };
 use ra_tls::{
     attestation::{Attestation, AttestationQuote, VersionedAttestation},
@@ -540,9 +542,18 @@ impl AttestedCertificateVerifier {
                 return Ok(message);
             }
 
+            // TODO maybe we have to drop support for the VersionedAttestation::V0
+            // format as it cannot encode platform metadata
             return Ok(AttestationExchangeMessage {
-                attestation_type: AttestationType::DcapTdx,
-                attestation: tdx_quote.quote,
+                attestation_evidence: Some(AttestationEvidence {
+                    quote: tdx_quote.quote,
+                    platform: PlatformMetadata {
+                        attestation_type: AttestationType::DcapTdx.try_into().expect("AttestationType::DcapTdx should convert to attest-types::AttestationType::SelfHosted"),
+                        ram_bytes: 0,
+                        num_disks: 0,
+                        acpi: None,
+                    },
+                }),
             });
         }
 
