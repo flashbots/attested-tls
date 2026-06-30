@@ -195,6 +195,22 @@ attestation type. The measurements can still be checked up-stream by the source
 client or target service using header injection described below. But it is then
 up to these external programs to reject unacceptable measurements.
 
+### Alternate `dstack-mr-gcp` format
+
+`MeasurementPolicy::from_json_bytes` also accepts the object format emitted by
+[`dstack-mr-gcp`](https://github.com/flashbots/dstack-mr-gcp). In that format,
+the top-level value is a single object instead
+of an array of records.
+
+For this format:
+
+- `mrtd` and `rtmr0` may contain arrays of acceptable hex values.
+- `rtmr1`, `rtmr2`, and `rtmr3` are parsed as fixed hex values.
+- `mrconfigid`, `xfam`, and `tdattributes` are ignored by the policy parser.
+
+The object is normalized into the existing DCAP measurement policy model, so
+any `mrtd` value can match with any `rtmr0` value listed in the input.
+
 ### Measurement field names
 
 For Azure vTMP attestations, the preferred field names are PCR register
