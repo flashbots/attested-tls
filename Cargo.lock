@@ -2786,7 +2786,6 @@ dependencies = [
 name = "mock-tdx"
 version = "0.0.1"
 dependencies = [
- "attest-types",
  "axum",
  "dcap-qvl 0.3.12 (git+https://github.com/Phala-Network/dcap-qvl.git?rev=f1dcc65371e941a7b83e3234833d23a1fb232ab1)",
  "hex",

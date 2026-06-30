@@ -283,10 +283,17 @@ impl AttestationGenerator {
                     }
                 }
                 AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
-                    let mut attestation_evidence = dcap::create_dcap_attestation(input_data)?;
-                    attestation_evidence.platform.attestation_type =
-                        self.attestation_type.try_into()?;
-                    Ok(attestation_evidence.into())
+                    #[cfg(any(test, feature = "mock"))]
+                    let platform = placeholder_platform_metadata(self.attestation_type)?;
+                    #[cfg(not(any(test, feature = "mock")))]
+                    let platform =
+                        attest_measure::platform::metadata_for(self.attestation_type.try_into()?)?;
+                    Ok(AttestationExchangeMessage {
+                        attestation_evidence: Some(AttestationEvidence {
+                            quote: dcap::create_dcap_attestation(input_data)?,
+                            platform,
+                        }),
+                    })
                 }
             }
         }
@@ -814,7 +821,11 @@ mod tests {
     #[tokio::test]
     async fn mock_verifier_supports_sync_verification() {
         let input_data = [7u8; 64];
-        let attestation = dcap::create_dcap_attestation(input_data).unwrap();
+        let quote = dcap::create_dcap_attestation(input_data).unwrap();
+        let attestation_evidence = AttestationEvidence {
+            quote,
+            platform: placeholder_platform_metadata(AttestationType::GcpTdx).unwrap(),
+        };
 
         let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
 
@@ -823,7 +834,7 @@ mod tests {
             pccs.ready().await.unwrap();
         }
 
-        let result = verifier.verify_attestation_sync(attestation.into(), input_data);
+        let result = verifier.verify_attestation_sync(attestation_evidence.into(), input_data);
 
         assert!(result.is_ok(), "expected sync mock verification to succeed: {result:?}");
     }

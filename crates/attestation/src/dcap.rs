@@ -1,6 +1,5 @@
 //! Data Center Attestation Primitives (DCAP) evidence generation and
 //! verification
-use attest_types::AttestationEvidence;
 use dcap_qvl::{
     QuoteCollateralV3,
     collateral::get_collateral_for_fmspc,
@@ -22,12 +21,10 @@ const AZURE_BAD_FMSPC: &str = "90C06F000000";
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
 /// Generate a TDX quote
-pub fn create_dcap_attestation(
-    input_data: [u8; 64],
-) -> Result<AttestationEvidence, AttestationError> {
-    let attestation_evidence = generate_quote(input_data)?;
-    tracing::info!("Generated TDX quote of {} bytes", attestation_evidence.quote.len());
-    Ok(attestation_evidence)
+pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
+    let quote = generate_quote(input_data)?;
+    tracing::info!("Generated TDX quote of {} bytes", quote.len());
+    Ok(quote)
 }
 
 /// Verify a DCAP TDX quote, and return the measurement values
@@ -257,19 +254,14 @@ pub fn verify_dcap_attestation_sync(
 
 /// Create a mock quote for testing on non-confidential hardware
 #[cfg(any(test, feature = "mock"))]
-fn generate_quote(input: [u8; 64]) -> Result<AttestationEvidence, AttestationError> {
+fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
     generate_mock_tdx_quote(input).map_err(|error| AttestationError::Mock(format!("{error}")))
 }
 
 /// Create a quote
 #[cfg(not(any(test, feature = "mock")))]
-fn generate_quote(input: [u8; 64]) -> Result<AttestationEvidence, AttestationError> {
-    use attest_measure::platform;
-
-    Ok(AttestationEvidence {
-        quote: tdx_attest::get_quote(&input)?,
-        platform: platform::metadata_for(attest_types::AttestationType::GcpTdx)?,
-    })
+fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
+    Ok(tdx_attest::get_quote(&input)?)
 }
 
 /// Given a [Report] get the input data regardless of report type
@@ -413,12 +405,10 @@ mod tests {
         .unwrap();
         let pccs = Pccs::new(Some(mock_pcs.base_url.clone()));
         let expected_input_data = [0xA5; 64];
-        let attestation = create_dcap_attestation(expected_input_data).unwrap();
+        let quote = create_dcap_attestation(expected_input_data).unwrap();
 
         let measurements =
-            verify_dcap_attestation(attestation.quote, expected_input_data, Some(pccs))
-                .await
-                .unwrap();
+            verify_dcap_attestation(quote, expected_input_data, Some(pccs)).await.unwrap();
 
         assert_eq!(measurements, crate::measurements::mock_dcap_measurements());
         assert_eq!(mock_pcs.tcb_call_count(), 1);

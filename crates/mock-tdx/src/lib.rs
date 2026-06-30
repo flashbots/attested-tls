@@ -1,6 +1,5 @@
 pub mod mock_pcs;
 
-use attest_types::{AttestationEvidence, PlatformMetadata};
 use dcap_qvl::{
     QuoteCollateralV3,
     quote::{
@@ -107,17 +106,9 @@ pub(crate) fn signing_key_from_secret(
 /// Generate a mock TDX DCAP quote using the generated fixture material
 pub fn generate_mock_tdx_quote(
     report_data: [u8; 64],
-) -> Result<AttestationEvidence, Box<dyn std::error::Error>> {
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let collateral = mock_collateral();
-    Ok(AttestationEvidence {
-        quote: generate_mock_tdx_quote_with_collateral(&collateral, report_data)?,
-        platform: PlatformMetadata {
-            attestation_type: attest_types::AttestationType::GcpTdx,
-            num_disks: 0,
-            ram_bytes: 0,
-            acpi: None,
-        },
-    })
+    generate_mock_tdx_quote_with_collateral(&collateral, report_data)
 }
 
 /// Generate a mock TDX DCAP quote from a specific loaded material set
@@ -259,8 +250,8 @@ mod tests {
     fn builds_quote_that_parses_and_verifies() {
         let report_data = [0xAB; 64];
 
-        let attestation_evidence = generate_mock_tdx_quote(report_data).unwrap();
-        let quote = Quote::parse(&attestation_evidence.quote).unwrap();
+        let quote_bytes = generate_mock_tdx_quote(report_data).unwrap();
+        let quote = Quote::parse(&quote_bytes).unwrap();
         assert_eq!(quote.header.version, QUOTE_VERSION);
         assert_eq!(quote.header.tee_type, TEE_TYPE_TDX);
 
@@ -270,8 +261,7 @@ mod tests {
         assert_eq!(quote.ca().unwrap(), "processor");
 
         let verifier = mock_dcap_verifier();
-        let verified =
-            verifier.verify(&attestation_evidence.quote, &collateral, FIXTURE_TIME).unwrap();
+        let verified = verifier.verify(&quote_bytes, &collateral, FIXTURE_TIME).unwrap();
         let dcap_qvl::quote::Report::TD10(report) = verified.report else {
             panic!("expected TD10 report");
         };
@@ -286,13 +276,13 @@ mod tests {
         const TD_REPORT10_BYTE_LEN: usize = 584;
         const AUTH_DATA_SIZE_BYTE_LEN: usize = 4;
 
-        let mut attestation_evidence = generate_mock_tdx_quote([0xCD; 64]).unwrap();
+        let mut quote_bytes = generate_mock_tdx_quote([0xCD; 64]).unwrap();
         let signature_offset = HEADER_BYTE_LEN + TD_REPORT10_BYTE_LEN + AUTH_DATA_SIZE_BYTE_LEN;
-        attestation_evidence.quote[signature_offset] ^= 0x01;
+        quote_bytes[signature_offset] ^= 0x01;
 
         let verifier = mock_dcap_verifier();
         let collateral = mock_collateral();
-        assert!(verifier.verify(&attestation_evidence.quote, &collateral, FIXTURE_TIME).is_err());
+        assert!(verifier.verify(&quote_bytes, &collateral, FIXTURE_TIME).is_err());
     }
 
     #[test]
@@ -304,11 +294,11 @@ mod tests {
         assert!(!EMBEDDED_ROOT_CA_DER.is_empty());
         assert!(collateral.pck_certificate_chain.is_some());
 
-        let attestation_evidence = generate_mock_tdx_quote([0xEF; 64]).unwrap();
-        let quote = Quote::parse(&attestation_evidence.quote).unwrap();
+        let quote_bytes = generate_mock_tdx_quote([0xEF; 64]).unwrap();
+        let quote = Quote::parse(&quote_bytes).unwrap();
         assert_eq!(hex::encode_upper(quote.fmspc().unwrap()), tcb_info.fmspc);
         assert_eq!(quote.header.pce_svn, tcb_info.tcb_levels[0].tcb.pce_svn);
 
-        verifier.verify(&attestation_evidence.quote, &collateral, FIXTURE_TIME).unwrap();
+        verifier.verify(&quote_bytes, &collateral, FIXTURE_TIME).unwrap();
     }
 }
