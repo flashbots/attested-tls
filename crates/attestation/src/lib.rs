@@ -329,15 +329,16 @@ impl AttestationGenerator {
 #[derive(Clone, Debug)]
 pub struct AttestationVerifier {
     /// The measurement policy with accepted values and attestation types
-    pub measurement_policy: MeasurementPolicy,
+    measurement_policy: MeasurementPolicy,
     /// Whether to write quotes to files on disk
-    pub dump_dcap_quotes: bool,
+    dump_dcap_quotes: bool,
+    #[cfg(feature = "azure-verifier")]
     /// Whether to override outdated TCB when on Azure
     ///
     /// This provides a workaround for a known outdated FMSPC used by Azure
-    pub override_azure_outdated_tcb: bool,
+    override_azure_outdated_tcb: bool,
     /// Internal cache for collateral
-    pub internal_pccs: Option<Pccs>,
+    internal_pccs: Option<Pccs>,
     /// Cached GCP firmware blobs indexed by MRTD
     known_gcp_firmware: gcp::GcpFirmwareCache,
 }
@@ -349,6 +350,7 @@ pub struct AttestationVerifierBuilder {
     /// A PCCS service to use - defaults to Intel PCS
     pccs_url: Option<String>,
     dump_dcap_quotes: bool,
+    #[cfg(feature = "azure-verifier")]
     override_azure_outdated_tcb: bool,
     internal_pccs_prewarm: Option<bool>,
 }
@@ -367,6 +369,7 @@ impl AttestationVerifierBuilder {
     /// Whether to override outdated TCB when on Azure
     ///
     /// This provides a workaround for a known outdated FMSPC used by Azure
+    #[cfg(feature = "azure-verifier")]
     pub fn override_azure_outdated_tcb(mut self) -> Self {
         self.override_azure_outdated_tcb = true;
         self
@@ -411,6 +414,7 @@ impl AttestationVerifier {
         Self {
             measurement_policy: builder.measurement_policy,
             dump_dcap_quotes: builder.dump_dcap_quotes,
+            #[cfg(feature = "azure-verifier")]
             override_azure_outdated_tcb: builder.override_azure_outdated_tcb,
             internal_pccs,
             known_gcp_firmware: GcpFirmwareCache::new(),
@@ -422,24 +426,10 @@ impl AttestationVerifier {
             measurement_policy,
             pccs_url: None,
             dump_dcap_quotes: false,
+            #[cfg(feature = "azure-verifier")]
             override_azure_outdated_tcb: false,
             internal_pccs_prewarm: Some(true),
         }
-    }
-
-    pub fn new(
-        measurement_policy: MeasurementPolicy,
-        pccs_url: Option<String>,
-        dump_dcap_quotes: bool,
-        override_azure_outdated_tcb: bool,
-    ) -> Self {
-        Self::build(AttestationVerifierBuilder {
-            measurement_policy,
-            pccs_url,
-            dump_dcap_quotes,
-            override_azure_outdated_tcb,
-            internal_pccs_prewarm: Some(true),
-        })
     }
 
     /// Create an [AttestationVerifier] which will only allow no attestation
@@ -448,6 +438,7 @@ impl AttestationVerifier {
         Self {
             measurement_policy: MeasurementPolicy::expect_none(),
             dump_dcap_quotes: false,
+            #[cfg(feature = "azure-verifier")]
             override_azure_outdated_tcb: false,
             internal_pccs: None,
             known_gcp_firmware: gcp::GcpFirmwareCache::new(),
@@ -460,6 +451,7 @@ impl AttestationVerifier {
         Self {
             measurement_policy: MeasurementPolicy::mock(),
             dump_dcap_quotes: false,
+            #[cfg(feature = "azure-verifier")]
             override_azure_outdated_tcb: false,
             internal_pccs: None,
             known_gcp_firmware: gcp::GcpFirmwareCache::new(),
@@ -472,6 +464,7 @@ impl AttestationVerifier {
         Self {
             measurement_policy: MeasurementPolicy::mock(),
             dump_dcap_quotes: false,
+            #[cfg(feature = "azure-verifier")]
             override_azure_outdated_tcb: false,
             internal_pccs: Some(Pccs::new(Some(pccs_url))),
             known_gcp_firmware: gcp::GcpFirmwareCache::new(),
@@ -651,6 +644,11 @@ impl AttestationVerifier {
     /// Whether we allow no remote attestation
     pub fn has_remote_attestation(&self) -> bool {
         self.measurement_policy.has_remote_attestation()
+    }
+
+    /// Returns the measurement policy used
+    pub fn measurement_policy(&self) -> &MeasurementPolicy {
+        &self.measurement_policy
     }
 }
 

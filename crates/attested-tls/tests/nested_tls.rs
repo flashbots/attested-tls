@@ -120,9 +120,8 @@ async fn attested_client_config(provider: Arc<CryptoProvider>) -> ClientConfig {
 
     let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
     let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
-    if let Some(ref pccs) = verifier.internal_pccs {
-        pccs.ready().await.unwrap();
-    }
+    verifier.ready().await.unwrap();
+
     let verifier = AttestedCertificateVerifier::build(verifier)
         .with_crypto_provider(provider.clone())
         .finish()
