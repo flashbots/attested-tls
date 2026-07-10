@@ -7,10 +7,12 @@ use std::{
 };
 
 pub use attestation::{
+    AttestationEvidence,
     AttestationExchangeMessage,
     AttestationGenerator,
     AttestationType,
     AttestationVerifier,
+    PlatformMetadata,
 };
 use ra_tls::{
     attestation::{Attestation, AttestationQuote, VersionedAttestation},
@@ -534,16 +536,13 @@ impl AttestedCertificateVerifier {
             ra_tls::attestation::from_cert(cert) &&
             let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote
         {
-            if let Ok(message) =
-                serde_json::from_slice::<AttestationExchangeMessage>(&tdx_quote.quote)
-            {
-                return Ok(message);
-            }
-
-            return Ok(AttestationExchangeMessage {
-                attestation_type: AttestationType::DcapTdx,
-                attestation: tdx_quote.quote,
-            });
+            return serde_json::from_slice::<AttestationExchangeMessage>(&tdx_quote.quote).map_err(
+                |err| {
+                    rustls::Error::General(format!(
+                        "Failed to parse AttestationExchangeMessage: {err:?}"
+                    ))
+                },
+            );
         }
 
         // If that fails, extract and parse the extension

@@ -256,16 +256,14 @@ pub fn verify_dcap_attestation_sync(
 
 /// Create a mock quote for testing on non-confidential hardware
 #[cfg(any(test, feature = "mock"))]
-fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, tdx_attest::TdxAttestError> {
-    generate_mock_tdx_quote(input).map_err(|error| {
-        tdx_attest::TdxAttestError::QuoteFailure(format!("mock-tdx quote generation: {error}"))
-    })
+fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
+    generate_mock_tdx_quote(input).map_err(|error| AttestationError::Mock(format!("{error}")))
 }
 
 /// Create a quote
 #[cfg(not(any(test, feature = "mock")))]
-fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, tdx_attest::TdxAttestError> {
-    tdx_attest::get_quote(&input)
+fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
+    Ok(tdx_attest::get_quote(&input)?)
 }
 
 /// Given a [Report] get the input data regardless of report type
@@ -367,7 +365,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(async_measurements, sync_measurements);
-        measurement_policy.check_measurement(&async_measurements).unwrap();
+        measurement_policy.check_measurement(&async_measurements, None).unwrap();
     }
 
     // This specifically tests a quote which has outdated TCB level from Azure

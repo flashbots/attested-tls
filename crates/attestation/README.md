@@ -65,7 +65,6 @@ These are the attestation type names used in the measurements file.
 - `none` - No attestation provided
 - `gcp-tdx` - DCAP TDX on Google Cloud Platform
 - `azure-tdx` - TDX on Azure, with vTPM attestation
-- `qemu-tdx` - TDX on Qemu (no cloud platform)
 - `dcap-tdx` - DCAP TDX (platform not specified)
 
 Local attestation types can be automatically detected. This works by initially
@@ -73,7 +72,7 @@ attempting an Azure attestation, and if it fails attempting a DCAP attestation,
 and if that fails assume no CVM attestation.  On detecting DCAP, a call to the
 Google Cloud metadata API is used to detect whether we are on Google Cloud.
 
-In the case of attestation types `dcap-tdx`, `gcp-tdx`, and `qemu-tdx`, a
+In the case of attestation types `dcap-tdx` and `gcp-tdx`, a
 standard DCAP attestation is generated using the `configfs-tsm` linux filesystem
 interface. This means that the binary must be run with access to
 `/sys/kernel/config/tsm/report` which on many systems requires sudo.  If
@@ -107,6 +106,13 @@ These objects have the following fields:
 - `measurements` - an object with fields referring to the five measurement
   registers. Field names are the same as for the measurement headers (see
   below).
+- `dcap_image_hashes` - an alternative to `measurements` that pins the hashes
+  of the boot components (UKI, kernel, initrd, cmdline, GPT disk GUID) rather
+  than raw register values. The verifier reconstructs the expected RTMRs at
+  check time from these hashes and platform-fetched firmware. See
+  [Portable measurement policies](#portable-measurement-policies) below.
+
+A record may set either `measurements` or `dcap_image_hashes`, not both.
 
 Each measurement register entry supports two mutually exclusive fields:
 
@@ -191,10 +197,11 @@ compatibility:
 </details>
 
 The only mandatory field is `attestation_type`. If an attestation type is
-specified, but no measurements, *any* measurements will be accepted for this
-attestation type. The measurements can still be checked up-stream by the source
-client or target service using header injection described below. But it is then
-up to these external programs to reject unacceptable measurements.
+specified with neither `measurements` nor `dcap_image_hashes`, *any*
+measurements will be accepted for this attestation type. The measurements can
+still be checked up-stream by the source client or target service using header
+injection for example. But it is then up to external programs to reject
+unacceptable measurements.
 
 ### Measurement field names
 
@@ -241,3 +248,51 @@ Legacy numeric field names are still supported for backwards compatibility:
 - "2" - RTMR1
 - "3" - RTMR2
 - "4" - RTMR3
+
+### Portable measurement policies
+
+The `measurements` format above specifies register values, so any change
+to platform-injected values (firmware, RAM size, disk count, ACPI tables)
+changes the expected register values even when the OS image is unchanged.
+
+The `dcap_image_hashes` alternative allows you to specify the OS image's 
+boot-component hashes instead, and the verifier reconstructs the expected
+register values from those hashes plus platform metadata fetched attest
+verification time. The same policy record then matches the same OS images
+across platform variants.
+
+This can be done with the `attest measure` CLI from
+[Easy-TEE/attest](https://github.com/Easy-TEE/attest) which outputs five
+hex-encoded SHA-384 values:
+
+- `uki_authenticode` - authenticode hash of the UKI (unified kernel image)
+- `kernel_authenticode` - authenticode hash of the kernel binary
+- `cmdline_hash` - hash of the kernel command line
+- `initrd_hash` - hash of the initramfs
+- `gpt_disk_guid_hash` - hash derived from GPT partition GUIDs
+
+Example:
+
+```JSON
+[
+  {
+    "measurement_id": "flashbox-l1-v1.0.0",
+    "attestation_type": "gcp-tdx",
+    "dcap_image_hashes": {
+      "uki_authenticode": "fcaceb6d87694746ba2d93a87ef4209f2a7629b7f400097b93241e80b9ec3e1e80f9a4cd8028e6a83f297ea5de8d9abc",
+      "kernel_authenticode": "b6c5133268aa8b440509f3d53ee855a5cd3aeb6441eb109a9f27f14c43bce3e2383856df4af876501ceeb4c9a3b15f0c",
+      "cmdline_hash": "e03b89abf354a38976537b7a9138fd312e4cbf73b61eebc44086491701b1d167b9f6cb97a922325866c93e0834723d87",
+      "initrd_hash": "a5b3d4742045e7d08aa19953c35098e784826b01a84f60568fa69f1a848dafd96ec98b8df616d6142779c9b97318166b",
+      "gpt_disk_guid_hash": "180bac1af9c35cc15e909623c005289539b4da2840d9c9b658fd4968ea4f03e0159402d03da1afc9035e0db30804e282"
+    }
+  }
+]
+```
+
+#### Supported attestation types for portable measurements
+
+Portable policies currently only work with the `"gcp-tdx"` attestation type.
+For GCP, the verifier fetches the platform firmware blob from Google's metadata
+service (keyed by MRTD) and combines it with the image hashes to reconstruct
+`dcap_image_hashes` record with any other attestation type is rejected when
+parsing from JSON.

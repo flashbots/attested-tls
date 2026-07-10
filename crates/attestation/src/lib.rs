@@ -3,8 +3,8 @@
 #[cfg(feature = "azure")]
 pub mod azure;
 pub mod dcap;
+mod gcp;
 pub mod measurements;
-
 use std::{
     fmt::{self, Display, Formatter},
     io::Read,
@@ -12,6 +12,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use attest_measure::platform::PlatformError;
+pub use attest_types::{AttestationEvidence, PlatformMetadata};
 use dcap_qvl::QuoteCollateralV3;
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
@@ -27,10 +29,10 @@ const GCP_METADATA_API: &str = "http://metadata.google.internal";
 /// An attestation payload together with its type
 #[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
 pub struct AttestationExchangeMessage {
-    /// What CVM platform is used (including none)
+    /// What CVM platform is used, including none.
     pub attestation_type: AttestationType,
-    /// The attestation evidence as bytes - in the case of DCAP this is a
-    /// quote
+    /// The attestation evidence bytes. For DCAP and GCP this is a bundled
+    /// quote plus collateral blob.
     pub attestation: Vec<u8>,
 }
 
@@ -64,10 +66,46 @@ impl AttestationExchangeMessage {
                     Err(AttestationError::AttestationTypeNotSupported)
                 }
             }
-            AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
+            AttestationType::DcapTdx | AttestationType::GcpTdx => {
                 let quote = dcap::quote_from_dcap_attestation(&self.attestation)?;
                 Ok(Some(MultiMeasurements::from_dcap_qvl_quote(&quote)?))
             }
+        }
+    }
+
+    pub fn attestation_type(&self) -> AttestationType {
+        self.attestation_type
+    }
+}
+
+impl From<AttestationEvidence> for AttestationExchangeMessage {
+    fn from(attestation_evidence: AttestationEvidence) -> Self {
+        Self {
+            attestation_type: attestation_evidence.platform.attestation_type.into(),
+            attestation: attestation_evidence.quote,
+        }
+    }
+}
+
+impl From<attest_types::AttestationType> for AttestationType {
+    fn from(attestation_type: attest_types::AttestationType) -> Self {
+        match attestation_type {
+            attest_types::AttestationType::GcpTdx => AttestationType::GcpTdx,
+            attest_types::AttestationType::AzureTdx => AttestationType::AzureTdx,
+            attest_types::AttestationType::SelfHostedTdx => AttestationType::DcapTdx,
+        }
+    }
+}
+
+impl TryFrom<AttestationType> for attest_types::AttestationType {
+    type Error = AttestationError;
+
+    fn try_from(attestation_type: AttestationType) -> Result<Self, Self::Error> {
+        match attestation_type {
+            AttestationType::None => Err(AttestationError::AttestationTypeNotAccepted),
+            AttestationType::AzureTdx => Ok(attest_types::AttestationType::AzureTdx),
+            AttestationType::GcpTdx => Ok(attest_types::AttestationType::GcpTdx),
+            AttestationType::DcapTdx => Ok(attest_types::AttestationType::SelfHostedTdx),
         }
     }
 }
@@ -83,9 +121,8 @@ pub enum AttestationType {
     GcpTdx,
     /// TDX on Azure, with MAA
     AzureTdx,
-    /// TDX on Qemu (no cloud platform)
-    QemuTdx,
-    /// DCAP TDX
+    /// DCAP TDX (no cloud platform specified)
+    #[serde(alias = "qemu-tdx")] // To support legacy measurements file format
     DcapTdx,
 }
 
@@ -95,7 +132,6 @@ impl AttestationType {
         match self {
             AttestationType::None => "none",
             AttestationType::AzureTdx => "azure-tdx",
-            AttestationType::QemuTdx => "qemu-tdx",
             AttestationType::GcpTdx => "gcp-tdx",
             AttestationType::DcapTdx => "dcap-tdx",
         }
@@ -179,10 +215,9 @@ impl AttestationGenerator {
             None
         } else {
             match attestation_type {
-                AttestationType::DcapTdx |
-                AttestationType::GcpTdx |
-                AttestationType::QemuTdx |
-                AttestationType::AzureTdx => Some(Pccs::new_without_prewarm(pccs_url)),
+                AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::AzureTdx => {
+                    Some(Pccs::new_without_prewarm(pccs_url))
+                }
                 AttestationType::None => None,
             }
         };
@@ -233,7 +268,7 @@ impl AttestationGenerator {
         pccs_url: Option<String>,
     ) -> Result<Self, AttestationError> {
         if attestation_provider_url.is_some() {
-            // If a remote provide is used, dont do detection
+            // If a remote provider is used, dont do detection
             let attestation_type = serde_json::from_value(serde_json::Value::String(
                 attestation_type_string.ok_or(AttestationError::AttestationTypeNotGiven)?,
             ))?;
@@ -260,15 +295,19 @@ impl AttestationGenerator {
         if let Some(url) = &self.attestation_provider_url {
             Self::use_attestation_provider(url, self.attestation_type, input_data)
         } else {
-            Ok(AttestationExchangeMessage {
-                attestation_type: self.attestation_type,
-                attestation: self.generate_attestation_bytes(input_data)?,
-            })
+            if self.attestation_type == AttestationType::None {
+                Ok(AttestationExchangeMessage::without_attestation())
+            } else {
+                Ok(AttestationExchangeMessage {
+                    attestation_type: self.attestation_type,
+                    attestation: self.generate_attestation_bytes(input_data)?,
+                })
+            }
         }
     }
 
     /// Generate attestation evidence bytes based on attestation type, with
-    /// given input data
+    /// given input data.
     fn generate_attestation_bytes(
         &self,
         input_data: [u8; 64],
@@ -288,7 +327,7 @@ impl AttestationGenerator {
                     Err(AttestationError::AttestationTypeNotSupported)
                 }
             }
-            AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
+            AttestationType::DcapTdx | AttestationType::GcpTdx => {
                 dcap::create_dcap_attestation(input_data, self.internal_pccs.as_ref())
             }
         }
@@ -301,6 +340,10 @@ impl AttestationGenerator {
         attestation_type: AttestationType,
         input_data: [u8; 64],
     ) -> Result<AttestationExchangeMessage, AttestationError> {
+        if attestation_type == AttestationType::None {
+            return Ok(AttestationExchangeMessage::without_attestation());
+        }
+
         let url = format!("{}/attest/{}", url, hex::encode(input_data));
 
         let mut response = ureq::get(&url)
@@ -313,13 +356,8 @@ impl AttestationGenerator {
             .read_to_end(&mut body)
             .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?;
 
-        // If the response is not already wrapped in an attestation exchange
-        // message, wrap it in one
-        if let Ok(message) = AttestationExchangeMessage::decode(&mut &body[..]) {
-            Ok(message)
-        } else {
-            Ok(AttestationExchangeMessage { attestation_type, attestation: body })
-        }
+        AttestationExchangeMessage::decode(&mut &body[..])
+            .map_err(|err| AttestationError::AttestationProvider(err.to_string()))
     }
 }
 
@@ -340,14 +378,17 @@ pub struct AttestationVerifier {
     pub override_azure_outdated_tcb: bool,
     /// Internal cache for collateral
     pub internal_pccs: Option<Pccs>,
+    /// Cached GCP firmware blobs indexed by MRTD
+    known_gcp_firmware: gcp::GcpFirmwareCache,
 }
 
 impl AttestationVerifier {
-    pub fn new(
+    fn build(
         measurement_policy: MeasurementPolicy,
         pccs_url: Option<String>,
         dump_dcap_quotes: bool,
         override_azure_outdated_tcb: bool,
+        known_gcp_firmware: gcp::GcpFirmwareCache,
     ) -> Self {
         Self {
             measurement_policy,
@@ -355,7 +396,23 @@ impl AttestationVerifier {
             dump_dcap_quotes,
             override_azure_outdated_tcb,
             internal_pccs: Some(Pccs::new(pccs_url)),
+            known_gcp_firmware,
         }
+    }
+
+    pub fn new(
+        measurement_policy: MeasurementPolicy,
+        pccs_url: Option<String>,
+        dump_dcap_quotes: bool,
+        override_azure_outdated_tcb: bool,
+    ) -> Self {
+        Self::build(
+            measurement_policy,
+            pccs_url,
+            dump_dcap_quotes,
+            override_azure_outdated_tcb,
+            gcp::GcpFirmwareCache::new(),
+        )
     }
 
     /// Create an [AttestationVerifier] which will only allow no attestation
@@ -367,6 +424,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: None,
+            known_gcp_firmware: gcp::GcpFirmwareCache::new(),
         }
     }
 
@@ -379,6 +437,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: None,
+            known_gcp_firmware: gcp::GcpFirmwareCache::new(),
         }
     }
 
@@ -391,6 +450,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: Some(Pccs::new(Some(pccs_url))),
+            known_gcp_firmware: gcp::GcpFirmwareCache::new(),
         }
     }
 
@@ -420,7 +480,7 @@ impl AttestationVerifier {
         attestation_exchange_message: AttestationExchangeMessage,
         expected_input_data: [u8; 64],
     ) -> Result<Option<MultiMeasurements>, AttestationError> {
-        let attestation_type = attestation_exchange_message.attestation_type;
+        let attestation_type = attestation_exchange_message.attestation_type();
         tracing::debug!("Verifying {attestation_type} attestation");
 
         if self.dump_dcap_quotes {
@@ -442,7 +502,7 @@ impl AttestationVerifier {
                 #[cfg(feature = "azure")]
                 {
                     azure::verify_azure_attestation(
-                        attestation_exchange_message.attestation,
+                        attestation_exchange_message.attestation.clone(),
                         expected_input_data,
                         self.internal_pccs.clone(),
                         self.override_azure_outdated_tcb,
@@ -454,9 +514,9 @@ impl AttestationVerifier {
                     return Err(AttestationError::AttestationTypeNotSupported);
                 }
             }
-            AttestationType::DcapTdx | AttestationType::GcpTdx | AttestationType::QemuTdx => {
+            AttestationType::DcapTdx | AttestationType::GcpTdx => {
                 dcap::verify_dcap_attestation(
-                    attestation_exchange_message.attestation,
+                    attestation_exchange_message.attestation.clone(),
                     expected_input_data,
                     self.internal_pccs.clone(),
                 )
@@ -465,7 +525,12 @@ impl AttestationVerifier {
         };
 
         // Do a measurement / attestation type policy check
-        self.measurement_policy.check_measurement(&measurements)?;
+        let platform_metadata = platform_metadata_for(attestation_type)?;
+        self.measurement_policy.check_measurement_with_gcp_cache(
+            &measurements,
+            platform_metadata.as_ref(),
+            Some(&self.known_gcp_firmware),
+        )?;
 
         tracing::debug!("Verification successful");
         Ok(Some(measurements))
@@ -476,7 +541,7 @@ impl AttestationVerifier {
         attestation_exchange_message: AttestationExchangeMessage,
         expected_input_data: [u8; 64],
     ) -> Result<Option<MultiMeasurements>, AttestationError> {
-        let attestation_type = attestation_exchange_message.attestation_type;
+        let attestation_type = attestation_exchange_message.attestation_type();
         tracing::debug!("Verifying {attestation_type} attestation");
 
         if self.dump_dcap_quotes {
@@ -499,7 +564,7 @@ impl AttestationVerifier {
                 {
                     let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
                     azure::verify_azure_attestation_sync(
-                        attestation_exchange_message.attestation,
+                        attestation_exchange_message.attestation.clone(),
                         expected_input_data,
                         pccs,
                         self.override_azure_outdated_tcb,
@@ -510,23 +575,22 @@ impl AttestationVerifier {
                     return Err(AttestationError::AttestationTypeNotSupported);
                 }
             }
-            AttestationType::DcapTdx | AttestationType::QemuTdx | AttestationType::GcpTdx => {
-                #[cfg(any(test, feature = "mock"))]
-                let pccs =
-                    self.internal_pccs.clone().unwrap_or_else(|| Pccs::new_without_prewarm(None));
-                #[cfg(not(any(test, feature = "mock")))]
-                let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
-
+            AttestationType::DcapTdx | AttestationType::GcpTdx => {
                 dcap::verify_dcap_attestation_sync(
-                    attestation_exchange_message.attestation,
+                    attestation_exchange_message.attestation.clone(),
                     expected_input_data,
-                    pccs,
+                    self.internal_pccs.clone().unwrap_or_else(|| Pccs::new_without_prewarm(None)),
                 )?
             }
         };
 
         // Do a measurement / attestation type policy check
-        self.measurement_policy.check_measurement(&measurements)?;
+        let platform_metadata = platform_metadata_for(attestation_type)?;
+        self.measurement_policy.check_measurement_with_gcp_cache(
+            &measurements,
+            platform_metadata.as_ref(),
+            Some(&self.known_gcp_firmware),
+        )?;
 
         tracing::debug!("Verification successful");
         Ok(Some(measurements))
@@ -540,11 +604,12 @@ impl AttestationVerifier {
 
 /// Write attestation data to a log file
 fn log_attestation(attestation: &AttestationExchangeMessage) {
-    if attestation.attestation_type != AttestationType::None {
+    if !attestation.attestation.is_empty() {
         let timestamp =
             SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_nanos();
 
-        let filename = format!("quotes/{}-{}", attestation.attestation_type, timestamp);
+        let attestation_type = attestation.attestation_type();
+        let filename = format!("quotes/{attestation_type}-{timestamp}");
         let attestation_bytes = attestation.attestation.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
@@ -627,6 +692,37 @@ fn is_local_ip(ip: IpAddr) -> bool {
     }
 }
 
+fn platform_metadata_for(
+    attestation_type: AttestationType,
+) -> Result<Option<PlatformMetadata>, AttestationError> {
+    if attestation_type == AttestationType::None {
+        return Ok(None);
+    }
+
+    #[cfg(any(test, feature = "mock"))]
+    {
+        return Ok(Some(mock_platform_metadata(attestation_type)?));
+    }
+
+    #[cfg(not(any(test, feature = "mock")))]
+    {
+        Ok(Some(attest_measure::platform::metadata_for(attestation_type.try_into()?)?))
+    }
+}
+
+#[cfg(any(test, feature = "mock"))]
+/// Create mock platform metadata for tests
+pub fn mock_platform_metadata(
+    attestation_type: AttestationType,
+) -> Result<PlatformMetadata, AttestationError> {
+    Ok(PlatformMetadata {
+        attestation_type: attestation_type.try_into()?,
+        ram_bytes: 0,
+        num_disks: 0,
+        acpi: None,
+    })
+}
+
 /// An error when generating or verifying an attestation
 #[derive(Error, Debug)]
 pub enum AttestationError {
@@ -665,39 +761,18 @@ pub enum AttestationError {
     Pccs(#[from] PccsError),
     #[error("Sync verification requested but no PCCS configured")]
     NoPccs,
+    #[cfg(any(test, feature = "mock"))]
+    #[error("Cannot create mock attestation: {0}")]
+    Mock(String),
+    #[error("Cannot retrieve platform metadata: {0}")]
+    PlatformMetadata(#[from] PlatformError),
 }
 
 #[cfg(test)]
 mod tests {
-    use mock_tdx::mock_pcs::{MockPcsConfig, spawn_mock_pcs_server};
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-    };
+    use mock_tdx::{generate_mock_tdx_quote, mock_collateral};
 
     use super::*;
-
-    async fn spawn_test_attestation_provider_server(body: Vec<u8>) -> std::net::SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 1024];
-                let _ = socket.read(&mut buf).await;
-
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.write_all(&body).await;
-                let _ = socket.shutdown().await;
-            }
-        });
-
-        addr
-    }
 
     #[test]
     fn attestation_detection_does_not_panic() {
@@ -711,56 +786,21 @@ mod tests {
         let _ = running_on_gcp();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn attestation_provider_response_is_wrapped_if_needed() {
-        let input_data = [0u8; 64];
-
-        let encoded_message = AttestationExchangeMessage {
-            attestation_type: AttestationType::None,
-            attestation: vec![1, 2, 3],
-        }
-        .encode();
-
-        let encoded_addr = spawn_test_attestation_provider_server(encoded_message).await;
-        let encoded_url = format!("http://{encoded_addr}");
-        let decoded = AttestationGenerator::use_attestation_provider(
-            &encoded_url,
-            AttestationType::GcpTdx,
-            input_data,
-        )
-        .unwrap();
-        assert_eq!(decoded.attestation_type, AttestationType::None);
-        assert_eq!(decoded.attestation, vec![1, 2, 3]);
-
-        let raw_addr = spawn_test_attestation_provider_server(vec![9, 8]).await;
-        let raw_url = format!("http://{raw_addr}");
-        let wrapped = AttestationGenerator::use_attestation_provider(
-            &raw_url,
-            AttestationType::DcapTdx,
-            input_data,
-        )
-        .unwrap();
-        assert_eq!(wrapped.attestation_type, AttestationType::DcapTdx);
-        assert_eq!(wrapped.attestation, vec![9, 8]);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn mock_verifier_supports_sync_verification() {
         let input_data = [7u8; 64];
-        let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
-        let pccs = Pccs::new(Some(mock_pcs_server.base_url.clone()));
-        pccs.ready().await.unwrap();
-        let attestation = dcap::create_dcap_attestation(input_data, Some(&pccs)).unwrap();
+        let quote = generate_mock_tdx_quote(input_data).unwrap();
+        let attestation_bytes =
+            serde_json::to_vec(&DcapWithCollateral { quote, collateral: mock_collateral() })
+                .unwrap();
+        let attestation = AttestationExchangeMessage {
+            attestation_type: AttestationType::DcapTdx,
+            attestation: attestation_bytes,
+        };
 
-        let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
-        if let Some(ref pccs) = verifier.internal_pccs {
-            pccs.ready().await.unwrap();
-        }
+        let verifier = AttestationVerifier::mock();
 
-        let result = verifier.verify_attestation_sync(
-            AttestationExchangeMessage { attestation_type: AttestationType::DcapTdx, attestation },
-            input_data,
-        );
+        let result = verifier.verify_attestation_sync(attestation, input_data);
 
         assert!(result.is_ok(), "expected sync mock verification to succeed: {result:?}");
     }
