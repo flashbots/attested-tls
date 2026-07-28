@@ -1,5 +1,5 @@
 //! Provides a test demonstrating using nested-tls and attested-tls together
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use attestation::{AttestationGenerator, AttestationType, AttestationVerifier};
 use attested_tls::{AttestedCertificateResolver, AttestedCertificateVerifier};
@@ -15,8 +15,18 @@ use rustls::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
+static TEST_CRYPTO_PROVIDER: OnceLock<()> = OnceLock::new();
+
+fn install_test_crypto_provider() {
+    TEST_CRYPTO_PROVIDER.get_or_init(|| {
+        let _ = aws_lc_rs::default_provider().install_default();
+    });
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_tls_uses_attested_tls_for_inner_session() {
+    install_test_crypto_provider();
+
     let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
     let (outer_server, outer_client) = plain_tls_config_pair(provider.clone());
     let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig {
@@ -101,6 +111,8 @@ fn attested_server_config(
     provider: Arc<CryptoProvider>,
     attestation_generator: AttestationGenerator,
 ) -> ServerConfig {
+    install_test_crypto_provider();
+
     let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
     let resolver = AttestedCertificateResolver::build(server_name, attestation_generator)
         .with_crypto_provider(provider.clone())
@@ -117,6 +129,8 @@ fn attested_server_config(
 
 /// Create client TLS config with attestation verification
 async fn attested_client_config(provider: Arc<CryptoProvider>) -> ClientConfig {
+    install_test_crypto_provider();
+
     let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
     let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
     if let Some(ref pccs) = verifier.internal_pccs {

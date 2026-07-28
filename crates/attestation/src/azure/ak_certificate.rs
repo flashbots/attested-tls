@@ -177,6 +177,9 @@ fn ca_issuers_urls(cert: &X509Certificate<'_>) -> Vec<String> {
 }
 
 fn fetch_certificate_der(url: &str) -> Result<Vec<u8>, MaaError> {
+    #[cfg(test)]
+    crate::install_test_crypto_provider();
+
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(MaaError::UnsupportedAiaUrl { url: url.to_string() });
     }
@@ -226,14 +229,25 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        sync::OnceLock,
         thread,
         time::Duration,
     };
 
     use super::*;
 
+    static TEST_CRYPTO_PROVIDER: OnceLock<()> = OnceLock::new();
+
+    fn install_test_crypto_provider() {
+        TEST_CRYPTO_PROVIDER.get_or_init(|| {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        });
+    }
+
     #[tokio::test]
     async fn root_should_be_fresh() {
+        install_test_crypto_provider();
+
         let response = reqwest::get(
             "http://www.microsoft.com/pkiops/certs/Microsoft%20RSA%20Devices%20Root%20CA%202021.crt",
         )

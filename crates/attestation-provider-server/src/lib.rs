@@ -48,6 +48,8 @@ pub async fn attestation_provider_client(
     server_addr: SocketAddr,
     attestation_verifier: AttestationVerifier,
 ) -> anyhow::Result<AttestationExchangeMessage> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let input_data = [0; 64];
     let response = reqwest::get(format!("http://{server_addr}/attest/{}", hex::encode(input_data)))
         .await?

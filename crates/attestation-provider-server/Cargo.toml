@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 attestation = { workspace = true }
 tokio = { workspace = true }
+rustls = { workspace = true, default-features = false, features = ["aws_lc_rs"] }
 
 axum = "0.8.6"
 clap = { version = "4.5.51", features = ["derive", "env"] }

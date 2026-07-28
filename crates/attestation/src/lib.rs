@@ -5,6 +5,8 @@ pub mod azure;
 pub mod dcap;
 mod gcp;
 pub mod measurements;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::{
     fmt::{self, Display, Formatter},
     io::Read,
@@ -22,6 +24,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy};
+
+#[cfg(test)]
+static TEST_CRYPTO_PROVIDER: OnceLock<()> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn install_test_crypto_provider() {
+    TEST_CRYPTO_PROVIDER.get_or_init(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
 
 /// Used in attestation type detection to check if we are on GCP
 const GCP_METADATA_API: &str = "http://metadata.google.internal";

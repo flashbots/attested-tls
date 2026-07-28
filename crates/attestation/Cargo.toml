@@ -45,6 +45,7 @@ openssl = { version = "0.10.79", optional = true }
 mock-tdx = { workspace = true }
 tempfile = "3.23.0"
 tokio-rustls = { workspace = true, default-features = true }
+rustls = { workspace = true, default-features = false, features = ["aws_lc_rs"] }
 
 serde-saphyr = "0.0.22"
 

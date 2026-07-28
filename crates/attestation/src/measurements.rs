@@ -416,6 +416,9 @@ impl MeasurementPolicy {
     /// Given either a URL or the path to a file, parse the measurement
     /// policy from JSON
     pub async fn from_file_or_url(file_or_url: String) -> Result<Self, MeasurementFormatError> {
+        #[cfg(test)]
+        crate::install_test_crypto_provider();
+
         if file_or_url.to_lowercase().trim_ascii().starts_with("https://") {
             let measurements_json = reqwest::get(file_or_url).await?.bytes().await?;
             Self::from_json_bytes(measurements_json.to_vec())
