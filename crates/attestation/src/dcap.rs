@@ -11,7 +11,7 @@ use mock_tdx::generate_mock_tdx_quote;
 use pccs::{Pccs, PccsError};
 use thiserror::Error;
 
-use crate::{AttestationError, DcapWithCollateral, measurements::MultiMeasurements};
+use crate::{AttestationError, measurements::MultiMeasurements};
 
 /// FMSPC with which to override TCB level checks on Azure (not used for GCP
 /// or other platforms)
@@ -24,7 +24,7 @@ pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 pub fn create_dcap_attestation(
     input_data: [u8; 64],
     pccs: Option<&Pccs>,
-) -> Result<Vec<u8>, AttestationError> {
+) -> Result<(Vec<u8>, QuoteCollateralV3), AttestationError> {
     let quote = generate_quote(input_data)?;
     tracing::info!("Generated TDX quote of {} bytes", quote.len());
 
@@ -38,16 +38,11 @@ pub fn create_dcap_attestation(
     };
     let collateral = pccs.get_collateral_for_quote_sync(&quote)?;
 
-    Ok(serde_json::to_vec(&DcapWithCollateral { quote, collateral })?)
+    Ok((quote, collateral))
 }
 
 pub fn quote_from_dcap_attestation(input: &[u8]) -> Result<Quote, DcapVerificationError> {
-    let evidence = parse_dcap_evidence(input)?;
-    Ok(Quote::parse(&evidence.quote)?)
-}
-
-fn parse_dcap_evidence(input: &[u8]) -> Result<DcapWithCollateral, DcapVerificationError> {
-    serde_json::from_slice(input).map_err(DcapVerificationError::from)
+    Ok(Quote::parse(input)?)
 }
 
 /// Verify a DCAP TDX quote, and return the measurement values
@@ -58,20 +53,20 @@ fn parse_dcap_evidence(input: &[u8]) -> Result<DcapWithCollateral, DcapVerificat
 pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    _pccs: Option<Pccs>,
+    pccs: Option<Pccs>,
+    collateral: Option<QuoteCollateralV3>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let override_azure_outdated_tcb = false;
-    let evidence = parse_dcap_evidence(&input)?;
-    let quote = Quote::parse(&evidence.quote)?;
-    verify_dcap_attestation_with_collateral_and_timestamp(
-        evidence.quote,
-        quote,
+    verify_dcap_attestation_with_given_timestamp(
+        input,
         expected_input_data,
-        evidence.collateral,
+        pccs,
+        collateral,
         now,
         override_azure_outdated_tcb,
     )
+    .await
 }
 
 /// Synchronous version - Verify a DCAP TDX quote, and return the
@@ -85,17 +80,16 @@ pub async fn verify_dcap_attestation(
 pub fn verify_dcap_attestation_sync(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    _pccs: Pccs,
+    pccs: Pccs,
+    collateral: Option<QuoteCollateralV3>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let override_azure_outdated_tcb = false;
-    let evidence = parse_dcap_evidence(&input)?;
-    let quote = Quote::parse(&evidence.quote)?;
-    verify_dcap_attestation_with_collateral_and_timestamp(
-        evidence.quote,
-        quote,
+    verify_dcap_attestation_with_timestamp_sync(
+        input,
         expected_input_data,
-        evidence.collateral,
+        pccs,
+        collateral,
         now,
         override_azure_outdated_tcb,
     )
@@ -220,14 +214,18 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
 }
 
 #[cfg(any(test, feature = "mock"))]
+#[allow(clippy::unused_async)]
 pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
     _pccs: Option<Pccs>,
+    collateral: Option<QuoteCollateralV3>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
-    let evidence = parse_dcap_evidence(&input)?;
-    let quote = Quote::parse(&evidence.quote)?;
-    let _collateral = evidence.collateral;
+    let quote = Quote::parse(&input)?;
+    let collateral = collateral.unwrap_or_else(mock_tdx::mock_collateral);
+    let verifier = mock_tdx::mock_dcap_verifier();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    verifier.verify(&input, &collateral, now)?;
 
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
     if get_quote_input_data(quote.report) != expected_input_data {
@@ -242,10 +240,13 @@ pub fn verify_dcap_attestation_sync(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
     _pccs: Pccs,
+    collateral: Option<QuoteCollateralV3>,
 ) -> Result<MultiMeasurements, DcapVerificationError> {
-    let evidence = parse_dcap_evidence(&input)?;
-    let quote = Quote::parse(&evidence.quote)?;
-    let _collateral = evidence.collateral;
+    let quote = Quote::parse(&input)?;
+    let collateral = collateral.unwrap_or_else(mock_tdx::mock_collateral);
+    let verifier = mock_tdx::mock_dcap_verifier();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    verifier.verify(&input, &collateral, now)?;
 
     let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
     if get_quote_input_data(quote.report.clone()) != expected_input_data {
@@ -409,10 +410,11 @@ mod tests {
         .unwrap();
         let pccs = Pccs::new(Some(mock_pcs.base_url.clone()));
         let expected_input_data = [0xA5; 64];
-        let attestation_bytes = create_dcap_attestation(expected_input_data, Some(&pccs)).unwrap();
+        let (quote, collateral) =
+            create_dcap_attestation(expected_input_data, Some(&pccs)).unwrap();
 
         let measurements =
-            verify_dcap_attestation(attestation_bytes, expected_input_data, Some(pccs))
+            verify_dcap_attestation(quote, expected_input_data, Some(pccs), Some(collateral))
                 .await
                 .unwrap();
 
