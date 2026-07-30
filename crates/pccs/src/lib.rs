@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -19,6 +21,16 @@ use tokio::{
 };
 use tracing::debug;
 use x509_parser::{prelude::FromDer, revocation_list::CertificateRevocationList};
+
+#[cfg(test)]
+static TEST_CRYPTO_PROVIDER: OnceLock<()> = OnceLock::new();
+
+#[cfg(test)]
+fn install_test_crypto_provider() {
+    TEST_CRYPTO_PROVIDER.get_or_init(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
 
 /// For fetching collateral directly from Intel
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
@@ -377,6 +389,9 @@ impl Pccs {
 
     /// Fetches available FMSPC entries from configured PCCS/PCS endpoint
     async fn fetch_fmspcs(&self) -> Result<Vec<FmspcEntry>, PccsError> {
+        #[cfg(test)]
+        install_test_crypto_provider();
+
         let url = format!("{}/sgx/certification/v4/fmspcs", self.url);
         let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?;
         let response = client.get(&url).send().await?;

@@ -7,10 +7,12 @@ use std::{
 };
 
 pub use attestation::{
+    AttestationEvidence,
     AttestationExchangeMessage,
     AttestationGenerator,
     AttestationType,
     AttestationVerifier,
+    PlatformMetadata,
 };
 use ra_tls::{
     attestation::{Attestation, AttestationQuote, VersionedAttestation},
@@ -534,16 +536,13 @@ impl AttestedCertificateVerifier {
             ra_tls::attestation::from_cert(cert) &&
             let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote
         {
-            if let Ok(message) =
-                serde_json::from_slice::<AttestationExchangeMessage>(&tdx_quote.quote)
-            {
-                return Ok(message);
-            }
-
-            return Ok(AttestationExchangeMessage {
-                attestation_type: AttestationType::DcapTdx,
-                attestation: tdx_quote.quote,
-            });
+            return serde_json::from_slice::<AttestationExchangeMessage>(&tdx_quote.quote).map_err(
+                |err| {
+                    rustls::Error::General(format!(
+                        "Failed to parse AttestationExchangeMessage: {err:?}"
+                    ))
+                },
+            );
         }
 
         // If that fails, extract and parse the extension
@@ -1032,7 +1031,10 @@ pub enum AttestedTlsError {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, sync::Arc};
+    use std::{
+        io::Cursor,
+        sync::{Arc, OnceLock},
+    };
 
     use mock_tdx::mock_pcs::{MockPcsConfig, spawn_mock_pcs_server};
     use ra_tls::rcgen::{
@@ -1054,6 +1056,14 @@ mod tests {
     };
 
     use super::*;
+
+    static TEST_CRYPTO_PROVIDER: OnceLock<()> = OnceLock::new();
+
+    fn install_test_crypto_provider() {
+        TEST_CRYPTO_PROVIDER.get_or_init(|| {
+            let _ = aws_lc_rs::default_provider().install_default();
+        });
+    }
 
     /// Test helper to verify a certificate
     fn verify_server_cert_direct(
@@ -1090,6 +1100,8 @@ mod tests {
         root_store: Option<RootCertStore>,
         provider: Arc<CryptoProvider>,
     ) -> AttestedCertificateVerifier {
+        install_test_crypto_provider();
+
         let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
         let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
         if let Some(ref pccs) = verifier.internal_pccs {
@@ -1532,6 +1544,8 @@ mod tests {
 
     #[tokio::test]
     async fn self_signed_attested_certificate_with_allowed_pubkey_is_accepted() {
+        install_test_crypto_provider();
+
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let resolver = AttestedCertificateResolver::build(
@@ -1672,6 +1686,8 @@ mod tests {
 
     #[tokio::test]
     async fn verifier_reuses_trusted_certificate_cache() {
+        install_test_crypto_provider();
+
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let resolver = AttestedCertificateResolver::build(
@@ -1716,6 +1732,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_verifier_cache_miss_fails_then_succeeds_after_background_fetch() {
+        install_test_crypto_provider();
+
         let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let resolver = AttestedCertificateResolver::build(

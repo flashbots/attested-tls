@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 attestation = { workspace = true }
 tokio = { workspace = true }
+rustls = { workspace = true, default-features = false, features = ["aws_lc_rs"] }
 
 axum = "0.8.6"
 clap = { version = "4.5.51", features = ["derive", "env"] }
@@ -21,5 +22,5 @@ hex = "0.4.3"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 parity-scale-codec = "3.7.5"
-reqwest = { version = "0.12.23", default-features = false }
+reqwest = { workspace = true }
 thiserror = "2.0.17"

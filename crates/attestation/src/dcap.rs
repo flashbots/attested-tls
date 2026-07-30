@@ -254,16 +254,14 @@ pub fn verify_dcap_attestation_sync(
 
 /// Create a mock quote for testing on non-confidential hardware
 #[cfg(any(test, feature = "mock"))]
-fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, tdx_attest::TdxAttestError> {
-    generate_mock_tdx_quote(input).map_err(|error| {
-        tdx_attest::TdxAttestError::QuoteFailure(format!("mock-tdx quote generation: {error}"))
-    })
+fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
+    generate_mock_tdx_quote(input).map_err(|error| AttestationError::Mock(format!("{error}")))
 }
 
 /// Create a quote
 #[cfg(not(any(test, feature = "mock")))]
-fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, tdx_attest::TdxAttestError> {
-    tdx_attest::get_quote(&input)
+fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
+    Ok(tdx_attest::get_quote(&input)?)
 }
 
 /// Given a [Report] get the input data regardless of report type
@@ -363,7 +361,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(async_measurements, sync_measurements);
-        measurement_policy.check_measurement(&async_measurements).unwrap();
+        measurement_policy.check_measurement(&async_measurements, None).unwrap();
     }
 
     // This specifically tests a quote which has outdated TCB level from Azure
@@ -407,12 +405,10 @@ mod tests {
         .unwrap();
         let pccs = Pccs::new(Some(mock_pcs.base_url.clone()));
         let expected_input_data = [0xA5; 64];
-        let attestation_bytes = create_dcap_attestation(expected_input_data).unwrap();
+        let quote = create_dcap_attestation(expected_input_data).unwrap();
 
         let measurements =
-            verify_dcap_attestation(attestation_bytes, expected_input_data, Some(pccs))
-                .await
-                .unwrap();
+            verify_dcap_attestation(quote, expected_input_data, Some(pccs)).await.unwrap();
 
         assert_eq!(measurements, crate::measurements::mock_dcap_measurements());
         assert_eq!(mock_pcs.tcb_call_count(), 1);
