@@ -18,7 +18,7 @@ use attest_measure::platform::PlatformError;
 pub use attest_types::{AttestationEvidence, PlatformMetadata};
 use dcap_qvl::QuoteCollateralV3;
 use measurements::MultiMeasurements;
-use parity_scale_codec::{Decode, Encode, Input, Output};
+use parity_scale_codec::{Decode, Encode};
 use pccs::{Pccs, PccsError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -39,7 +39,7 @@ pub(crate) fn install_test_crypto_provider() {
 const GCP_METADATA_API: &str = "http://metadata.google.internal";
 
 /// An attestation payload together with its type
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
 pub struct AttestationExchangeMessage {
     /// Attestation payload with platform metadata, if present.
     /// `None` means no evidence presented.
@@ -47,7 +47,7 @@ pub struct AttestationExchangeMessage {
 }
 
 /// Attestation evidence and optional verifier collateral.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
 pub struct AttestationEvidenceWithCollateral {
     pub evidence: AttestationEvidence,
     pub collateral: Option<QuoteCollateralV3>,
@@ -93,6 +93,28 @@ impl AttestationExchangeMessage {
             .map(|evidence| evidence.evidence.platform.attestation_type.into())
             .unwrap_or(AttestationType::None)
     }
+
+    /// Decode the native SCALE wire format, with compatibility for the
+    /// JSON formats used by earlier versions.
+    pub fn decode_compatible(input: &[u8]) -> Result<Self, parity_scale_codec::Error> {
+        let mut scale_input = input;
+        if let Ok(message) = Self::decode(&mut scale_input) &&
+            scale_input.is_empty()
+        {
+            return Ok(message);
+        }
+
+        let mut wrapped_json_input = input;
+        if let Ok(json) = Vec::<u8>::decode(&mut wrapped_json_input) &&
+            wrapped_json_input.is_empty() &&
+            let Ok(message) = serde_json::from_slice(&json)
+        {
+            return Ok(message);
+        }
+
+        serde_json::from_slice(input)
+            .map_err(|_| "Failed to decode AttestationExchangeMessage".into())
+    }
 }
 
 impl From<AttestationEvidence> for AttestationExchangeMessage {
@@ -103,25 +125,6 @@ impl From<AttestationEvidence> for AttestationExchangeMessage {
                 collateral: None,
             }),
         }
-    }
-}
-
-impl Encode for AttestationExchangeMessage {
-    fn size_hint(&self) -> usize {
-        serde_json::to_vec(self).map_or(0, |bytes| bytes.size_hint())
-    }
-
-    fn encode_to<T: Output + ?Sized>(&self, dest: &mut T) {
-        let bytes = serde_json::to_vec(self).expect("AttestationExchangeMessage JSON encoding");
-        bytes.encode_to(dest);
-    }
-}
-
-impl Decode for AttestationExchangeMessage {
-    fn decode<I: Input>(input: &mut I) -> Result<Self, parity_scale_codec::Error> {
-        let bytes = Vec::<u8>::decode(input)?;
-        serde_json::from_slice(&bytes)
-            .map_err(|_| "Failed to decode AttestationExchangeMessage JSON".into())
     }
 }
 
@@ -350,11 +353,14 @@ impl AttestationGenerator {
                 {
                     let platform =
                         attest_measure::platform::metadata_for(self.attestation_type.try_into()?)?;
-                    Ok(AttestationEvidence {
-                        quote: azure::create_azure_attestation(input_data)?,
-                        platform,
-                    }
-                    .into())
+                    let (quote, collateral) =
+                        azure::create_azure_attestation(input_data, self.internal_pccs.as_ref())?;
+                    Ok(AttestationExchangeMessage {
+                        attestation_evidence: Some(AttestationEvidenceWithCollateral {
+                            evidence: AttestationEvidence { quote, platform },
+                            collateral: Some(collateral),
+                        }),
+                    })
                 }
                 #[cfg(not(feature = "azure"))]
                 {
@@ -406,7 +412,7 @@ impl AttestationGenerator {
             .read_to_end(&mut body)
             .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?;
 
-        AttestationExchangeMessage::decode(&mut &body[..])
+        AttestationExchangeMessage::decode_compatible(&body)
             .map_err(|err| AttestationError::AttestationProvider(err.to_string()))
     }
 }
@@ -416,9 +422,7 @@ impl AttestationGenerator {
 pub struct AttestationVerifier {
     /// The measurement policy with accepted values and attestation types
     pub measurement_policy: MeasurementPolicy,
-    /// If this is empty, anything will be accepted - but measurements are
-    /// always injected into HTTP headers, so that they can be verified
-    /// upstream A PCCS service to use - defaults to Intel PCS
+    /// A PCCS service to use - defaults to Intel PCS
     pub pccs_url: Option<String>,
     /// Whether to write quotes to files on disk
     pub dump_dcap_quotes: bool,
@@ -559,6 +563,7 @@ impl AttestationVerifier {
                         attestation_evidence.evidence.quote.clone(),
                         expected_input_data,
                         self.internal_pccs.clone(),
+                        attestation_evidence.collateral.clone(),
                         self.override_azure_outdated_tcb,
                     )
                     .await?
@@ -628,11 +633,11 @@ impl AttestationVerifier {
                         .attestation_evidence
                         .as_ref()
                         .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                    let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
                     azure::verify_azure_attestation_sync(
                         attestation_evidence.evidence.quote.clone(),
                         expected_input_data,
-                        pccs,
+                        self.internal_pccs.clone(),
+                        attestation_evidence.collateral.clone(),
                         self.override_azure_outdated_tcb,
                     )?
                 }
@@ -815,8 +820,6 @@ pub enum AttestationError {
     Reqwest(#[from] reqwest::Error),
     #[error("PCCS: {0}")]
     Pccs(#[from] PccsError),
-    #[error("Sync verification requested but no PCCS configured")]
-    NoPccs,
     #[cfg(any(test, feature = "mock"))]
     #[error("Cannot create mock attestation: {0}")]
     Mock(String),
@@ -840,6 +843,32 @@ mod tests {
     #[test]
     fn running_on_gcp_check_does_not_panic() {
         let _ = running_on_gcp();
+    }
+
+    #[test]
+    fn attestation_exchange_decodes_native_scale_and_legacy_json() {
+        let input_data = [7u8; 64];
+        let quote = generate_mock_tdx_quote(input_data).unwrap();
+        let attestation = AttestationExchangeMessage {
+            attestation_evidence: Some(AttestationEvidenceWithCollateral {
+                evidence: AttestationEvidence {
+                    quote: quote.clone(),
+                    platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
+                },
+                collateral: Some(mock_collateral()),
+            }),
+        };
+
+        let json = serde_json::to_vec(&attestation).unwrap();
+        let encodings = [attestation.encode(), json.encode(), json];
+
+        for encoding in encodings {
+            let decoded = AttestationExchangeMessage::decode_compatible(&encoding).unwrap();
+            assert_eq!(decoded.attestation_type(), AttestationType::DcapTdx);
+            let decoded_evidence = decoded.attestation_evidence.unwrap();
+            assert_eq!(decoded_evidence.evidence.quote, quote);
+            assert!(decoded_evidence.collateral.is_some());
+        }
     }
 
     #[tokio::test]

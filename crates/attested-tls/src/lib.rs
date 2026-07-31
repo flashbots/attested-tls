@@ -14,6 +14,7 @@ pub use attestation::{
     AttestationVerifier,
     PlatformMetadata,
 };
+use parity_scale_codec::Encode;
 use ra_tls::{
     attestation::{Attestation, AttestationQuote, VersionedAttestation},
     cert::CertRequest,
@@ -207,11 +208,18 @@ impl AttestedCertificateResolver {
     ) -> Result<VersionedAttestation, AttestedTlsError> {
         let report_data = create_report_data(pubkey, not_before, not_after, subject.as_bytes())?;
         let attestation = attestation_generator.generate_attestation(report_data)?;
-        Ok(VersionedAttestation::V0 {
+        Ok(Self::format_attestation_payload(report_data, attestation))
+    }
+
+    fn format_attestation_payload(
+        report_data: [u8; 64],
+        attestation: AttestationExchangeMessage,
+    ) -> VersionedAttestation {
+        VersionedAttestation::V0 {
             attestation: Attestation {
                 quote: ra_tls::attestation::AttestationQuote::DstackTdx(
                     ra_tls::attestation::TdxQuote {
-                        quote: serde_json::to_vec(&attestation)?,
+                        quote: attestation.encode(),
                         event_log: Vec::new(),
                     },
                 ),
@@ -220,7 +228,7 @@ impl AttestedCertificateResolver {
                 config: String::new(),
                 report: (),
             },
-        })
+        }
     }
 
     /// Start a loop which periodically renews the certificate
@@ -536,13 +544,11 @@ impl AttestedCertificateVerifier {
             ra_tls::attestation::from_cert(cert) &&
             let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote
         {
-            return serde_json::from_slice::<AttestationExchangeMessage>(&tdx_quote.quote).map_err(
-                |err| {
-                    rustls::Error::General(format!(
-                        "Failed to parse AttestationExchangeMessage: {err:?}"
-                    ))
-                },
-            );
+            return AttestationExchangeMessage::decode_compatible(&tdx_quote.quote).map_err(|err| {
+                rustls::Error::General(format!(
+                    "Failed to parse AttestationExchangeMessage: {err:?}"
+                ))
+            });
         }
 
         // If that fails, extract and parse the extension
@@ -554,8 +560,8 @@ impl AttestedCertificateVerifier {
             .ok_or_else(|| Self::bad_encoding("missing attestation extension"))?;
         let payload = yasna::parse_der(ext.value, |reader| reader.read_bytes())
             .map_err(|err| Self::bad_encoding(format!("invalid attestation DER payload: {err}")))?;
-        serde_json::from_slice(&payload)
-            .map_err(|err| Self::bad_encoding(format!("invalid attestation JSON payload: {err}")))
+        AttestationExchangeMessage::decode_compatible(&payload)
+            .map_err(|err| Self::bad_encoding(format!("invalid attestation payload: {err}")))
     }
 
     /// Given a certificate, return the attestation report input data based
@@ -1036,6 +1042,7 @@ mod tests {
         sync::{Arc, OnceLock},
     };
 
+    use attestation::AttestationEvidenceWithCollateral;
     use mock_tdx::mock_pcs::{MockPcsConfig, spawn_mock_pcs_server};
     use ra_tls::rcgen::{
         BasicConstraints,
@@ -1127,6 +1134,54 @@ mod tests {
         std::mem::forget(mock_pcs_server);
         AttestationGenerator::new_with_pccs_url(AttestationType::DcapTdx, None, Some(base_url))
             .unwrap()
+    }
+
+    #[test]
+    fn certificate_round_trips_real_azure_evidence_with_collateral() {
+        let attestation_document: serde_json::Value = serde_saphyr::from_slice(include_bytes!(
+            "../../attestation/test-assets/azure-tdx-with-ak-intermediates-1780922561.yaml"
+        ))
+        .unwrap();
+        let attestation_json = serde_json::to_vec(&attestation_document).unwrap();
+        let collateral = serde_saphyr::from_slice(include_bytes!(
+            "../../attestation/test-assets/azure-collateral-with-ak-intermediates-1780922561.yaml"
+        ))
+        .unwrap();
+        let message = AttestationExchangeMessage {
+            attestation_evidence: Some(AttestationEvidenceWithCollateral {
+                evidence: AttestationEvidence {
+                    quote: attestation_json.clone(),
+                    platform: attestation::mock_platform_metadata(AttestationType::AzureTdx)
+                        .unwrap(),
+                },
+                collateral: Some(collateral),
+            }),
+        };
+        let payload = AttestedCertificateResolver::format_attestation_payload([0u8; 64], message);
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let now = SystemTime::now();
+        let certificate = CertRequest::builder()
+            .key(&key_pair)
+            .subject("azure.example")
+            .not_before(now)
+            .not_after(now + Duration::from_secs(300))
+            .usage_server_auth(true)
+            .usage_client_auth(true)
+            .attestation(&payload)
+            .build()
+            .self_signed()
+            .unwrap();
+        let certificate =
+            AttestedCertificateVerifier::parse_x509_certificate(certificate.der()).unwrap();
+
+        let decoded =
+            AttestedCertificateVerifier::extract_custom_attestation_from_cert(&certificate)
+                .unwrap();
+
+        assert_eq!(decoded.attestation_type(), AttestationType::AzureTdx);
+        let evidence = decoded.attestation_evidence.unwrap();
+        assert_eq!(evidence.evidence.quote, attestation_json);
+        assert!(evidence.collateral.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread")]
