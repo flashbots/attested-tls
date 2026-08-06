@@ -7,7 +7,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use parity_scale_codec::{Decode, Encode};
+use parity_scale_codec::Encode;
 use tokio::net::TcpListener;
 
 #[derive(Clone)]
@@ -56,7 +56,7 @@ pub async fn attestation_provider_client(
         .bytes()
         .await?;
 
-    let remote_attestation_message = AttestationExchangeMessage::decode(&mut &response[..])?;
+    let remote_attestation_message = AttestationExchangeMessage::decode_compatible(&response)?;
     let remote_attestation_type = remote_attestation_message.attestation_type();
 
     println!("Remote attestation type: {remote_attestation_type}");

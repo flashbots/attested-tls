@@ -41,6 +41,10 @@ enum CliCommand {
         /// given)
         #[arg(long)]
         server_attestation_type: Option<String>,
+        /// PCCS URL used to fetch collateral bundled with generated
+        /// attestations. Defaults to Intel PCS.
+        #[arg(long, env = "PCCS_URL")]
+        pccs_url: Option<String>,
     },
     Client {
         /// Socket address of a attestation provider server
@@ -75,10 +79,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        CliCommand::Server { listen_addr, server_attestation_type } => {
+        CliCommand::Server { listen_addr, server_attestation_type, pccs_url } => {
             let none_requested = server_attestation_type.as_deref() == Some("none");
-            let attestation_generator =
-                AttestationGenerator::new_with_detection(server_attestation_type, None)?;
+            let attestation_generator = AttestationGenerator::new_with_detection_and_pccs_url(
+                server_attestation_type,
+                None,
+                pccs_url,
+            )?;
 
             if attestation_generator.attestation_type == AttestationType::None && !none_requested {
                 anyhow::bail!(
@@ -108,4 +115,27 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_accepts_pccs_url() {
+        let cli = Cli::try_parse_from([
+            "attestation-provider-server",
+            "server",
+            "--server-attestation-type",
+            "dcap-tdx",
+            "--pccs-url",
+            "http://127.0.0.1:8081",
+        ])
+        .unwrap();
+
+        let CliCommand::Server { pccs_url, .. } = cli.command else {
+            panic!("expected server command");
+        };
+        assert_eq!(pccs_url.as_deref(), Some("http://127.0.0.1:8081"));
+    }
 }

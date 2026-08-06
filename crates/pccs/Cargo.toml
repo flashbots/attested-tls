@@ -18,6 +18,8 @@ hex = "0.4.3"
 anyhow = "1.0.100"
 reqwest = { workspace = true }
 x509-parser = "0.18.0"
+futures-executor = "0.3.31"
+ureq = "2.12.1"
 
 [dev-dependencies]
 rcgen = "0.14.5"

@@ -12,14 +12,14 @@ This crate provides:
 
 ## Runtime Requirements
 
-Verification uses the [`pccs`](../pccs) crate for collateral caching and
-background refresh. As a result, constructing an `AttestationVerifier` with
-PCCS enabled and calling verification APIs is expected to happen from within a
-Tokio runtime and might panic if called outside of one.
+TDX attestation generation uses the [`pccs`](../pccs) crate to fetch and bundle
+the collateral required to verify the quote. This includes the DCAP quote
+embedded in Azure vTPM evidence. Verification consumes bundled collateral, so
+verifier-side network fetching is not required for the normal path.
 
-Note that although some of the verification API methods are synchronous (for
-example `verify_attestation_sync`), still their functionality depends on
-Tokio-backed background tasks such as PCCS pre-warm and cache refresh.
+Constructing generators that fetch collateral is expected to happen from within
+a Tokio runtime because PCCS cache pre-warm and refresh are driven by Tokio
+background tasks.
 
 ## Feature flags
 
@@ -82,11 +82,13 @@ attempted.
 Alternatively, an external 'attestation provider service' URL can be provided
 which outsources the attestation generation to another process.
 
-When verifying DCAP attestations, the Intel PCS is used to retrieve collateral
-unless a PCCS URL is provided via a command line argument. If outdated TCB is
-used, the quote will fail to verify.  For special cases where outdated TCB
-should be allowed, a custom override function can be passed when verifying which
-may modify collateral before it is validated against the TCB.
+When generating DCAP, GCP TDX, or Azure TDX attestations, Intel PCS is used to
+retrieve collateral unless a PCCS URL is configured. The evidence and
+collateral are serialized together. Verifiers use their PCCS configuration
+only as a fallback when evidence does not include collateral. If outdated TCB
+is used, the quote will fail to verify. For special cases where outdated TCB
+should be allowed, a custom override function can be passed when verifying
+which may modify collateral before it is validated against the TCB.
 
 ## Measurements File
 

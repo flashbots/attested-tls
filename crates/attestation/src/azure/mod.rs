@@ -13,7 +13,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
 use dcap_qvl::QuoteCollateralV3;
 use num_bigint::BigUint;
 use openssl::{error::ErrorStack, pkey::PKey};
-use pccs::Pccs;
+use pccs::{Pccs, PccsError};
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -130,18 +130,23 @@ struct PreparedAzureAttestation {
     tpm_attestation: TpmAttest,
 }
 
-/// Generate a TDX attestation on Azure.
+/// Generate a TDX attestation on Azure and bundle the Intel DCAP
+/// collateral needed to verify its embedded TDX quote.
 ///
-/// This may perform network calls. Azure's IMDS is queried for the TDX
-/// quote, and the vTPM AK certificate's Authority Information Access (AIA)
-/// CA Issuers URLs are followed to include the observed issuer
-/// intermediates in the evidence.
+/// This performs network calls. Azure's IMDS is queried for the TDX quote,
+/// PCCS (or Intel PCS by default) is queried for DCAP collateral, and the
+/// vTPM AK certificate's Authority Information Access (AIA) CA Issuers URLs
+/// are followed to include the observed issuer intermediates in the
+/// evidence.
 ///
 /// The intermediates are included as untrusted evidence so verifiers do not
 /// need network access or AIA-fetching logic. This keeps verification
 /// deterministic and easier to reuse in constrained verifier environments
 /// such as TEEs, onchain verification, or zero-knowledge proof generation.
-pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaError> {
+pub fn create_azure_attestation(
+    input_data: [u8; 64],
+    pccs: Option<&Pccs>,
+) -> Result<(Vec<u8>, QuoteCollateralV3), MaaError> {
     let hcl_report_bytes = vtpm::get_report_with_report_data(&input_data)?;
 
     let hcl = hcl::HclReport::new(hcl_report_bytes.clone())?;
@@ -151,6 +156,15 @@ pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaErro
     // This makes a request to Azure Instance metadata service and gives us a
     // binary response
     let td_quote_bytes = imds::get_td_quote(&td_report_from_hcl)?;
+    let fallback_pccs;
+    let pccs = match pccs {
+        Some(pccs) => pccs,
+        None => {
+            fallback_pccs = Pccs::new_without_prewarm(None);
+            &fallback_pccs
+        }
+    };
+    let collateral = pccs.get_collateral_for_quote_sync(&td_quote_bytes)?;
 
     let ak_certificate_der = read_ak_certificate_from_tpm()?;
     let (remaining_bytes, ak_leaf_certificate) = X509Certificate::from_der(&ak_certificate_der)?;
@@ -188,7 +202,7 @@ pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaErro
     // If this ever fails, then we have a problem and probably just need to
     // increase MAX_AZURE_ATTESTATION_PAYLOAD_SIZE
     ensure_azure_attestation_payload_size(&attestation_json)?;
-    Ok(attestation_json)
+    Ok((attestation_json, collateral))
 }
 
 /// Verify a TDX attestation from Azure
@@ -196,6 +210,7 @@ pub async fn verify_azure_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
     pccs: Option<Pccs>,
+    collateral: Option<QuoteCollateralV3>,
     override_azure_outdated_tcb: bool,
 ) -> Result<super::measurements::MultiMeasurements, MaaError> {
     let now = unix_time_now_secs()?;
@@ -204,7 +219,7 @@ pub async fn verify_azure_attestation(
         input,
         expected_input_data,
         pccs,
-        None,
+        collateral,
         now,
         override_azure_outdated_tcb,
     )
@@ -213,22 +228,24 @@ pub async fn verify_azure_attestation(
 
 /// Verify a TDX attestation from Azure - synchronous version
 ///
-/// This relies on having DCAP collateral already present in the cache
-///
-/// If possible, prefer the async version
+/// Bundled collateral is used when provided. Otherwise collateral is
+/// fetched from the supplied PCCS, or Intel PCS by default.
 pub fn verify_azure_attestation_sync(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs: Pccs,
+    pccs: Option<Pccs>,
+    collateral: Option<QuoteCollateralV3>,
     override_azure_outdated_tcb: bool,
 ) -> Result<super::measurements::MultiMeasurements, MaaError> {
     let now = unix_time_now_secs()?;
+
+    let pccs = pccs.unwrap_or_else(|| Pccs::new_without_prewarm(None));
 
     verify_azure_attestation_with_given_timestamp_sync(
         input,
         expected_input_data,
         pccs,
-        None,
+        collateral,
         now,
         override_azure_outdated_tcb,
     )
@@ -614,6 +631,8 @@ pub enum MaaError {
     ClaimsUserDataInputMismatch,
     #[error("DCAP verification: {0}")]
     DcapVerification(#[from] crate::dcap::DcapVerificationError),
+    #[error("PCCS: {0}")]
+    Pccs(#[from] PccsError),
     #[error(
         "Azure metadata API returned a successful response with non-JSON content-type: {content_type:?}"
     )]
@@ -622,10 +641,7 @@ pub enum MaaError {
 
 #[cfg(test)]
 mod test_utils {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
-
     use super::{AttestationDocument, create_azure_attestation};
-    use crate::dcap::PCS_URL;
 
     /// Capture a complete Azure TDX attestation fixture from inside an
     /// Azure TDX CVM.
@@ -653,26 +669,13 @@ mod test_utils {
 
         // Keep this aligned with existing Azure fixture tests, which use zeroed
         // report input data.
-        let attestation_json = create_azure_attestation([0u8; 64]).unwrap();
+        let (attestation_json, collateral) = create_azure_attestation([0u8; 64], None).unwrap();
         let attestation_document: AttestationDocument =
             serde_json::from_slice(&attestation_json).unwrap();
 
         let intermediate_count =
             attestation_document.tpm_attestation.ak_intermediate_certificates_pem.len();
         assert!(intermediate_count > 0, "captured attestation should include AK intermediates");
-
-        let quote_bytes = BASE64_URL_SAFE.decode(&attestation_document.tdx_quote_base64).unwrap();
-        let quote = dcap_qvl::quote::Quote::parse(&quote_bytes).unwrap();
-        let ca = quote.ca().unwrap();
-        let fmspc = hex::encode_upper(quote.fmspc().unwrap());
-        let collateral = dcap_qvl::collateral::get_collateral_for_fmspc(
-            PCS_URL,
-            fmspc.clone(),
-            ca,
-            false, // TDX, not SGX.
-        )
-        .await
-        .unwrap();
 
         let timestamp =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
@@ -698,14 +701,22 @@ mod test_utils {
 
         println!("wrote {}", attestation_path.display());
         println!("wrote {}", collateral_path.display());
-        println!("quote fmspc={fmspc} ca={ca}");
         println!("ak_intermediate_certificates_pem entries={intermediate_count}");
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use parity_scale_codec::Encode;
+
     use super::*;
+    use crate::{
+        AttestationEvidence,
+        AttestationEvidenceWithCollateral,
+        AttestationExchangeMessage,
+        AttestationType,
+        mock_platform_metadata,
+    };
 
     fn input_data_from_attestation(attestation_bytes: &[u8]) -> [u8; 64] {
         let attestation_document: AttestationDocument =
@@ -729,6 +740,35 @@ mod tests {
     }
 
     #[test]
+    fn azure_evidence_with_collateral_round_trips_through_scale() {
+        let attestation_document: AttestationDocument = serde_saphyr::from_slice(include_bytes!(
+            "../../test-assets/azure-tdx-with-ak-intermediates-1780922561.yaml"
+        ))
+        .unwrap();
+        let attestation_json = serde_json::to_vec(&attestation_document).unwrap();
+        let collateral = serde_saphyr::from_slice(include_bytes!(
+            "../../test-assets/azure-collateral-with-ak-intermediates-1780922561.yaml"
+        ))
+        .unwrap();
+        let message = AttestationExchangeMessage {
+            attestation_evidence: Some(AttestationEvidenceWithCollateral {
+                evidence: AttestationEvidence {
+                    quote: attestation_json.clone(),
+                    platform: mock_platform_metadata(AttestationType::AzureTdx).unwrap(),
+                },
+                collateral: Some(collateral),
+            }),
+        };
+
+        let encoded = message.encode();
+        let decoded = AttestationExchangeMessage::decode_compatible(&encoded).unwrap();
+        assert_eq!(decoded.attestation_type(), AttestationType::AzureTdx);
+        let evidence = decoded.attestation_evidence.unwrap();
+        assert_eq!(evidence.evidence.quote, attestation_json);
+        assert!(evidence.collateral.is_some());
+    }
+
+    #[test]
     fn get_measurements_rejects_oversized_payload_before_deserialize() {
         let actual = MAX_AZURE_ATTESTATION_PAYLOAD_SIZE + 1;
         let input = vec![b'{'; actual];
@@ -749,16 +789,12 @@ mod tests {
         let actual = MAX_AZURE_ATTESTATION_PAYLOAD_SIZE + 1;
         let input = vec![b'{'; actual];
 
-        let err = verify_azure_attestation(input.clone(), [0; 64], None, false).await.unwrap_err();
+        let err =
+            verify_azure_attestation(input.clone(), [0; 64], None, None, false).await.unwrap_err();
         assert_payload_too_large(err, actual);
 
-        let err = verify_azure_attestation_sync(
-            input.clone(),
-            [0; 64],
-            Pccs::new_without_prewarm(None),
-            false,
-        )
-        .unwrap_err();
+        let err =
+            verify_azure_attestation_sync(input.clone(), [0; 64], None, None, false).unwrap_err();
         assert_payload_too_large(err, actual);
 
         let err = verify_azure_attestation_with_given_timestamp(

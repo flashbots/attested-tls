@@ -6,7 +6,7 @@ use std::{
 use dcap_qvl::{
     QuoteCollateralV3,
     intel::{PckExtension, parse_pck_extension},
-    tcb_info::{Tcb, TcbComponents, TcbInfo, TcbLevel, TcbStatus},
+    tcb_info::{Tcb, TcbComponents, TcbInfo, TcbLevel, TcbStatus, TdxModule},
 };
 use p256::{
     SecretKey,
@@ -277,6 +277,12 @@ fn mock_tcb_info(
             tcb_status: TcbStatus::UpToDate,
             advisory_ids: Vec::new(),
         }],
+        tdx_module: Some(TdxModule {
+            mrsigner: hex::encode_upper([0u8; 48]),
+            attributes: hex::encode_upper([0u8; 8]),
+            attributes_mask: hex::encode_upper([0u8; 8]),
+        }),
+        tdx_module_identities: Vec::new(),
     }
 }
 
