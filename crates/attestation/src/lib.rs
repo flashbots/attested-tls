@@ -215,6 +215,81 @@ impl Decode for AttestationType {
     }
 }
 
+// TODO: this fallback (and the two helpers below) belongs in
+// attest-measure's `platform::metadata_for` — a /proc/meminfo fallback
+// there would cover every platform and caller, not just azure. Upstream it
+// to easy-tee/attest, then delete these once attested-tls picks up the
+// fixed attest pin.
+/// Platform metadata for Azure evidence, tolerating hosts without SMBIOS
+/// access.
+///
+/// Azure measurement policies are enforced against vTPM PCRs; no verifier
+/// consults `ram_bytes`/`num_disks` for Azure evidence (they exist for the
+/// portable image-hash policies on DCAP/GCP platforms). Azure marketplace
+/// kernels (linux-azure, linux-azure-fde) do not ship CONFIG_DMI_SYSFS, and
+/// where dmi-sysfs does exist its raw entries are readable by root only, so
+/// a hard dependency on SMBIOS would break Azure attesters on stock kernels
+/// and in non-root services. Use the real SMBIOS values when available and
+/// fall back to /proc/meminfo plus a /sys/block disk count otherwise.
+#[cfg(feature = "azure-attester")]
+fn azure_platform_metadata() -> PlatformMetadata {
+    match attest_measure::platform::metadata_for(attest_types::AttestationType::AzureTdx) {
+        Ok(platform) => platform,
+        Err(error) => {
+            tracing::warn!(
+                "SMBIOS platform metadata unavailable ({error}); \
+                 falling back to /proc/meminfo"
+            );
+            PlatformMetadata {
+                attestation_type: attest_types::AttestationType::AzureTdx,
+                ram_bytes: meminfo_total_bytes().unwrap_or(0),
+                // Mirror metadata_for's Azure adjustment: don't count the
+                // Azure resource disk.
+                num_disks: count_block_devices().saturating_sub(1),
+                // Azure evidence carries no CCEL, so metadata_for reports
+                // no SMBIOS handoff hash and no dm-verity boot for this
+                // platform.
+                acpi: None,
+                smbios_handoff: None,
+                dm_verity_boot: false,
+            }
+        }
+    }
+}
+
+/// MemTotal from /proc/meminfo, in bytes. World-readable on every kernel.
+#[cfg(feature = "azure-attester")]
+fn meminfo_total_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(kib * 1024)
+}
+
+/// Physical block devices under /sys/block, excluding virtual ones — the
+/// same filter attest-measure applies.
+#[cfg(feature = "azure-attester")]
+fn count_block_devices() -> u32 {
+    const VIRTUAL_PREFIXES: &[&str] = &["dm-", "loop", "md", "ram", "zram"];
+    let Ok(entries) = std::fs::read_dir("/sys/block") else {
+        return 0;
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            !VIRTUAL_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+        })
+        .count() as u32
+}
+
 impl Display for AttestationType {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -292,13 +367,10 @@ impl AttestationGenerator {
                 AttestationType::AzureTdx => {
                     #[cfg(azure_attester_x86_64_linux)]
                     {
-                        let platform = attest_measure::platform::metadata_for(
-                            self.attestation_type.try_into()?,
-                        )?;
                         Ok(AttestationExchangeMessage {
                             attestation_evidence: Some(AttestationEvidence {
                                 quote: azure::create_azure_attestation(input_data)?,
-                                platform,
+                                platform: azure_platform_metadata(),
                             }),
                         })
                     }
