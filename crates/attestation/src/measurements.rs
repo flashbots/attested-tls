@@ -421,64 +421,74 @@ impl MeasurementPolicy {
     }
 
     /// Given an attestation type and set of measurements, check whether
-    /// they are acceptable
+    /// they are acceptable.
+    ///
+    /// On success, returns the matched measurements.
     pub fn check_measurement(
         &self,
         measurements: &MultiMeasurements,
         platform_metadata: Option<&PlatformMetadata>,
-    ) -> Result<(), AttestationError> {
+    ) -> Result<ExpectedMeasurements, AttestationError> {
         self.check_measurement_with_gcp_cache(measurements, platform_metadata, None)
     }
 
     /// Given an attestation type and set of measurements, check whether
     /// they are acceptable, passing an optional cache for known GCP
-    /// firmware
+    /// firmware. Returns the expected measurements from the matching policy
+    /// record.
     pub(crate) fn check_measurement_with_gcp_cache(
         &self,
         measurements: &MultiMeasurements,
         platform_metadata: Option<&PlatformMetadata>,
         known_gcp_firmware: Option<&GcpFirmwareCache>,
-    ) -> Result<(), AttestationError> {
-        if self.accepted_measurements.iter().any(|measurement_record| match measurements {
-            MultiMeasurements::Dcap(dcap_measurements) => match &measurement_record.measurements {
-                ExpectedMeasurements::Dcap(expected) => {
-                    // All measurements in our policy must be given and must match
-                    for (k, v) in expected.iter() {
-                        let actual_value = dcap_measurements.get(k);
-                        if !v.iter().any(|v| actual_value == v) {
-                            return false;
+    ) -> Result<ExpectedMeasurements, AttestationError> {
+        self.accepted_measurements
+            .iter()
+            .find(|measurement_record| match measurements {
+                MultiMeasurements::Dcap(dcap_measurements) => {
+                    match &measurement_record.measurements {
+                        ExpectedMeasurements::Dcap(expected) => {
+                            // All measurements in our policy must be given and must match
+                            for (k, v) in expected.iter() {
+                                let actual_value = dcap_measurements.get(k);
+                                if !v.iter().any(|v| actual_value == v) {
+                                    return false;
+                                }
+                            }
+                            true
+                        }
+                        ExpectedMeasurements::Image(image_hashes) => {
+                            compare_portable_dcap_measurement(
+                                image_hashes,
+                                dcap_measurements,
+                                platform_metadata,
+                                known_gcp_firmware,
+                            )
+                        }
+                        ExpectedMeasurements::Azure(_) | ExpectedMeasurements::NoAttestation => {
+                            false
                         }
                     }
-                    true
                 }
-                ExpectedMeasurements::Image(image_hashes) => compare_portable_dcap_measurement(
-                    image_hashes,
-                    dcap_measurements,
-                    platform_metadata,
-                    known_gcp_firmware,
-                ),
-                ExpectedMeasurements::Azure(_) | ExpectedMeasurements::NoAttestation => false,
-            },
-            MultiMeasurements::Azure(azure_measurements) => {
-                if let ExpectedMeasurements::Azure(expected) = &measurement_record.measurements {
-                    for (k, v) in expected.iter() {
-                        match azure_measurements.get(k) {
-                            Some(actual_value) if v.iter().any(|v| actual_value == v) => {}
-                            _ => return false,
+                MultiMeasurements::Azure(azure_measurements) => {
+                    if let ExpectedMeasurements::Azure(expected) = &measurement_record.measurements
+                    {
+                        for (k, v) in expected.iter() {
+                            match azure_measurements.get(k) {
+                                Some(actual_value) if v.iter().any(|v| actual_value == v) => {}
+                                _ => return false,
+                            }
                         }
+                        return true;
                     }
-                    return true;
+                    false
                 }
-                false
-            }
-            MultiMeasurements::NoAttestation => {
-                matches!(measurement_record.measurements, ExpectedMeasurements::NoAttestation)
-            }
-        }) {
-            Ok(())
-        } else {
-            Err(AttestationError::MeasurementsNotAccepted)
-        }
+                MultiMeasurements::NoAttestation => {
+                    matches!(measurement_record.measurements, ExpectedMeasurements::NoAttestation)
+                }
+            })
+            .map(|measurement_record| measurement_record.measurements.clone())
+            .ok_or(AttestationError::MeasurementsNotAccepted)
     }
 
     /// Whether or not we require attestation

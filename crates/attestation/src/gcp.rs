@@ -173,12 +173,14 @@ mod tests {
         };
         let gcp_firmware_cache = create_cache_with_firmware(firmware);
 
-        measurement_policy
+        let matched_measurements = measurement_policy
             .check_measurement_with_gcp_cache(
                 &measurements,
                 Some(&gcp_portable_platform_metadata()),
                 Some(&gcp_firmware_cache),
             )
             .unwrap();
+
+        assert_eq!(matched_measurements, ExpectedMeasurements::Image(gcp_portable_image_hashes()));
     }
 }
