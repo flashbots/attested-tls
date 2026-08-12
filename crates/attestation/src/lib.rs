@@ -718,7 +718,7 @@ impl AttestationVerifier {
 
     /// Replaces the measurement policy used by this verifier and all of its
     /// clones.
-    pub fn set_measurement_policy(&self, measurement_policy: MeasurementPolicy) {
+    pub(crate) fn set_measurement_policy(&self, measurement_policy: MeasurementPolicy) {
         *self.measurement_policy.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
             measurement_policy;
     }
