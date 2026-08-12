@@ -14,7 +14,7 @@ use std::{
     fmt::{self, Display, Formatter},
     io::Read,
     net::IpAddr,
-    sync::{Arc, RwLock, RwLockReadGuard},
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -335,7 +335,7 @@ impl AttestationGenerator {
 pub struct AttestationVerifier {
     /// The measurement policy with accepted values and attestation types,
     /// shared between clones
-    measurement_policy: Arc<RwLock<MeasurementPolicy>>,
+    measurement_policy: Arc<RwLock<MeasurementPolicyState>>,
     /// Whether to write quotes to files on disk
     dump_dcap_quotes: bool,
     #[cfg(feature = "azure-verifier")]
@@ -349,6 +349,20 @@ pub struct AttestationVerifier {
     known_gcp_firmware: gcp::GcpFirmwareCache,
     /// Dynamic measurement policy to re-fetch from file or URL
     dynamic_measurement_policy: Option<String>,
+}
+
+/// Measurement policy together with a generation number used to track
+/// changes
+#[derive(Clone, Debug)]
+struct MeasurementPolicyState {
+    policy: MeasurementPolicy,
+    generation: u64,
+}
+
+impl MeasurementPolicyState {
+    fn new(policy: MeasurementPolicy) -> Self {
+        Self { policy, generation: 0 }
+    }
 }
 
 /// Options used to construct an [AttestationVerifier]
@@ -433,7 +447,9 @@ impl AttestationVerifier {
         });
 
         Self {
-            measurement_policy: Arc::new(RwLock::new(builder.measurement_policy)),
+            measurement_policy: Arc::new(RwLock::new(MeasurementPolicyState::new(
+                builder.measurement_policy,
+            ))),
             dump_dcap_quotes: builder.dump_dcap_quotes,
             #[cfg(feature = "azure-verifier")]
             override_azure_outdated_tcb: builder.override_azure_outdated_tcb,
@@ -459,7 +475,9 @@ impl AttestationVerifier {
     /// and will reject if one is given
     pub fn expect_none() -> Self {
         Self {
-            measurement_policy: Arc::new(RwLock::new(MeasurementPolicy::expect_none())),
+            measurement_policy: Arc::new(RwLock::new(MeasurementPolicyState::new(
+                MeasurementPolicy::expect_none(),
+            ))),
             dump_dcap_quotes: false,
             #[cfg(feature = "azure-verifier")]
             override_azure_outdated_tcb: false,
@@ -473,7 +491,9 @@ impl AttestationVerifier {
     #[cfg(any(test, feature = "mock"))]
     pub fn mock() -> Self {
         Self {
-            measurement_policy: Arc::new(RwLock::new(MeasurementPolicy::mock())),
+            measurement_policy: Arc::new(RwLock::new(MeasurementPolicyState::new(
+                MeasurementPolicy::mock(),
+            ))),
             dump_dcap_quotes: false,
             #[cfg(feature = "azure-verifier")]
             override_azure_outdated_tcb: false,
@@ -487,7 +507,9 @@ impl AttestationVerifier {
     #[cfg(any(test, feature = "mock"))]
     pub fn mock_with_pccs(pccs_url: String) -> Self {
         Self {
-            measurement_policy: Arc::new(RwLock::new(MeasurementPolicy::mock())),
+            measurement_policy: Arc::new(RwLock::new(MeasurementPolicyState::new(
+                MeasurementPolicy::mock(),
+            ))),
             dump_dcap_quotes: false,
             #[cfg(feature = "azure-verifier")]
             override_azure_outdated_tcb: false,
@@ -581,7 +603,8 @@ impl AttestationVerifier {
             .as_ref()
             .map(|evidence| evidence.platform.clone());
 
-        let policy_check = self.measurement_policy_read().check_measurement_with_gcp_cache(
+        let policy_state = self.measurement_policy_read().clone();
+        let policy_check = policy_state.policy.check_measurement_with_gcp_cache(
             &measurements,
             platform_metadata.as_ref(),
             Some(&self.known_gcp_firmware),
@@ -593,8 +616,9 @@ impl AttestationVerifier {
             if let Some(file_or_url) = &self.dynamic_measurement_policy {
                 let new_measurement_policy =
                     MeasurementPolicy::from_file_or_url(file_or_url.to_string()).await?;
-                self.set_measurement_policy(new_measurement_policy);
-                self.measurement_policy_read().check_measurement_with_gcp_cache(
+                let measurement_policy =
+                    self.set_measurement_policy(new_measurement_policy, policy_state.generation);
+                measurement_policy.check_measurement_with_gcp_cache(
                     &measurements,
                     platform_metadata.as_ref(),
                     Some(&self.known_gcp_firmware),
@@ -675,7 +699,8 @@ impl AttestationVerifier {
             .attestation_evidence
             .as_ref()
             .map(|evidence| evidence.platform.clone());
-        let policy_check = self.measurement_policy_read().check_measurement_with_gcp_cache(
+        let policy_state = self.measurement_policy_read().clone();
+        let policy_check = policy_state.policy.check_measurement_with_gcp_cache(
             &measurements,
             platform_metadata.as_ref(),
             Some(&self.known_gcp_firmware),
@@ -685,8 +710,9 @@ impl AttestationVerifier {
             if let Some(file_or_url) = &self.dynamic_measurement_policy {
                 let new_measurement_policy =
                     MeasurementPolicy::from_file_or_url_sync(file_or_url.to_string())?;
-                self.set_measurement_policy(new_measurement_policy);
-                self.measurement_policy_read().check_measurement_with_gcp_cache(
+                let measurement_policy =
+                    self.set_measurement_policy(new_measurement_policy, policy_state.generation);
+                measurement_policy.check_measurement_with_gcp_cache(
                     &measurements,
                     platform_metadata.as_ref(),
                     Some(&self.known_gcp_firmware),
@@ -702,12 +728,12 @@ impl AttestationVerifier {
 
     /// Whether we allow no remote attestation
     pub fn has_remote_attestation(&self) -> bool {
-        self.measurement_policy_read().has_remote_attestation()
+        self.measurement_policy_read().policy.has_remote_attestation()
     }
 
     /// Returns a snapshot of the measurement policy currently in use.
     pub fn measurement_policy(&self) -> MeasurementPolicy {
-        self.measurement_policy_read().clone()
+        self.measurement_policy_read().policy.clone()
     }
 
     /// Whether this verifier automatically refreshes its measurement policy
@@ -717,14 +743,27 @@ impl AttestationVerifier {
     }
 
     /// Replaces the measurement policy used by this verifier and all of its
-    /// clones.
-    pub(crate) fn set_measurement_policy(&self, measurement_policy: MeasurementPolicy) {
-        *self.measurement_policy.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            measurement_policy;
+    /// clones if it has not changed since `expected_generation` was
+    /// observed.
+    pub(crate) fn set_measurement_policy(
+        &self,
+        measurement_policy: MeasurementPolicy,
+        expected_generation: u64,
+    ) -> MeasurementPolicy {
+        let mut state = self.measurement_policy_write();
+        if state.generation == expected_generation {
+            state.policy = measurement_policy;
+            state.generation = state.generation.wrapping_add(1);
+        }
+        state.policy.clone()
     }
 
-    fn measurement_policy_read(&self) -> RwLockReadGuard<'_, MeasurementPolicy> {
+    fn measurement_policy_read(&self) -> RwLockReadGuard<'_, MeasurementPolicyState> {
         self.measurement_policy.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn measurement_policy_write(&self) -> RwLockWriteGuard<'_, MeasurementPolicyState> {
+        self.measurement_policy.write().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -930,9 +969,23 @@ mod tests {
             Err(AttestationError::AttestationTypeNotAccepted)
         ));
 
-        verifier_clone.set_measurement_policy(MeasurementPolicy::expect_none());
+        let generation = verifier_clone.measurement_policy_read().generation;
+        verifier_clone.set_measurement_policy(MeasurementPolicy::expect_none(), generation);
 
         assert!(matches!(verifier.verify_attestation_sync(message, input_data), Ok(None)));
+    }
+
+    #[test]
+    fn stale_measurement_policy_refresh_does_not_overwrite_newer_policy() {
+        let verifier = AttestationVerifier::expect_none();
+        let stale_generation = verifier.measurement_policy_read().generation;
+
+        verifier.set_measurement_policy(MeasurementPolicy::tdx(), stale_generation);
+        let installed_policy =
+            verifier.set_measurement_policy(MeasurementPolicy::expect_none(), stale_generation);
+
+        assert!(installed_policy.has_remote_attestation());
+        assert!(verifier.has_remote_attestation());
     }
 
     #[tokio::test]
