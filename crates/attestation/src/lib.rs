@@ -410,6 +410,12 @@ impl AttestationVerifierBuilder {
         self
     }
 
+    /// Re-fetch the measurement policy from this file or URL after a
+    /// measurement mismatch.
+    ///
+    /// Both asynchronous and synchronous verification perform one retry
+    /// with the refreshed policy. Synchronous URL refreshes block for
+    /// up to ten seconds.
     pub fn with_dynamic_measurements_file_or_url(mut self, file_or_url: String) -> Self {
         self.dynamic_measurement_policy = Some(file_or_url);
         self
@@ -669,11 +675,26 @@ impl AttestationVerifier {
             .attestation_evidence
             .as_ref()
             .map(|evidence| evidence.platform.clone());
-        self.measurement_policy_read().check_measurement_with_gcp_cache(
+        let policy_check = self.measurement_policy_read().check_measurement_with_gcp_cache(
             &measurements,
             platform_metadata.as_ref(),
             Some(&self.known_gcp_firmware),
-        )?;
+        );
+
+        if let Err(err) = policy_check {
+            if let Some(file_or_url) = &self.dynamic_measurement_policy {
+                let new_measurement_policy =
+                    MeasurementPolicy::from_file_or_url_sync(file_or_url.to_string())?;
+                self.set_measurement_policy(new_measurement_policy);
+                self.measurement_policy_read().check_measurement_with_gcp_cache(
+                    &measurements,
+                    platform_metadata.as_ref(),
+                    Some(&self.known_gcp_firmware),
+                )?;
+            } else {
+                return Err(err);
+            }
+        }
 
         tracing::debug!("Verification successful");
         Ok(Some(measurements))
@@ -687,6 +708,12 @@ impl AttestationVerifier {
     /// Returns a snapshot of the measurement policy currently in use.
     pub fn measurement_policy(&self) -> MeasurementPolicy {
         self.measurement_policy_read().clone()
+    }
+
+    /// Whether this verifier automatically refreshes its measurement policy
+    /// after a mismatch.
+    pub fn has_dynamic_measurement_policy(&self) -> bool {
+        self.dynamic_measurement_policy.is_some()
     }
 
     /// Replaces the measurement policy used by this verifier and all of its
@@ -935,5 +962,33 @@ mod tests {
         verifier.verify_attestation(attestation.into(), input_data).await.unwrap();
 
         assert!(verifier.measurement_policy().check_measurement(&measurements, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn sync_verification_refetches_dynamic_measurement_policy_on_mismatch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let policy_path = temp_dir.path().join("measurements.json");
+        std::fs::write(&policy_path, br#"[{"attestation_type":"none"}]"#).unwrap();
+
+        let policy_source = policy_path.to_string_lossy().into_owned();
+        let initial_policy =
+            MeasurementPolicy::from_file_or_url_sync(policy_source.clone()).unwrap();
+        let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
+        let verifier = AttestationVerifier::builder(initial_policy)
+            .pccs_url(mock_pcs_server.base_url.clone())
+            .with_dynamic_measurements_file_or_url(policy_source)
+            .build();
+        verifier.ready().await.unwrap();
+
+        let input_data = [7u8; 64];
+        let quote = dcap::create_dcap_attestation(input_data).unwrap();
+        let attestation = AttestationEvidence {
+            quote,
+            platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
+        };
+
+        std::fs::write(&policy_path, br#"[{"attestation_type":"dcap-tdx"}]"#).unwrap();
+
+        verifier.verify_attestation_sync(attestation.into(), input_data).unwrap();
     }
 }

@@ -487,6 +487,10 @@ impl AttestedCertificateVerifier {
     pub fn try_default(
         attestation_verifier: AttestationVerifier,
     ) -> Result<Self, AttestedTlsError> {
+        if attestation_verifier.has_dynamic_measurement_policy() {
+            return Err(AttestedTlsError::DynamicMeasurementPolicyUnsupported);
+        }
+
         let crypto_provider = default_crypto_provider()?;
 
         let server_verifier = WebPkiServerVerifier::builder(Arc::new({
@@ -956,6 +960,10 @@ impl AttestedCertificateVerifierBuilder {
 
     /// Finish the build of AttestedCertificateVerifier
     pub fn finish(self) -> Result<AttestedCertificateVerifier, AttestedTlsError> {
+        if self.attestation_verifier.has_dynamic_measurement_policy() {
+            return Err(AttestedTlsError::DynamicMeasurementPolicyUnsupported);
+        }
+
         let crypto_provider = match self.crypto_provider {
             None => default_crypto_provider()?,
             Some(provider) => provider,
@@ -1001,6 +1009,8 @@ impl AttestedCertificateVerifierBuilder {
 
 #[derive(Debug, Error)]
 pub enum AttestedTlsError {
+    #[error("Dynamic measurement policies are not supported by AttestedCertificateVerifier")]
+    DynamicMeasurementPolicyUnsupported,
     #[error("Certificate validity duration must be at least {minimum:?}")]
     InvalidCertificateValidityDuration { minimum: Duration },
     #[error("Failed to generate certificate key pair: {0}")]
@@ -1725,6 +1735,25 @@ mod tests {
             UnixTime::now(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn attested_certificate_verifier_rejects_dynamic_measurement_policies() {
+        let dynamic_verifier = AttestationVerifier::builder(
+            attestation::measurements::MeasurementPolicy::expect_none(),
+        )
+        .with_no_internal_pccs()
+        .with_dynamic_measurements_file_or_url("measurements.json".into())
+        .build();
+
+        assert!(matches!(
+            AttestedCertificateVerifier::build(dynamic_verifier.clone()).finish(),
+            Err(AttestedTlsError::DynamicMeasurementPolicyUnsupported)
+        ));
+        assert!(matches!(
+            AttestedCertificateVerifier::try_default(dynamic_verifier),
+            Err(AttestedTlsError::DynamicMeasurementPolicyUnsupported)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]

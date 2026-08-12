@@ -1,6 +1,14 @@
 //! Measurements and policy for enforcing them when validating a remote
 //! attestation
-use std::{collections::HashMap, fmt, fmt::Formatter, net::IpAddr, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fmt,
+    fmt::Formatter,
+    io::Read,
+    net::IpAddr,
+    path::PathBuf,
+    time::Duration,
+};
 
 use attest_measure::dcap::expected_dcap_registers;
 use attest_types::{
@@ -502,6 +510,33 @@ impl MeasurementPolicy {
         }
     }
 
+    /// Synchronously parse a measurement policy from either a URL or a file
+    /// path.
+    pub fn from_file_or_url_sync(file_or_url: String) -> Result<Self, MeasurementFormatError> {
+        #[cfg(test)]
+        crate::install_test_crypto_provider();
+
+        let normalized_source = file_or_url.to_lowercase();
+        let normalized_source = normalized_source.trim_ascii();
+        let is_https = normalized_source.starts_with("https://");
+        let is_http = normalized_source.starts_with("http://");
+        if is_https || is_http {
+            if is_http && !Self::is_loopback_http_url(&file_or_url)? {
+                return Err(MeasurementFormatError::InsecureHttpNotLoopback(file_or_url));
+            }
+
+            let response = ureq::get(&file_or_url)
+                .timeout(Duration::from_secs(10))
+                .call()
+                .map_err(|error| MeasurementFormatError::Ureq(Box::new(error)))?;
+            let mut measurements_json = Vec::new();
+            response.into_reader().read_to_end(&mut measurements_json)?;
+            Self::from_json_bytes(measurements_json)
+        } else {
+            Self::from_json_bytes(std::fs::read(file_or_url)?)
+        }
+    }
+
     /// Given the path to a JSON file containing measurements, return a
     /// [MeasurementPolicy]
     pub async fn from_file(measurement_file: PathBuf) -> Result<Self, MeasurementFormatError> {
@@ -820,6 +855,8 @@ pub enum MeasurementFormatError {
     ParseInt(#[from] std::num::ParseIntError),
     #[error("Failed to read measurements from URL: {0}")]
     Reqwest(#[from] reqwest::Error),
+    #[error("Failed to synchronously read measurements from URL: {0}")]
+    Ureq(#[source] Box<ureq::Error>),
     #[error("Invalid URL: {0}")]
     InvalidUri(#[from] InvalidUri),
     #[error("Refusing to load measurement policy over plain HTTP from non-loopback host: {0}")]
