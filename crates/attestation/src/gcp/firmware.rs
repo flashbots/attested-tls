@@ -1,5 +1,4 @@
-//! Google Cloud Platform specific attestation logic
-
+//! On GCP check MRTD values map to Google endorsed firmware
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
@@ -76,10 +75,11 @@ mod tests {
     use attest_types::{AcpiHashes, DcapImageHashes};
     use dcap_qvl::quote::Quote;
 
+    use super::GcpFirmwareCache;
     use crate::{
+        AttestationType,
         PlatformMetadata,
         dcap::{get_quote_input_data, verify_dcap_attestation_with_given_timestamp},
-        gcp::GcpFirmwareCache,
         measurements::{ExpectedMeasurements, MeasurementPolicy, MeasurementRecord},
     };
 
@@ -97,7 +97,6 @@ mod tests {
         hex::decode(input).unwrap().try_into().unwrap()
     }
 
-    /// Image hashes associated with test fixture
     fn gcp_portable_image_hashes() -> DcapImageHashes {
         DcapImageHashes {
             uki_authenticode: decode_dcap_hash(
@@ -141,20 +140,20 @@ mod tests {
     #[tokio::test]
     async fn test_gcp_tdx_portable_policy_with_stored_collateral() {
         let attestation_bytes: &'static [u8] =
-            include_bytes!("../test-assets/gcp-tdx-1782809233226668671");
+            include_bytes!("../../test-assets/gcp-tdx-1782809233226668671");
         let collateral_bytes: &'static [u8] =
-            include_bytes!("../test-assets/gcp-tdx-collateral-1782809233226668671.yaml");
+            include_bytes!("../../test-assets/gcp-tdx-collateral-1782809233226668671.yaml");
         let firmware_bytes: &'static [u8] =
-            include_bytes!("../test-assets/gcp-tdx-firmware-1782809233226668671.yaml");
+            include_bytes!("../../test-assets/gcp-tdx-firmware-1782809233226668671.yaml");
 
         let expected_input_data = {
             let quote = Quote::parse(attestation_bytes).unwrap();
-            get_quote_input_data(quote.report)
+            get_quote_input_data(&quote.report)
         };
 
         let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
         let firmware = serde_saphyr::from_slice(firmware_bytes).unwrap();
-        let measurements = verify_dcap_attestation_with_given_timestamp(
+        let (measurements, _) = verify_dcap_attestation_with_given_timestamp(
             attestation_bytes.to_vec(),
             expected_input_data,
             None,
@@ -168,6 +167,7 @@ mod tests {
         let measurement_policy = MeasurementPolicy {
             accepted_measurements: vec![MeasurementRecord {
                 measurement_id: "gcp-tdx-portable-image-hashes".to_string(),
+                attestation_type: AttestationType::GcpTdx,
                 measurements: ExpectedMeasurements::Image(gcp_portable_image_hashes()),
             }],
         };

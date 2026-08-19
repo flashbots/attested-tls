@@ -319,6 +319,8 @@ pub struct MeasurementRecord {
     /// An identifier, for example the name and version of the corresponding
     /// OS image
     pub measurement_id: String,
+    /// The attestation type this record accepts
+    pub attestation_type: AttestationType,
     /// The expected measurement register values
     pub measurements: ExpectedMeasurements,
 }
@@ -327,6 +329,7 @@ impl MeasurementRecord {
     pub fn allow_no_attestation() -> Self {
         Self {
             measurement_id: "Allow no attestation".to_string(),
+            attestation_type: AttestationType::None,
             measurements: ExpectedMeasurements::NoAttestation,
         }
     }
@@ -334,6 +337,7 @@ impl MeasurementRecord {
     pub fn allow_any_measurement(attestation_type: AttestationType) -> Self {
         Self {
             measurement_id: format!("Any measurement for {attestation_type}"),
+            attestation_type,
             measurements: match attestation_type {
                 AttestationType::None => ExpectedMeasurements::NoAttestation,
                 AttestationType::AzureTdx => ExpectedMeasurements::Azure(HashMap::new()),
@@ -401,6 +405,7 @@ impl MeasurementPolicy {
         Self {
             accepted_measurements: vec![MeasurementRecord {
                 measurement_id: "test".to_string(),
+                attestation_type: AttestationType::DcapTdx,
                 measurements: ExpectedMeasurements::Dcap(HashMap::from([
                     (DcapMeasurementRegister::MRTD, vec![mock_tdx::MOCK_MRTD]),
                     (DcapMeasurementRegister::RTMR0, vec![mock_tdx::MOCK_RTMR0]),
@@ -431,9 +436,20 @@ impl MeasurementPolicy {
         platform_metadata: Option<&PlatformMetadata>,
         known_gcp_firmware: Option<&GcpFirmwareCache>,
     ) -> Result<(), AttestationError> {
+        let attestation_type = platform_metadata
+            .map(|metadata| metadata.attestation_type.into())
+            .unwrap_or_else(|| match measurements {
+                MultiMeasurements::Dcap(_) => AttestationType::DcapTdx,
+                MultiMeasurements::Azure(_) => AttestationType::AzureTdx,
+                MultiMeasurements::NoAttestation => AttestationType::None,
+            });
+
         if self.accepted_measurements.iter().any(|measurement_record| match measurements {
             MultiMeasurements::Dcap(dcap_measurements) => match &measurement_record.measurements {
                 ExpectedMeasurements::Dcap(expected) => {
+                    if !measurement_record.attestation_type.accepts(attestation_type) {
+                        return false;
+                    }
                     // All measurements in our policy must be given and must match
                     for (k, v) in expected.iter() {
                         let actual_value = dcap_measurements.get(k);
@@ -443,15 +459,21 @@ impl MeasurementPolicy {
                     }
                     true
                 }
-                ExpectedMeasurements::Image(image_hashes) => compare_portable_dcap_measurement(
-                    image_hashes,
-                    dcap_measurements,
-                    platform_metadata,
-                    known_gcp_firmware,
-                ),
+                ExpectedMeasurements::Image(image_hashes) => {
+                    measurement_record.attestation_type.accepts(attestation_type) &&
+                        compare_portable_dcap_measurement(
+                            image_hashes,
+                            dcap_measurements,
+                            platform_metadata,
+                            known_gcp_firmware,
+                        )
+                }
                 ExpectedMeasurements::Azure(_) | ExpectedMeasurements::NoAttestation => false,
             },
             MultiMeasurements::Azure(azure_measurements) => {
+                if !measurement_record.attestation_type.accepts(attestation_type) {
+                    return false;
+                }
                 if let ExpectedMeasurements::Azure(expected) = &measurement_record.measurements {
                     for (k, v) in expected.iter() {
                         match azure_measurements.get(k) {
@@ -464,7 +486,11 @@ impl MeasurementPolicy {
                 false
             }
             MultiMeasurements::NoAttestation => {
-                matches!(measurement_record.measurements, ExpectedMeasurements::NoAttestation)
+                measurement_record.attestation_type.accepts(attestation_type) &&
+                    matches!(
+                        measurement_record.measurements,
+                        ExpectedMeasurements::NoAttestation
+                    )
             }
         }) {
             Ok(())
@@ -591,6 +617,7 @@ impl MeasurementPolicy {
                         if let Some(azure) = portable.azure {
                             measurement_policy.push(MeasurementRecord {
                                 measurement_id: String::new(),
+                                attestation_type: AttestationType::AzureTdx,
                                 measurements: ExpectedMeasurements::Azure(HashMap::from([
                                     (4, vec![azure.pcr4]),
                                     (9, vec![azure.pcr9]),
@@ -601,12 +628,14 @@ impl MeasurementPolicy {
 
                         measurement_policy.push(MeasurementRecord {
                             measurement_id: String::new(),
+                            attestation_type: AttestationType::GcpTdx,
                             measurements: ExpectedMeasurements::Image(portable.dcap),
                         });
                     }
                     MeasurementOutput::Azure(azure) => {
                         measurement_policy.push(MeasurementRecord {
                             measurement_id: String::new(),
+                            attestation_type: AttestationType::AzureTdx,
                             measurements: ExpectedMeasurements::Azure(HashMap::from([
                                 (4, vec![azure.pcr4]),
                                 (9, vec![azure.pcr9]),
@@ -683,6 +712,7 @@ impl MeasurementPolicy {
 
             measurement_policy.push(MeasurementRecord {
                 measurement_id: record.measurement_id.unwrap_or_default(),
+                attestation_type,
                 measurements: expected_measurements,
             });
         }
@@ -975,6 +1005,41 @@ mod tests {
     }
 
     #[test]
+    fn gcp_policy_rejects_dcap_labeled_measurements() {
+        let policy = MeasurementPolicy::single_attestation_type(AttestationType::GcpTdx);
+        let measurements = mock_dcap_measurements();
+        let gcp_metadata = PlatformMetadata {
+            attestation_type: attest_types::AttestationType::GcpTdx,
+            ram_bytes: 0,
+            num_disks: 0,
+            acpi: None,
+        };
+
+        policy.check_measurement(&measurements, Some(&gcp_metadata)).unwrap();
+        assert!(matches!(
+            policy.check_measurement(&measurements, None).unwrap_err(),
+            AttestationError::MeasurementsNotAccepted
+        ));
+    }
+
+    #[test]
+    fn dcap_policy_accepts_gcp_labeled_measurements() {
+        // Policy files written before GCP was distinguished from bare metal
+        // label GCP hosts `dcap-tdx`, so those records must still accept a
+        // peer reporting `gcp-tdx`
+        let policy = MeasurementPolicy::single_attestation_type(AttestationType::DcapTdx);
+        let measurements = mock_dcap_measurements();
+        let gcp_metadata = PlatformMetadata {
+            attestation_type: attest_types::AttestationType::GcpTdx,
+            ram_bytes: 0,
+            num_disks: 0,
+            acpi: None,
+        };
+
+        policy.check_measurement(&measurements, Some(&gcp_metadata)).unwrap();
+    }
+
+    #[test]
     fn test_gcp_image_hash_measurement_policy_accepts_matching_measurements() {
         fn decode_hash(input: &str) -> [u8; 48] {
             hex::decode(input).unwrap().try_into().unwrap()
@@ -1001,6 +1066,7 @@ mod tests {
         let policy = MeasurementPolicy {
             accepted_measurements: vec![MeasurementRecord {
                 measurement_id: "image-hash-policy".to_string(),
+                attestation_type: AttestationType::GcpTdx,
                 measurements: ExpectedMeasurements::Image(image_hashes.clone()),
             }],
         };

@@ -25,7 +25,11 @@ use pccs::{Pccs, PccsError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{dcap::DcapVerificationError, measurements::MeasurementPolicy};
+use crate::{
+    dcap::DcapVerificationError,
+    gcp::{GcpFirmwareCache, GcpProvenanceChecker, GcpProvenanceError},
+    measurements::MeasurementPolicy,
+};
 
 #[cfg(test)]
 static TEST_CRYPTO_PROVIDER: OnceLock<()> = OnceLock::new();
@@ -144,6 +148,15 @@ impl AttestationType {
             AttestationType::GcpTdx => "gcp-tdx",
             AttestationType::DcapTdx => "dcap-tdx",
         }
+    }
+
+    /// Whether a measurement policy record with this attestation type may
+    /// be used to check a peer reporting the given attestation type.
+    ///
+    /// `dcap-tdx` policy also accepts a `gcp-tdx` attestation - as dcap-tdx
+    /// effectively means DCAP on any platform.
+    pub fn accepts(&self, peer: AttestationType) -> bool {
+        matches!((self, peer), (AttestationType::DcapTdx, AttestationType::GcpTdx)) || *self == peer
     }
 
     /// Detect what platform we are on by attempting an attestation
@@ -343,7 +356,9 @@ pub struct AttestationVerifier {
     /// Internal cache for collateral
     pub internal_pccs: Option<Pccs>,
     /// Cached GCP firmware blobs indexed by MRTD
-    known_gcp_firmware: gcp::GcpFirmwareCache,
+    known_gcp_firmware: GcpFirmwareCache,
+    /// Cached PPIDs that have a valid GCP host-registry document
+    gcp_provenance_checker: GcpProvenanceChecker,
 }
 
 impl AttestationVerifier {
@@ -352,7 +367,7 @@ impl AttestationVerifier {
         pccs_url: Option<String>,
         dump_dcap_quotes: bool,
         override_azure_outdated_tcb: bool,
-        known_gcp_firmware: gcp::GcpFirmwareCache,
+        known_gcp_firmware: GcpFirmwareCache,
     ) -> Self {
         Self {
             measurement_policy,
@@ -361,6 +376,7 @@ impl AttestationVerifier {
             override_azure_outdated_tcb,
             internal_pccs: Some(Pccs::new(pccs_url)),
             known_gcp_firmware,
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -388,7 +404,8 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: None,
-            known_gcp_firmware: gcp::GcpFirmwareCache::new(),
+            known_gcp_firmware: GcpFirmwareCache::new(),
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -401,7 +418,8 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: None,
-            known_gcp_firmware: gcp::GcpFirmwareCache::new(),
+            known_gcp_firmware: GcpFirmwareCache::new(),
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -414,7 +432,8 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             internal_pccs: Some(Pccs::new(Some(pccs_url))),
-            known_gcp_firmware: gcp::GcpFirmwareCache::new(),
+            known_gcp_firmware: GcpFirmwareCache::new(),
+            gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
     }
 
@@ -487,12 +506,16 @@ impl AttestationVerifier {
                     .attestation_evidence
                     .as_ref()
                     .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                dcap::verify_dcap_attestation(
+                let (measurements, quote) = dcap::verify_dcap_attestation(
                     attestation_evidence.quote.clone(),
                     expected_input_data,
                     self.internal_pccs.clone(),
                 )
-                .await?
+                .await?;
+                if attestation_type == AttestationType::GcpTdx {
+                    self.gcp_provenance_checker.verify_provenance(quote).await?;
+                }
+                measurements
             }
         };
 
@@ -565,11 +588,15 @@ impl AttestationVerifier {
                 #[cfg(not(any(test, feature = "mock")))]
                 let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
 
-                dcap::verify_dcap_attestation_sync(
+                let (measurements, quote) = dcap::verify_dcap_attestation_sync(
                     attestation_evidence.quote.clone(),
                     expected_input_data,
                     pccs,
-                )?
+                )?;
+                if attestation_type == AttestationType::GcpTdx {
+                    self.gcp_provenance_checker.verify_provenance_sync(&quote)?;
+                }
+                measurements
             }
         };
 
@@ -712,6 +739,8 @@ pub enum AttestationError {
     QuoteGeneration(#[from] tdx_attest::TdxAttestError),
     #[error("DCAP verification: {0}")]
     DcapVerification(#[from] DcapVerificationError),
+    #[error("GCP provenance: {0}")]
+    GcpProvenance(#[from] GcpProvenanceError),
     #[error("Attestation type not supported")]
     AttestationTypeNotSupported,
     #[error("Attestation type not accepted")]
@@ -766,7 +795,7 @@ mod tests {
         let quote = dcap::create_dcap_attestation(input_data).unwrap();
         let attestation_evidence = AttestationEvidence {
             quote,
-            platform: mock_platform_metadata(AttestationType::GcpTdx).unwrap(),
+            platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
         };
 
         let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
