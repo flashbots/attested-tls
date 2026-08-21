@@ -766,7 +766,7 @@ mod tests {
         let quote = dcap::create_dcap_attestation(input_data).unwrap();
         let attestation_evidence = AttestationEvidence {
             quote,
-            platform: mock_platform_metadata(AttestationType::GcpTdx).unwrap(),
+            platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
         };
 
         let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();

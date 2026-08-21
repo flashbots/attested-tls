@@ -115,6 +115,7 @@ mod tests {
             gpt_disk_guid_hash: decode_dcap_hash(
                 "488fa3f08aae01c1a46b497319e8a7d3b7335c9ff4f4d7fe6a3dd62c844b03de22157c0303be58f10e3152687778e68d",
             ),
+            pe_sections: None,
         }
     }
 
@@ -168,6 +169,8 @@ mod tests {
         let measurement_policy = MeasurementPolicy {
             accepted_measurements: vec![MeasurementRecord {
                 measurement_id: "gcp-tdx-portable-image-hashes".to_string(),
+                // The generic DCAP policy type accepts GCP DCAP evidence.
+                attestation_type: crate::AttestationType::DcapTdx,
                 measurements: ExpectedMeasurements::Image(gcp_portable_image_hashes()),
             }],
         };

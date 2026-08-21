@@ -358,7 +358,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(async_measurements, sync_measurements);
-        measurement_policy.check_measurement(&async_measurements, None).unwrap();
+        let platform_metadata =
+            crate::mock_platform_metadata(crate::AttestationType::DcapTdx).unwrap();
+        measurement_policy
+            .check_measurement(&async_measurements, Some(&platform_metadata))
+            .unwrap();
     }
 
     // This specifically tests a quote which has outdated TCB level from Azure

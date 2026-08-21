@@ -264,19 +264,22 @@ changes the expected register values even when the OS image is unchanged.
 
 The `dcap_image_hashes` alternative allows you to specify the OS image's 
 boot-component hashes instead, and the verifier reconstructs the expected
-register values from those hashes plus platform metadata fetched attest
-verification time. The same policy record then matches the same OS images
-across platform variants.
+register values from those hashes plus platform metadata available at
+attestation verification time. The same policy record then matches the same OS
+images across platform variants.
 
 This can be done with the `attest measure` CLI from
 [Easy-TEE/attest](https://github.com/Easy-TEE/attest) which outputs five
-hex-encoded SHA-384 values:
+hex-encoded SHA-384 values and, for images using a recent systemd EFI stub, one
+additional optional value:
 
 - `uki_authenticode` - authenticode hash of the UKI (unified kernel image)
 - `kernel_authenticode` - authenticode hash of the kernel binary
 - `cmdline_hash` - hash of the kernel command line
 - `initrd_hash` - hash of the initramfs
 - `gpt_disk_guid_hash` - hash derived from GPT partition GUIDs
+- `pe_sections` - optional accumulated hash of the UKI PE sections measured by
+  recent systemd EFI stubs
 
 Example:
 
@@ -284,7 +287,7 @@ Example:
 [
   {
     "measurement_id": "flashbox-l1-v1.0.0",
-    "attestation_type": "gcp-tdx",
+    "attestation_type": "dcap-tdx",
     "dcap_image_hashes": {
       "uki_authenticode": "fcaceb6d87694746ba2d93a87ef4209f2a7629b7f400097b93241e80b9ec3e1e80f9a4cd8028e6a83f297ea5de8d9abc",
       "kernel_authenticode": "b6c5133268aa8b440509f3d53ee855a5cd3aeb6441eb109a9f27f14c43bce3e2383856df4af876501ceeb4c9a3b15f0c",
@@ -298,17 +301,18 @@ Example:
 
 #### Supported attestation types for portable measurements
 
-Portable policies currently only work with the `"gcp-tdx"` attestation type.
-For GCP, the verifier fetches the platform firmware blob from Google's metadata
-service (keyed by MRTD) and combines it with the image hashes to reconstruct the
-expected registers. A `dcap_image_hashes` record with any other attestation type
-is rejected when parsing from JSON.
+Portable policies work with the `"dcap-tdx"` and `"gcp-tdx"` attestation types.
+`"dcap-tdx"` accepts DCAP evidence from any platform, including GCP and
+bare-metal TDX, while `"gcp-tdx"` restricts the record to GCP. For bare-metal
+DCAP TDX, the verifier reconstructs and checks the image-dependent RTMR1 and
+RTMR2 registers. For GCP, it additionally fetches the platform firmware blob
+from Google's metadata service (keyed by MRTD) and reconstructs MRTD and RTMR0.
 
 The JSON object emitted directly by `attest measure portable` is also accepted
 as a measurement policy. Its optional `azure` PCR values and its `dcap` image
-hashes are converted into Azure TDX and GCP TDX policy records respectively.
-It can be supplied on its own or as an element of a policy array, including an
-array mixed with records in the policy format described above:
+hashes are converted into an Azure TDX record and a generic DCAP record
+respectively. It can be supplied on its own or as an element of a policy array,
+including an array mixed with records in the policy format described above:
 
 ```JSON
 {

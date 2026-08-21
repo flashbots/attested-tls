@@ -13,8 +13,8 @@ pccs = { workspace = true }
 mock-tdx = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["fs", "rt", "rt-multi-thread"] }
 tokio-rustls = { workspace = true, default-features = false }
-attest-types = { git = "https://github.com/easy-tee/attest.git", rev = "8206cd19d9dcb1978d85a3d8dece06a3ee7a1206" }
-attest-measure = {git = "https://github.com/easy-tee/attest.git", rev = "8206cd19d9dcb1978d85a3d8dece06a3ee7a1206" }
+attest-types = { git = "https://github.com/easy-tee/attest.git", rev = "17d6d8b34c21db581da1a4829b2a9c0a113dd19d" }
+attest-measure = { git = "https://github.com/easy-tee/attest.git", rev = "17d6d8b34c21db581da1a4829b2a9c0a113dd19d" }
 
 anyhow = "1.0.100"
 pem-rfc7468 = { version = "0.7.0", features = ["std"] }
