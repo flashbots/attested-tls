@@ -19,7 +19,7 @@ use attest_types::{
 };
 use dcap_qvl::quote::Report;
 use http::{HeaderValue, header::InvalidHeaderValue, uri::InvalidUri};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::warn;
 
@@ -116,28 +116,6 @@ impl DcapMeasurements {
         Self { mrtd, rtmr0, rtmr1, rtmr2, rtmr3 }
     }
 
-    fn from_map(
-        mut measurements: HashMap<DcapMeasurementRegister, [u8; 48]>,
-    ) -> Result<Self, MeasurementFormatError> {
-        Ok(Self {
-            mrtd: measurements
-                .remove(&DcapMeasurementRegister::MRTD)
-                .ok_or_else(|| MeasurementFormatError::MissingValue("MRTD".to_string()))?,
-            rtmr0: measurements
-                .remove(&DcapMeasurementRegister::RTMR0)
-                .ok_or_else(|| MeasurementFormatError::MissingValue("RTMR0".to_string()))?,
-            rtmr1: measurements
-                .remove(&DcapMeasurementRegister::RTMR1)
-                .ok_or_else(|| MeasurementFormatError::MissingValue("RTMR1".to_string()))?,
-            rtmr2: measurements
-                .remove(&DcapMeasurementRegister::RTMR2)
-                .ok_or_else(|| MeasurementFormatError::MissingValue("RTMR2".to_string()))?,
-            rtmr3: measurements
-                .remove(&DcapMeasurementRegister::RTMR3)
-                .ok_or_else(|| MeasurementFormatError::MissingValue("RTMR3".to_string()))?,
-        })
-    }
-
     fn iter(&self) -> impl Iterator<Item = (DcapMeasurementRegister, &[u8; 48])> {
         [
             (DcapMeasurementRegister::MRTD, &self.mrtd),
@@ -227,63 +205,80 @@ pub enum ExpectedMeasurements {
     NoAttestation,
 }
 
-impl MultiMeasurements {
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", content = "measurements", rename_all = "snake_case")]
+enum ExpectedMeasurementsHeader {
+    Image(DcapImageHashes),
+    Dcap(HashMap<String, Vec<String>>),
+    Azure(HashMap<String, Vec<String>>),
+    NoAttestation,
+}
+
+impl ExpectedMeasurements {
     /// Convert to the JSON format used in HTTP headers
     pub fn to_header_format(&self) -> Result<HeaderValue, MeasurementFormatError> {
-        let measurements_map = match self {
-            MultiMeasurements::Dcap(dcap_measurements) => dcap_measurements
-                .iter()
-                .map(|(register, value)| ((register as u8).to_string(), hex::encode(value)))
-                .collect(),
-            MultiMeasurements::Azure(azure_measurements) => azure_measurements
-                .iter()
-                .map(|(index, value)| (index.to_string(), hex::encode(value)))
-                .collect(),
-            MultiMeasurements::NoAttestation => HashMap::new(),
+        let header_measurements = match self {
+            Self::Image(image_hashes) => ExpectedMeasurementsHeader::Image(image_hashes.clone()),
+            Self::Dcap(dcap_measurements) => ExpectedMeasurementsHeader::Dcap(
+                dcap_measurements
+                    .iter()
+                    .map(|(register, values)| {
+                        (
+                            (register.clone() as u8).to_string(),
+                            values.iter().map(hex::encode).collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+            Self::Azure(azure_measurements) => ExpectedMeasurementsHeader::Azure(
+                azure_measurements
+                    .iter()
+                    .map(|(index, values)| {
+                        (index.to_string(), values.iter().map(hex::encode).collect())
+                    })
+                    .collect(),
+            ),
+            Self::NoAttestation => ExpectedMeasurementsHeader::NoAttestation,
         };
 
-        Ok(HeaderValue::from_str(&serde_json::to_string(&measurements_map)?)?)
+        Ok(HeaderValue::from_str(&serde_json::to_string(&header_measurements)?)?)
     }
 
     /// Parse the JSON used in HTTP headers
-    pub fn from_header_format(
-        input: &str,
-        attestation_type: AttestationType,
-    ) -> Result<Self, MeasurementFormatError> {
-        let measurements_map: HashMap<u8, String> = serde_json::from_str(input)?;
+    pub fn from_header_format(input: &str) -> Result<Self, MeasurementFormatError> {
+        fn decode_values<const N: usize>(
+            values: Vec<String>,
+        ) -> Result<Vec<[u8; N]>, MeasurementFormatError> {
+            values
+                .into_iter()
+                .map(|value| {
+                    hex::decode(value)?.try_into().map_err(|_| MeasurementFormatError::BadLength)
+                })
+                .collect()
+        }
 
-        Ok(match attestation_type {
-            AttestationType::None => Self::NoAttestation,
-            AttestationType::AzureTdx => Self::Azure(
-                measurements_map
+        Ok(match serde_json::from_str(input)? {
+            ExpectedMeasurementsHeader::Image(image_hashes) => Self::Image(image_hashes),
+            ExpectedMeasurementsHeader::Dcap(dcap_measurements) => Self::Dcap(
+                dcap_measurements
                     .into_iter()
-                    .map(|(k, v)| {
-                        Ok((
-                            k as u32,
-                            hex::decode(v)?
-                                .try_into()
-                                .map_err(|_| MeasurementFormatError::BadLength)?,
-                        ))
+                    .map(|(register, values)| {
+                        Ok((register.parse::<u8>()?.try_into()?, decode_values::<48>(values)?))
                     })
                     .collect::<Result<_, MeasurementFormatError>>()?,
             ),
-            AttestationType::DcapTdx | AttestationType::GcpTdx => {
-                let measurements_map = measurements_map
+            ExpectedMeasurementsHeader::Azure(azure_measurements) => Self::Azure(
+                azure_measurements
                     .into_iter()
-                    .map(|(k, v)| {
-                        Ok((
-                            k.try_into()?,
-                            hex::decode(v)?
-                                .try_into()
-                                .map_err(|_| MeasurementFormatError::BadLength)?,
-                        ))
-                    })
-                    .collect::<Result<_, MeasurementFormatError>>()?;
-                Self::Dcap(DcapMeasurements::from_map(measurements_map)?)
-            }
+                    .map(|(index, values)| Ok((index.parse()?, decode_values::<32>(values)?)))
+                    .collect::<Result<_, MeasurementFormatError>>()?,
+            ),
+            ExpectedMeasurementsHeader::NoAttestation => Self::NoAttestation,
         })
     }
+}
 
+impl MultiMeasurements {
     /// Given a quote from the dcap_qvl library, extract the measurements
     pub fn from_dcap_qvl_quote(
         quote: &dcap_qvl::quote::Quote,
@@ -421,64 +416,74 @@ impl MeasurementPolicy {
     }
 
     /// Given an attestation type and set of measurements, check whether
-    /// they are acceptable
+    /// they are acceptable.
+    ///
+    /// On success, returns the matched measurements.
     pub fn check_measurement(
         &self,
         measurements: &MultiMeasurements,
         platform_metadata: Option<&PlatformMetadata>,
-    ) -> Result<(), AttestationError> {
+    ) -> Result<ExpectedMeasurements, AttestationError> {
         self.check_measurement_with_gcp_cache(measurements, platform_metadata, None)
     }
 
     /// Given an attestation type and set of measurements, check whether
     /// they are acceptable, passing an optional cache for known GCP
-    /// firmware
+    /// firmware. Returns the expected measurements from the matching policy
+    /// record.
     pub(crate) fn check_measurement_with_gcp_cache(
         &self,
         measurements: &MultiMeasurements,
         platform_metadata: Option<&PlatformMetadata>,
         known_gcp_firmware: Option<&GcpFirmwareCache>,
-    ) -> Result<(), AttestationError> {
-        if self.accepted_measurements.iter().any(|measurement_record| match measurements {
-            MultiMeasurements::Dcap(dcap_measurements) => match &measurement_record.measurements {
-                ExpectedMeasurements::Dcap(expected) => {
-                    // All measurements in our policy must be given and must match
-                    for (k, v) in expected.iter() {
-                        let actual_value = dcap_measurements.get(k);
-                        if !v.iter().any(|v| actual_value == v) {
-                            return false;
+    ) -> Result<ExpectedMeasurements, AttestationError> {
+        self.accepted_measurements
+            .iter()
+            .find(|measurement_record| match measurements {
+                MultiMeasurements::Dcap(dcap_measurements) => {
+                    match &measurement_record.measurements {
+                        ExpectedMeasurements::Dcap(expected) => {
+                            // All measurements in our policy must be given and must match
+                            for (k, v) in expected.iter() {
+                                let actual_value = dcap_measurements.get(k);
+                                if !v.iter().any(|v| actual_value == v) {
+                                    return false;
+                                }
+                            }
+                            true
+                        }
+                        ExpectedMeasurements::Image(image_hashes) => {
+                            compare_portable_dcap_measurement(
+                                image_hashes,
+                                dcap_measurements,
+                                platform_metadata,
+                                known_gcp_firmware,
+                            )
+                        }
+                        ExpectedMeasurements::Azure(_) | ExpectedMeasurements::NoAttestation => {
+                            false
                         }
                     }
-                    true
                 }
-                ExpectedMeasurements::Image(image_hashes) => compare_portable_dcap_measurement(
-                    image_hashes,
-                    dcap_measurements,
-                    platform_metadata,
-                    known_gcp_firmware,
-                ),
-                ExpectedMeasurements::Azure(_) | ExpectedMeasurements::NoAttestation => false,
-            },
-            MultiMeasurements::Azure(azure_measurements) => {
-                if let ExpectedMeasurements::Azure(expected) = &measurement_record.measurements {
-                    for (k, v) in expected.iter() {
-                        match azure_measurements.get(k) {
-                            Some(actual_value) if v.iter().any(|v| actual_value == v) => {}
-                            _ => return false,
+                MultiMeasurements::Azure(azure_measurements) => {
+                    if let ExpectedMeasurements::Azure(expected) = &measurement_record.measurements
+                    {
+                        for (k, v) in expected.iter() {
+                            match azure_measurements.get(k) {
+                                Some(actual_value) if v.iter().any(|v| actual_value == v) => {}
+                                _ => return false,
+                            }
                         }
+                        return true;
                     }
-                    return true;
+                    false
                 }
-                false
-            }
-            MultiMeasurements::NoAttestation => {
-                matches!(measurement_record.measurements, ExpectedMeasurements::NoAttestation)
-            }
-        }) {
-            Ok(())
-        } else {
-            Err(AttestationError::MeasurementsNotAccepted)
-        }
+                MultiMeasurements::NoAttestation => {
+                    matches!(measurement_record.measurements, ExpectedMeasurements::NoAttestation)
+                }
+            })
+            .map(|measurement_record| measurement_record.measurements.clone())
+            .ok_or(AttestationError::MeasurementsNotAccepted)
     }
 
     /// Whether or not we require attestation
@@ -837,8 +842,6 @@ pub(crate) fn compare_portable_dcap_measurement(
 pub enum MeasurementFormatError {
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("Missing value: {0}")]
-    MissingValue(String),
     #[error("Invalid header value: {0}")]
     BadHeaderValue(#[from] InvalidHeaderValue),
     #[error("IO: {0}")]
@@ -1116,14 +1119,46 @@ mod tests {
     }
 
     #[test]
-    fn test_dcap_header_format_rejects_incomplete_measurements() {
-        let input = serde_json::to_string(&HashMap::from([("0", hex::encode([0u8; 48]))])).unwrap();
+    fn expected_measurements_header_format_round_trips_all_variants() {
+        let measurements = [
+            ExpectedMeasurements::Image(DcapImageHashes {
+                uki_authenticode: [0x11; 48],
+                kernel_authenticode: [0x22; 48],
+                cmdline_hash: [0x33; 48],
+                initrd_hash: [0x44; 48],
+                gpt_disk_guid_hash: [0x55; 48],
+            }),
+            ExpectedMeasurements::Dcap(HashMap::from([
+                (DcapMeasurementRegister::MRTD, vec![[0x66; 48], [0x77; 48]]),
+                (DcapMeasurementRegister::RTMR2, vec![[0x88; 48]]),
+            ])),
+            ExpectedMeasurements::Azure(HashMap::from([
+                (4, vec![[0x99; 32], [0xaa; 32]]),
+                (11, vec![[0xbb; 32]]),
+            ])),
+            ExpectedMeasurements::NoAttestation,
+        ];
 
-        let result = MultiMeasurements::from_header_format(&input, AttestationType::DcapTdx);
+        for expected in measurements {
+            let header = expected.to_header_format().unwrap();
+            let decoded =
+                ExpectedMeasurements::from_header_format(header.to_str().unwrap()).unwrap();
+
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn expected_measurements_header_format_rejects_bad_hash_length() {
+        let input = serde_json::json!({
+            "type": "dcap",
+            "measurements": { "0": ["00"] },
+        })
+        .to_string();
 
         assert!(matches!(
-            result,
-            Err(MeasurementFormatError::MissingValue(register)) if register == "RTMR0"
+            ExpectedMeasurements::from_header_format(&input),
+            Err(MeasurementFormatError::BadLength)
         ));
     }
 

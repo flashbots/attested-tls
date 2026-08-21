@@ -10,6 +10,22 @@ This crate provides:
 - Attestation generation and verification for DCAP and (optionally) Azure
 - Parsing and evaluation of measurement policies
 
+## Verification results
+
+`AttestationVerifier::verify_attestation` and
+`AttestationVerifier::verify_attestation_sync` return the
+`ExpectedMeasurements` value from the policy record that accepted the
+attestation. This is the matched policy value, not the raw register values
+extracted from the quote. For example, verification against a portable policy
+returns `ExpectedMeasurements::Image`, while an allow-any DCAP policy returns
+`ExpectedMeasurements::Dcap` with an empty register map. Successful
+verification without attestation returns `ExpectedMeasurements::NoAttestation`.
+
+Matched expected measurements can be transported in an HTTP header using
+`ExpectedMeasurements::to_header_format` and reconstructed with
+`ExpectedMeasurements::from_header_format`. See
+[Expected measurement header format](#expected-measurement-header-format).
+
 ## Runtime Requirements
 
 Verification uses the [`pccs`](../pccs) crate for collateral caching and
@@ -111,8 +127,7 @@ These objects have the following fields:
 - `attestation_type` - a string containing one of the attestation types
   (confidential computing platforms) described below.
 - `measurements` - an object with fields referring to the five measurement
-  registers. Field names are the same as for the measurement headers (see
-  below).
+  registers. See [Measurement field names](#measurement-field-names).
 - `dcap_image_hashes` - an alternative to `measurements` that pins the hashes
   of the boot components (UKI, kernel, initrd, cmdline, GPT disk GUID) rather
   than raw register values. The verifier reconstructs the expected RTMRs at
@@ -255,6 +270,69 @@ Legacy numeric field names are still supported for backwards compatibility:
 - "2" - RTMR1
 - "3" - RTMR2
 - "4" - RTMR3
+
+### Expected measurement header format
+
+`ExpectedMeasurements::to_header_format` serializes the matched policy value
+as self-describing JSON suitable for an HTTP `HeaderValue`. Hashes are
+lowercase hexadecimal strings. Both SHA-384 DCAP values and SHA-256 Azure
+values are represented as hex.
+
+DCAP and Azure register values are arrays because a policy can accept more
+than one value for each register. Header JSON uses numeric register keys:
+
+- DCAP: `"0"` is MRTD, followed by `"1"` through `"4"` for RTMR0 through
+  RTMR3.
+- Azure: the key is the PCR index.
+
+DCAP example:
+
+```JSON
+{
+  "type": "dcap",
+  "measurements": {
+    "0": ["<96 hex characters>"],
+    "3": ["<96 hex characters>", "<96 hex characters>"]
+  }
+}
+```
+
+Azure example:
+
+```JSON
+{
+  "type": "azure",
+  "measurements": {
+    "4": ["<64 hex characters>"],
+    "11": ["<64 hex characters>"]
+  }
+}
+```
+
+Portable image-hash example:
+
+```JSON
+{
+  "type": "image",
+  "measurements": {
+    "uki_authenticode": "<96 hex characters>",
+    "kernel_authenticode": "<96 hex characters>",
+    "cmdline_hash": "<96 hex characters>",
+    "initrd_hash": "<96 hex characters>",
+    "gpt_disk_guid_hash": "<96 hex characters>"
+  }
+}
+```
+
+No-attestation example:
+
+```JSON
+{"type":"no_attestation"}
+```
+
+The actual header value is compact JSON on one line. The decoder preserves
+partial register policies and every alternative value in a register's
+`expected_any` list.
 
 ### Portable measurement policies
 
