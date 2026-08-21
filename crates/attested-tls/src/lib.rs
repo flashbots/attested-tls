@@ -1104,9 +1104,7 @@ mod tests {
 
         let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
         let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
-        if let Some(ref pccs) = verifier.internal_pccs {
-            pccs.ready().await.unwrap();
-        }
+        verifier.ready().await.unwrap();
 
         let mut builder =
             AttestedCertificateVerifier::build(verifier).with_crypto_provider(provider);
@@ -1559,9 +1557,8 @@ mod tests {
         .unwrap();
         let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
         let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
-        if let Some(ref pccs) = verifier.internal_pccs {
-            pccs.ready().await.unwrap();
-        }
+        verifier.ready().await.unwrap();
+
         let verifier = AttestedCertificateVerifier::build(verifier)
             .with_crypto_provider(provider)
             .with_allowed_leaf_cert_pubkey(&key_pair.public_key_der())
