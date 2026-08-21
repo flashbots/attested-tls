@@ -11,7 +11,7 @@ keywords = ["attestation", "CVM", "TDX"]
 dcap-qvl = { workspace = true, features = ["danger-allow-tcb-override"] }
 pccs = { workspace = true }
 mock-tdx = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["fs", "rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["fs", "rt", "rt-multi-thread", "time"] }
 tokio-rustls = { workspace = true, default-features = false }
 attest-types = { git = "https://github.com/easy-tee/attest.git", rev = "8206cd19d9dcb1978d85a3d8dece06a3ee7a1206" }
 attest-measure = {git = "https://github.com/easy-tee/attest.git", rev = "8206cd19d9dcb1978d85a3d8dece06a3ee7a1206" }

@@ -25,6 +25,7 @@ use parity_scale_codec::{Decode, Encode};
 use pccs::{Pccs, PccsError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::time::sleep;
 
 use crate::{
     dcap::DcapVerificationError,
@@ -44,6 +45,9 @@ pub(crate) fn install_test_crypto_provider() {
 
 /// Used in attestation type detection to check if we are on GCP
 const GCP_METADATA_API: &str = "http://metadata.google.internal";
+
+/// How often a dynamic measurement policy is refreshed in the background.
+const DYNAMIC_MEASUREMENT_POLICY_REFRESH_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// An attestation payload together with its type
 #[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
@@ -424,8 +428,8 @@ impl AttestationVerifierBuilder {
         self
     }
 
-    /// Re-fetch the measurement policy from this file or URL after a
-    /// measurement mismatch.
+    /// Re-fetch the measurement policy from this file or URL periodically
+    /// and after a measurement mismatch.
     ///
     /// Both asynchronous and synchronous verification perform one retry
     /// with the refreshed policy. Synchronous URL refreshes block for
@@ -446,7 +450,7 @@ impl AttestationVerifier {
             }
         });
 
-        Self {
+        let verifier = Self {
             measurement_policy: Arc::new(RwLock::new(MeasurementPolicyState::new(
                 builder.measurement_policy,
             ))),
@@ -456,7 +460,10 @@ impl AttestationVerifier {
             internal_pccs,
             known_gcp_firmware: GcpFirmwareCache::new(),
             dynamic_measurement_policy: builder.dynamic_measurement_policy,
-        }
+        };
+
+        verifier.spawn_dynamic_measurement_policy_refresh();
+        verifier
     }
 
     pub fn builder(measurement_policy: MeasurementPolicy) -> AttestationVerifierBuilder {
@@ -737,9 +744,124 @@ impl AttestationVerifier {
     }
 
     /// Whether this verifier automatically refreshes its measurement policy
-    /// after a mismatch.
+    /// periodically and after a mismatch.
     pub fn has_dynamic_measurement_policy(&self) -> bool {
         self.dynamic_measurement_policy.is_some()
+    }
+
+    /// Periodically refreshes a dynamic policy so removals are observed
+    /// even while incoming attestations continue to match the cached
+    /// policy.
+    fn spawn_dynamic_measurement_policy_refresh(&self) {
+        let Some(file_or_url) = self.dynamic_measurement_policy.clone() else {
+            return;
+        };
+
+        Self::spawn_dynamic_measurement_policy_refresh_with_interval(
+            Arc::downgrade(&self.measurement_policy),
+            file_or_url,
+            DYNAMIC_MEASUREMENT_POLICY_REFRESH_INTERVAL,
+        );
+    }
+
+    fn spawn_dynamic_measurement_policy_refresh_with_interval(
+        measurement_policy: std::sync::Weak<RwLock<MeasurementPolicyState>>,
+        file_or_url: String,
+        refresh_interval: Duration,
+    ) {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(Self::refresh_dynamic_measurement_policy(
+                measurement_policy,
+                file_or_url,
+                refresh_interval,
+            ));
+        } else {
+            std::thread::spawn(move || {
+                Self::refresh_dynamic_measurement_policy_sync(
+                    measurement_policy,
+                    file_or_url,
+                    refresh_interval,
+                );
+            });
+        }
+    }
+
+    async fn refresh_dynamic_measurement_policy(
+        measurement_policy: std::sync::Weak<RwLock<MeasurementPolicyState>>,
+        file_or_url: String,
+        refresh_interval: Duration,
+    ) {
+        loop {
+            sleep(refresh_interval).await;
+
+            let Some(generation) = Self::measurement_policy_generation(&measurement_policy) else {
+                return;
+            };
+
+            let new_policy = match MeasurementPolicy::from_file_or_url(file_or_url.clone()).await {
+                Ok(policy) => policy,
+                Err(err) => {
+                    tracing::warn!(error = %err, "Failed to periodically refresh measurement policy");
+                    continue;
+                }
+            };
+
+            if !Self::install_measurement_policy(&measurement_policy, new_policy, generation) {
+                return;
+            }
+        }
+    }
+
+    fn refresh_dynamic_measurement_policy_sync(
+        measurement_policy: std::sync::Weak<RwLock<MeasurementPolicyState>>,
+        file_or_url: String,
+        refresh_interval: Duration,
+    ) {
+        loop {
+            std::thread::sleep(refresh_interval);
+
+            let Some(generation) = Self::measurement_policy_generation(&measurement_policy) else {
+                return;
+            };
+
+            let new_policy = match MeasurementPolicy::from_file_or_url_sync(file_or_url.clone()) {
+                Ok(policy) => policy,
+                Err(err) => {
+                    tracing::warn!(error = %err, "Failed to periodically refresh measurement policy");
+                    continue;
+                }
+            };
+
+            if !Self::install_measurement_policy(&measurement_policy, new_policy, generation) {
+                return;
+            }
+        }
+    }
+
+    fn measurement_policy_generation(
+        measurement_policy: &std::sync::Weak<RwLock<MeasurementPolicyState>>,
+    ) -> Option<u64> {
+        let policy_state = measurement_policy.upgrade()?;
+        Some(policy_state.read().unwrap_or_else(|poisoned| poisoned.into_inner()).generation)
+    }
+
+    /// Installs a refreshed policy if no newer refresh won the race.
+    /// Returns false when the verifier has been dropped and the refresh
+    /// loop should exit.
+    fn install_measurement_policy(
+        measurement_policy: &std::sync::Weak<RwLock<MeasurementPolicyState>>,
+        new_policy: MeasurementPolicy,
+        expected_generation: u64,
+    ) -> bool {
+        let Some(policy_state) = measurement_policy.upgrade() else {
+            return false;
+        };
+        let mut state = policy_state.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.generation == expected_generation {
+            state.policy = new_policy;
+            state.generation = state.generation.wrapping_add(1);
+        }
+        true
     }
 
     /// Replaces the measurement policy used by this verifier and all of its
@@ -799,8 +921,8 @@ fn running_on_gcp() -> Result<bool, AttestationError> {
     let resp = agent.get(GCP_METADATA_API).call();
 
     if let Ok(r) = resp {
-        return Ok(r.status() == 200 &&
-            r.header("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
+        return Ok(r.status() == 200
+            && r.header("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
     }
 
     Ok(false)
@@ -1015,6 +1137,75 @@ mod tests {
         verifier.verify_attestation(attestation.into(), input_data).await.unwrap();
 
         assert!(verifier.measurement_policy().check_measurement(&measurements, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn dynamic_measurement_policy_refreshes_periodically() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let policy_path = temp_dir.path().join("measurements.json");
+        tokio::fs::write(&policy_path, br#"[{"attestation_type":"dcap-tdx"}]"#).await.unwrap();
+
+        let policy_source = policy_path.to_string_lossy().into_owned();
+        let initial_policy = MeasurementPolicy::from_file(policy_path.clone()).await.unwrap();
+        let verifier = AttestationVerifier::builder(initial_policy)
+            .with_no_internal_pccs()
+            .with_dynamic_measurements_file_or_url(policy_source.clone())
+            .build();
+        let measurements = measurements::mock_dcap_measurements();
+
+        assert!(verifier.measurement_policy().check_measurement(&measurements, None).is_ok());
+
+        AttestationVerifier::spawn_dynamic_measurement_policy_refresh_with_interval(
+            Arc::downgrade(&verifier.measurement_policy),
+            policy_source,
+            Duration::from_millis(10),
+        );
+        tokio::fs::write(&policy_path, br#"[{"attestation_type":"none"}]"#).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if verifier.measurement_policy().check_measurement(&measurements, None).is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("periodic policy refresh did not remove the revoked measurement");
+    }
+
+    #[test]
+    fn dynamic_measurement_policy_refreshes_periodically_without_tokio() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let policy_path = temp_dir.path().join("measurements.json");
+        std::fs::write(&policy_path, br#"[{"attestation_type":"dcap-tdx"}]"#).unwrap();
+
+        let policy_source = policy_path.to_string_lossy().into_owned();
+        let initial_policy =
+            MeasurementPolicy::from_file_or_url_sync(policy_source.clone()).unwrap();
+        let verifier = AttestationVerifier::builder(initial_policy)
+            .with_no_internal_pccs()
+            .with_dynamic_measurements_file_or_url(policy_source.clone())
+            .build();
+        let measurements = measurements::mock_dcap_measurements();
+
+        assert!(verifier.measurement_policy().check_measurement(&measurements, None).is_ok());
+
+        AttestationVerifier::spawn_dynamic_measurement_policy_refresh_with_interval(
+            Arc::downgrade(&verifier.measurement_policy),
+            policy_source,
+            Duration::from_millis(10),
+        );
+        std::fs::write(&policy_path, br#"[{"attestation_type":"none"}]"#).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while verifier.measurement_policy().check_measurement(&measurements, None).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "standard-thread policy refresh did not remove the revoked measurement"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[tokio::test]
