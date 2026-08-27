@@ -42,6 +42,19 @@ const REFRESH_RETRY_SECS: u64 = 60;
 /// pre-warm
 const STARTUP_PREWARM_CONCURRENCY: usize = 8;
 
+/// How the verifier obtains DCAP collateral
+#[derive(Clone, Debug)]
+pub enum PccsMode {
+    /// No internal collateral cache. Collateral is always fetched from
+    /// remote source.
+    Remote,
+    /// Internal cache pre-filled with all available collateral at build
+    /// time.
+    Prewarmed,
+    /// Internal cache that starts empty and fetches on demand.
+    Lazy,
+}
+
 /// PCCS collateral cache with proactive background refresh
 ///
 /// Fetching runs over rustls-backed HTTP, so the application must install a
@@ -54,6 +67,12 @@ const STARTUP_PREWARM_CONCURRENCY: usize = 8;
 pub struct Pccs {
     /// The URL of the service used to fetch collateral (PCS / PCCS)
     url: String,
+    /// An internal cache if configured
+    inner: Option<PccsInner>,
+}
+
+#[derive(Clone)]
+struct PccsInner {
     /// The internal cache
     cache: Arc<RwLock<HashMap<PccsInput, CacheEntry>>>,
     /// Dedupes one-shot background refreshes for cache misses
@@ -74,25 +93,7 @@ impl std::fmt::Debug for Pccs {
 
 impl Pccs {
     /// Creates a new PCCS cache using the provided URL or Intel PCS default
-    pub fn new(url: Option<String>) -> Self {
-        let mut pccs = Self::new_without_prewarm(url);
-
-        let (prewarm_outcome_tx, _) = watch::channel(None);
-        pccs.prewarm_outcome_tx = Some(prewarm_outcome_tx);
-
-        // Start filling the cache right away
-        let pccs_for_prewarm = pccs.clone();
-        tokio::spawn(async move {
-            let outcome = pccs_for_prewarm.startup_prewarm_all_tdx().await;
-            pccs_for_prewarm.finish_prewarm(outcome);
-        });
-
-        pccs
-    }
-
-    /// Creates a new PCCS cache using the provided URL or Intel PCS default
-    /// and does not pre-warm by proactively fetching collateral
-    pub fn new_without_prewarm(url: Option<String>) -> Self {
+    pub fn new(url: Option<String>, mode: PccsMode) -> Self {
         let url = url
             .unwrap_or(PCS_URL.to_string())
             .trim_end_matches('/')
@@ -100,18 +101,53 @@ impl Pccs {
             .trim_end_matches("/tdx/certification/v4")
             .to_string();
 
-        Self {
-            url,
-            cache: RwLock::new(HashMap::new()).into(),
-            pending_refreshes: RwLock::new(HashSet::new()).into(),
-            prewarm_stats: Arc::new(PrewarmStats::default()),
-            prewarm_outcome_tx: None,
+        match mode {
+            PccsMode::Remote => Self { url, inner: None },
+            PccsMode::Lazy => Self {
+                url,
+                inner: Some(PccsInner {
+                    cache: RwLock::new(HashMap::new()).into(),
+                    pending_refreshes: RwLock::new(HashSet::new()).into(),
+                    prewarm_stats: Arc::new(PrewarmStats::default()),
+                    prewarm_outcome_tx: None,
+                }),
+            },
+            PccsMode::Prewarmed => {
+                let (prewarm_outcome_tx, _) = watch::channel(None);
+
+                let pccs = Self {
+                    url,
+                    inner: Some(PccsInner {
+                        cache: RwLock::new(HashMap::new()).into(),
+                        pending_refreshes: RwLock::new(HashSet::new()).into(),
+                        prewarm_stats: Arc::new(PrewarmStats::default()),
+                        prewarm_outcome_tx: Some(prewarm_outcome_tx),
+                    }),
+                };
+
+                // Start filling the cache right away
+                let pccs_for_prewarm = pccs.clone();
+                tokio::spawn(async move {
+                    let outcome = pccs_for_prewarm.startup_prewarm_all_tdx().await;
+                    pccs_for_prewarm.finish_prewarm(outcome);
+                });
+
+                pccs
+            }
         }
+    }
+
+    /// Returns whether this PCCS fetches collateral directly without an
+    /// internal cache.
+    pub fn is_remote(&self) -> bool {
+        self.inner.is_none()
     }
 
     /// Resolves when cache is pre-warmed with all available collateral
     pub async fn ready(&self) -> Result<PrewarmSummary, PccsError> {
-        if let Some(prewarm_outcome_tx) = &self.prewarm_outcome_tx {
+        if let Some(ref inner) = self.inner &&
+            let Some(prewarm_outcome_tx) = &inner.prewarm_outcome_tx
+        {
             let mut outcome_rx = prewarm_outcome_tx.subscribe();
             loop {
                 if let Some(outcome) = outcome_rx.borrow_and_update().clone() {
@@ -124,13 +160,13 @@ impl Pccs {
                     return Err(PccsError::PrewarmSignalClosed);
                 }
             }
-        } else {
-            Err(PccsError::PrewarmDisabled)
         }
+        Err(PccsError::PrewarmDisabled)
     }
 
-    /// Returns collateral from cache when valid, otherwise fetches and
-    /// caches fresh collateral
+    /// Fetches collateral, using the internal cache when configured.
+    /// Remote mode always fetches from the configured endpoint.
+    ///
     /// Returns collateral together with a flag indicating whether it is
     /// fresh (true) or from the cache (false)
     pub async fn get_collateral(
@@ -139,11 +175,16 @@ impl Pccs {
         ca: &'static str,
         now: u64,
     ) -> Result<(QuoteCollateralV3, bool), PccsError> {
+        let Some(inner) = &self.inner else {
+            let collateral = fetch_collateral(&self.url, fmspc, ca).await?;
+            return Ok((collateral, true));
+        };
+
         let now = i64::try_from(now).map_err(|_| PccsError::TimeStampExceedsI64)?;
         let cache_key = PccsInput::new(fmspc.clone(), ca);
 
         {
-            let cache = self.cache.read().map_err(|_| PccsError::CachePoisoned)?;
+            let cache = inner.cache.read().map_err(|_| PccsError::CachePoisoned)?;
             if let Some(entry) = cache.get(&cache_key) {
                 if now < entry.next_update {
                     return Ok((entry.collateral.clone(), false));
@@ -161,7 +202,7 @@ impl Pccs {
         let next_update = extract_next_update(&collateral, now)?;
 
         {
-            let mut cache = self.cache.write().map_err(|_| PccsError::CachePoisoned)?;
+            let mut cache = inner.cache.write().map_err(|_| PccsError::CachePoisoned)?;
             if let Some(existing) = cache.get(&cache_key) &&
                 now < existing.next_update
             {
@@ -188,9 +229,13 @@ impl Pccs {
         ca: &'static str,
         now: u64,
     ) -> Result<QuoteCollateralV3, PccsError> {
+        let Some(inner) = &self.inner else {
+            return Err(PccsError::CacheDisabled);
+        };
+
         let now = i64::try_from(now).map_err(|_| PccsError::TimeStampExceedsI64)?;
         let cache_key = PccsInput::new(fmspc.clone(), ca);
-        let cache = self.cache.read().map_err(|_| PccsError::CachePoisoned)?;
+        let cache = inner.cache.read().map_err(|_| PccsError::CachePoisoned)?;
         if let Some(entry) = cache.get(&cache_key) {
             if now >= entry.next_update {
                 let collateral = entry.collateral.clone();
@@ -225,13 +270,17 @@ impl Pccs {
         fmspc: String,
         ca: &'static str,
     ) -> Result<QuoteCollateralV3, PccsError> {
+        let Some(inner) = &self.inner else {
+            return fetch_collateral(&self.url, fmspc, ca).await;
+        };
+
         let now = unix_now()?;
         let collateral = fetch_collateral(&self.url, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
         let cache_key = PccsInput::new(fmspc, ca);
 
         {
-            let mut cache = self.cache.write().map_err(|_| PccsError::CachePoisoned)?;
+            let mut cache = inner.cache.write().map_err(|_| PccsError::CachePoisoned)?;
             upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
         }
         self.ensure_refresh_task(&cache_key).await;
@@ -241,7 +290,10 @@ impl Pccs {
     /// Starts a background refresh loop for a cache key when no task is
     /// active
     async fn ensure_refresh_task(&self, cache_key: &PccsInput) {
-        let Ok(mut cache) = self.cache.write() else {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        let Ok(mut cache) = inner.cache.write() else {
             tracing::warn!("PCCS cache lock poisoned, cannot ensure refresh task");
             return;
         };
@@ -252,7 +304,7 @@ impl Pccs {
             return;
         }
 
-        let weak_cache = Arc::downgrade(&self.cache);
+        let weak_cache = Arc::downgrade(&inner.cache);
         let key = cache_key.clone();
         let url = self.url.clone();
         entry.refresh_task = Some(tokio::spawn(async move {
@@ -262,8 +314,11 @@ impl Pccs {
 
     /// Starts a one-shot background fetch to populate a missing cache entry
     fn spawn_background_refresh_for_cache_miss(&self, cache_key: PccsInput) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
         {
-            let Ok(mut pending_refreshes) = self.pending_refreshes.write() else {
+            let Ok(mut pending_refreshes) = inner.pending_refreshes.write() else {
                 tracing::warn!("PCCS pending-refresh lock poisoned, cannot start sync refresh");
                 return;
             };
@@ -292,7 +347,10 @@ impl Pccs {
 
             // Always clear the dedupe marker so a later sync miss can
             // retry if this repair attempt failed.
-            if let Ok(mut pending_refreshes) = pccs.pending_refreshes.write() {
+            let Some(inner) = &pccs.inner else {
+                return;
+            };
+            if let Ok(mut pending_refreshes) = inner.pending_refreshes.write() {
                 pending_refreshes.remove(&cache_key);
             } else {
                 tracing::warn!("PCCS pending-refresh lock poisoned during cleanup");
@@ -303,6 +361,10 @@ impl Pccs {
     /// Pre-provisions TDX collateral for discovered FMSPC values to reduce
     /// hot-path fetches
     async fn startup_prewarm_all_tdx(&self) -> PrewarmOutcome {
+        let Some(inner) = &self.inner else {
+            return PrewarmOutcome::Failed("PCCS cache is disabled".to_string());
+        };
+
         // First get all FMSPCs
         let fmspcs = match self.fetch_fmspcs().await {
             Ok(fmspcs) => fmspcs,
@@ -317,11 +379,11 @@ impl Pccs {
                 ));
             }
         };
-        self.prewarm_stats.discovered_fmspcs.store(fmspcs.len(), Ordering::SeqCst);
+        inner.prewarm_stats.discovered_fmspcs.store(fmspcs.len(), Ordering::SeqCst);
 
         if fmspcs.is_empty() {
             tracing::warn!("No FMSPC entries returned during startup pre-provision");
-            return PrewarmOutcome::Ready(self.prewarm_stats.snapshot());
+            return PrewarmOutcome::Ready(inner.prewarm_stats.snapshot());
         }
 
         // For each FMSPC, get the 'processor' and 'platform' collateral
@@ -334,7 +396,7 @@ impl Pccs {
                 let Ok(permit) = permit else {
                     continue;
                 };
-                self.prewarm_stats.attempted.fetch_add(1, Ordering::SeqCst);
+                inner.prewarm_stats.attempted.fetch_add(1, Ordering::SeqCst);
                 let pccs = self.clone();
                 let fmspc = entry.fmspc.clone();
                 join_set.spawn(async move {
@@ -357,11 +419,11 @@ impl Pccs {
                 Ok(Ok((fmspc, ca, Ok(())))) => {
                     successes += 1;
                     debug!("Successfully cached: {fmspc} {ca}");
-                    self.prewarm_stats.successes.fetch_add(1, Ordering::SeqCst);
+                    inner.prewarm_stats.successes.fetch_add(1, Ordering::SeqCst);
                 }
                 Ok(Ok((fmspc, ca, Err(e)))) => {
                     failures += 1;
-                    self.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
+                    inner.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
                     tracing::debug!(
                         fmspc,
                         ca,
@@ -371,29 +433,32 @@ impl Pccs {
                 }
                 Ok(Err(e)) => {
                     failures += 1;
-                    self.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
+                    inner.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
                     tracing::debug!(error = %e, "Startup pre-provision task failed");
                 }
                 Err(e) => {
                     failures += 1;
-                    self.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
+                    inner.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
                     tracing::debug!(error = %e, "Startup pre-provision join error");
                 }
             }
         }
         tracing::info!(
-            discovered_fmspcs = self.prewarm_stats.discovered_fmspcs.load(Ordering::SeqCst),
-            attempted = self.prewarm_stats.attempted.load(Ordering::SeqCst),
+            discovered_fmspcs = inner.prewarm_stats.discovered_fmspcs.load(Ordering::SeqCst),
+            attempted = inner.prewarm_stats.attempted.load(Ordering::SeqCst),
             successes,
             failures,
             "Completed PCCS startup pre-provisioning for TDX collateral"
         );
-        PrewarmOutcome::Ready(self.prewarm_stats.snapshot())
+        PrewarmOutcome::Ready(inner.prewarm_stats.snapshot())
     }
 
     fn finish_prewarm(&self, outcome: PrewarmOutcome) {
-        if let Some(prewarm_outcome_tx) = &self.prewarm_outcome_tx {
-            self.prewarm_stats.completed.store(true, Ordering::SeqCst);
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        if let Some(prewarm_outcome_tx) = &inner.prewarm_outcome_tx {
+            inner.prewarm_stats.completed.store(true, Ordering::SeqCst);
             let _ = prewarm_outcome_tx.send(Some(outcome));
         }
     }
@@ -457,6 +522,9 @@ async fn fetch_collateral(
     fmspc: String,
     ca: &'static str,
 ) -> Result<QuoteCollateralV3, PccsError> {
+    #[cfg(test)]
+    install_test_crypto_provider();
+
     CollateralClient::with_default_http(url)?
         .fetch_for_fmspc_without_pck_chain(&fmspc, ca, false)
         .await
@@ -756,6 +824,8 @@ pub enum PccsError {
     TimeStampExceedsI64,
     #[error("PCCS cache lock poisoned")]
     CachePoisoned,
+    #[error("PCCS cache is disabled; synchronous collateral lookup is unavailable")]
+    CacheDisabled,
     #[error("No collateral in cache for FMSPC {0}")]
     NoCollateralForFmspc(String),
 }
@@ -786,10 +856,40 @@ mod tests {
         .await
         .unwrap();
 
-        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let pccs = Pccs::new(Some(mock.base_url.clone()), PccsMode::Lazy);
         let now = 1_700_000_000_u64;
         let (_, is_fresh) = pccs.get_collateral(fmspc, "processor", now).await.unwrap();
         assert!(is_fresh);
+    }
+
+    #[tokio::test]
+    async fn test_remote_mode_fetches_collateral_every_time() {
+        let fmspc = mock_tdx_fmspc();
+        let mock = spawn_mock_pcs_server(MockPcsConfig {
+            include_fmspcs_listing: false,
+            tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
+            qe_next_update: "2999-01-01T00:00:00Z".to_string(),
+            refreshed_tcb_next_update: None,
+            refreshed_qe_next_update: None,
+        })
+        .await
+        .unwrap();
+        let pccs = Pccs::new(Some(mock.base_url.clone()), PccsMode::Remote);
+
+        let (_, first_is_fresh) =
+            pccs.get_collateral(fmspc.clone(), "processor", 1_700_000_000).await.unwrap();
+        let (_, second_is_fresh) =
+            pccs.get_collateral(fmspc.clone(), "processor", 1_700_000_000).await.unwrap();
+
+        assert!(pccs.inner.is_none());
+        assert!(first_is_fresh);
+        assert!(second_is_fresh);
+        assert_eq!(mock.tcb_call_count(), 2);
+        assert_eq!(mock.qe_call_count(), 2);
+        assert!(matches!(
+            pccs.get_collateral_sync(fmspc, "processor", 1_700_000_000),
+            Err(PccsError::CacheDisabled)
+        ));
     }
 
     #[test]
@@ -833,7 +933,7 @@ mod tests {
         .await
         .unwrap();
 
-        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let pccs = Pccs::new(Some(mock.base_url.clone()), PccsMode::Lazy);
         let (_, is_fresh) =
             pccs.get_collateral(fmspc.clone(), "processor", initial_now as u64).await.unwrap();
         assert!(is_fresh);
@@ -875,7 +975,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let pccs = Pccs::new(Some(mock.base_url.clone()), PccsMode::Prewarmed);
         let summary =
             tokio::time::timeout(Duration::from_secs(5), pccs.ready()).await.unwrap().unwrap();
         assert_eq!(summary.discovered_fmspcs, 1);
@@ -884,7 +984,7 @@ mod tests {
         assert_eq!(summary.failures, 0);
 
         let (total_entries, fmspc, ca) = {
-            let cache_guard = pccs.cache.read().unwrap();
+            let cache_guard = pccs.inner.as_ref().unwrap().cache.read().unwrap();
             let total_entries = cache_guard.len();
             let (fmspc, ca) = cache_guard
                 .keys()
@@ -911,7 +1011,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let pccs = Pccs::new(Some(mock.base_url.clone()), PccsMode::Prewarmed);
         let pccs_clone = pccs.clone();
 
         let (first, second) = tokio::join!(pccs.ready(), pccs_clone.ready());
@@ -923,7 +1023,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ready_returns_error_when_prewarm_bootstrap_fails() {
-        let pccs = Pccs::new(Some("http://127.0.0.1:1".to_string()));
+        let pccs = Pccs::new(Some("http://127.0.0.1:1".to_string()), PccsMode::Prewarmed);
         let ready_result =
             tokio::time::timeout(Duration::from_secs(2), pccs.ready()).await.unwrap();
         assert!(matches!(ready_result, Err(PccsError::PrewarmFailed(_))));
@@ -931,7 +1031,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ready_returns_error_when_prewarm_disabled() {
-        let pccs = Pccs::new_without_prewarm(None);
+        let pccs = Pccs::new(None, PccsMode::Lazy);
         let ready_result = pccs.ready().await;
         assert!(matches!(ready_result, Err(PccsError::PrewarmDisabled)));
     }
@@ -949,7 +1049,7 @@ mod tests {
         .await
         .unwrap();
 
-        let pccs = Pccs::new_without_prewarm(Some(mock.base_url.clone()));
+        let pccs = Pccs::new(Some(mock.base_url.clone()), PccsMode::Lazy);
         let now = unix_now().unwrap() as u64;
 
         let err = pccs.get_collateral_sync(fmspc.clone(), "processor", now);
@@ -989,13 +1089,13 @@ mod tests {
         .await
         .unwrap();
 
-        let pccs = Pccs::new_without_prewarm(Some(mock.base_url.clone()));
+        let pccs = Pccs::new(Some(mock.base_url.clone()), PccsMode::Lazy);
         let (_, is_fresh) =
             pccs.get_collateral(fmspc.clone(), "processor", initial_now as u64).await.unwrap();
         assert!(is_fresh);
 
         {
-            let mut cache = pccs.cache.write().unwrap();
+            let mut cache = pccs.inner.as_ref().unwrap().cache.write().unwrap();
             let entry = cache
                 .get_mut(&PccsInput::new(fmspc.clone(), "processor"))
                 .expect("expected cached collateral entry");

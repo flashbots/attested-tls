@@ -156,7 +156,7 @@ mod tests {
         let (measurements, _) = verify_dcap_attestation_with_given_timestamp(
             attestation_bytes.to_vec(),
             expected_input_data,
-            None,
+            pccs::Pccs::new(None, pccs::PccsMode::Remote),
             Some(collateral),
             GCP_TDX_PORTABLE_FIXTURE_TIMESTAMP,
             false,

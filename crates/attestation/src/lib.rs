@@ -21,6 +21,7 @@ use attest_measure::platform::PlatformError;
 pub use attest_types::{AttestationEvidence, PlatformMetadata};
 use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
+pub use pccs::PccsMode;
 use pccs::{Pccs, PccsError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -338,19 +339,6 @@ impl AttestationGenerator {
     }
 }
 
-/// How the verifier obtains DCAP collateral
-#[derive(Clone, Debug)]
-pub enum PccsMode {
-    /// No internal collateral cache. Collateral is always fetched from
-    /// remote source.
-    None,
-    /// Internal cache pre-filled with all available collateral at build
-    /// time.
-    Prewarmed,
-    /// Internal cache that starts empty and fetches on demand.
-    Lazy,
-}
-
 /// Allows remote attestations to be verified
 #[derive(Clone, Debug)]
 pub struct AttestationVerifier {
@@ -362,8 +350,8 @@ pub struct AttestationVerifier {
     ///
     /// This provides a workaround for a known outdated FMSPC used by Azure
     override_azure_outdated_tcb: bool,
-    /// Internal cache for collateral
-    internal_pccs: Option<Pccs>,
+    /// PCCS collateral source, optionally backed by an internal cache
+    internal_pccs: Pccs,
     /// Cached GCP firmware blobs indexed by MRTD
     known_gcp_firmware: GcpFirmwareCache,
     /// Cached PPIDs that have a valid GCP host-registry document
@@ -385,17 +373,11 @@ pub struct AttestationVerifierBuilder {
 
 impl AttestationVerifierBuilder {
     pub fn build(self) -> AttestationVerifier {
-        let internal_pccs = match self.pccs_mode {
-            PccsMode::None => None,
-            PccsMode::Prewarmed => Some(Pccs::new(self.pccs_url)),
-            PccsMode::Lazy => Some(Pccs::new_without_prewarm(self.pccs_url)),
-        };
-
         AttestationVerifier {
             measurement_policy: self.measurement_policy,
             dump_dcap_quotes: self.dump_dcap_quotes,
             override_azure_outdated_tcb: self.override_azure_outdated_tcb,
-            internal_pccs,
+            internal_pccs: Pccs::new(self.pccs_url, self.pccs_mode),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
@@ -433,7 +415,7 @@ impl AttestationVerifier {
     pub fn builder(measurement_policy: MeasurementPolicy) -> AttestationVerifierBuilder {
         AttestationVerifierBuilder {
             measurement_policy,
-            pccs_mode: PccsMode::None,
+            pccs_mode: PccsMode::Remote,
             pccs_url: None,
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
@@ -447,7 +429,7 @@ impl AttestationVerifier {
             measurement_policy: MeasurementPolicy::expect_none(),
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
-            internal_pccs: None,
+            internal_pccs: Pccs::new(None, PccsMode::Remote),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
@@ -460,7 +442,7 @@ impl AttestationVerifier {
             measurement_policy: MeasurementPolicy::mock(),
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
-            internal_pccs: None,
+            internal_pccs: Pccs::new(None, PccsMode::Remote),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
@@ -469,11 +451,14 @@ impl AttestationVerifier {
     /// Expect mock measurements used in tests, and use a PCCS
     #[cfg(any(test, feature = "mock"))]
     pub fn mock_with_pccs(pccs_url: String) -> Self {
+        #[cfg(test)]
+        install_test_crypto_provider();
+
         Self {
             measurement_policy: MeasurementPolicy::mock(),
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
-            internal_pccs: Some(Pccs::new(Some(pccs_url))),
+            internal_pccs: Pccs::new(Some(pccs_url), PccsMode::Prewarmed),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
         }
@@ -486,13 +471,8 @@ impl AttestationVerifier {
     /// guarantee that collateral will not be fetched during
     /// verification
     pub async fn ready(&self) -> Result<(), AttestationError> {
-        // If we have no PCCS then we are ready
-        let Some(pccs) = &self.internal_pccs else {
-            return Ok(());
-        };
-
-        // If we have pccs, and pre-warm is disabled we are also ready
-        match pccs.ready().await {
+        // If pre-warm is disabled we are ready
+        match self.internal_pccs.ready().await {
             Ok(_) | Err(PccsError::PrewarmDisabled) => Ok(()),
             Err(err) => Err(err.into()),
         }
@@ -606,11 +586,10 @@ impl AttestationVerifier {
                         .attestation_evidence
                         .as_ref()
                         .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                    let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
                     azure::verify_azure_attestation_sync(
                         attestation_evidence.quote.clone(),
                         expected_input_data,
-                        pccs,
+                        self.internal_pccs.clone(),
                         self.override_azure_outdated_tcb,
                     )?
                 }
@@ -624,11 +603,7 @@ impl AttestationVerifier {
                     .attestation_evidence
                     .as_ref()
                     .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                #[cfg(any(test, feature = "mock"))]
-                let pccs =
-                    self.internal_pccs.clone().unwrap_or_else(|| Pccs::new_without_prewarm(None));
-                #[cfg(not(any(test, feature = "mock")))]
-                let pccs = self.internal_pccs.clone().ok_or(AttestationError::NoPccs)?;
+                let pccs = self.internal_pccs.clone();
 
                 let (measurements, quote) = dcap::verify_dcap_attestation_sync(
                     attestation_evidence.quote.clone(),
@@ -809,8 +784,6 @@ pub enum AttestationError {
     Reqwest(#[from] reqwest::Error),
     #[error("PCCS: {0}")]
     Pccs(#[from] PccsError),
-    #[error("Sync verification requested but no PCCS configured")]
-    NoPccs,
     #[cfg(any(test, feature = "mock"))]
     #[error("Cannot create mock attestation: {0}")]
     Mock(String),
@@ -820,8 +793,6 @@ pub enum AttestationError {
 
 #[cfg(test)]
 mod tests {
-    use mock_tdx::mock_pcs::{MockPcsConfig, spawn_mock_pcs_server};
-
     use super::*;
 
     #[test]
@@ -837,7 +808,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_verifier_supports_sync_verification() {
+    async fn mock_verifier_uses_mock_collateral_for_async_and_sync_verification() {
         let input_data = [7u8; 64];
         let quote = dcap::create_dcap_attestation(input_data).unwrap();
         let attestation_evidence = AttestationEvidence {
@@ -845,15 +816,16 @@ mod tests {
             platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
         };
 
-        let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
+        let verifier = AttestationVerifier::mock();
+        let message: AttestationExchangeMessage = attestation_evidence.into();
 
-        let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
-        if let Some(ref pccs) = verifier.internal_pccs {
-            pccs.ready().await.unwrap();
-        }
+        let async_result = verifier.verify_attestation(message.clone(), input_data).await;
+        let sync_result = verifier.verify_attestation_sync(message, input_data);
 
-        let result = verifier.verify_attestation_sync(attestation_evidence.into(), input_data);
-
-        assert!(result.is_ok(), "expected sync mock verification to succeed: {result:?}");
+        assert!(
+            async_result.is_ok(),
+            "expected async mock verification to succeed: {async_result:?}"
+        );
+        assert!(sync_result.is_ok(), "expected sync mock verification to succeed: {sync_result:?}");
     }
 }

@@ -1,7 +1,7 @@
 //! Demonstrates setting up a PCCS cache using Intel PCS
 use std::time::Instant;
 
-use pccs::{PCS_URL, Pccs};
+use pccs::{PCS_URL, Pccs, PccsMode};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -18,7 +18,7 @@ async fn main() -> Result<(), pccs::PccsError> {
 
     info!(pcs_url = PCS_URL, "Starting PCCS with Intel PCS");
 
-    let pccs = Pccs::new(None);
+    let pccs = Pccs::new(None, PccsMode::Prewarmed);
     let started_at = Instant::now();
     let summary = pccs.ready().await?;
     let elapsed = started_at.elapsed().as_secs_f64();

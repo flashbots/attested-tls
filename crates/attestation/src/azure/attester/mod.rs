@@ -286,9 +286,9 @@ fn fetch_certificate_der(url: &str) -> Result<Vec<u8>, MaaError> {
 #[cfg(test)]
 mod test_utils {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
+    use pccs::PCS_URL;
 
     use super::{super::AttestationDocument, create_azure_attestation};
-    use crate::dcap::PCS_URL;
 
     /// Capture a complete Azure TDX attestation fixture from inside an
     /// Azure TDX CVM.
