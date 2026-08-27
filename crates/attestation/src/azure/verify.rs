@@ -61,6 +61,9 @@ pub async fn verify_azure_attestation(
 ///
 /// This relies on having DCAP collateral already present in the cache
 ///
+/// [`PccsMode::Remote`](pccs::PccsMode::Remote) is not supported because
+/// fetching collateral requires asynchronous I/O.
+///
 /// If possible, prefer the async version
 pub fn verify_azure_attestation_sync(
     input: Vec<u8>,

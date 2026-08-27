@@ -362,9 +362,9 @@ pub struct AttestationVerifier {
 pub struct AttestationVerifierBuilder {
     /// The measurement policy with accepted values and attestation types
     measurement_policy: MeasurementPolicy,
-    /// Internal PCCS setting
+    /// How DCAP collateral is fetched and cached
     pccs_mode: PccsMode,
-    /// A PCCS service to use - defaults to Intel PCS
+    /// Collateral endpoint; defaults to Intel PCS
     pccs_url: Option<String>,
     dump_dcap_quotes: bool,
     /// Whether to override outdated TCB when on Azure
@@ -399,12 +399,15 @@ impl AttestationVerifierBuilder {
         self
     }
 
+    /// Configures how DCAP collateral is fetched and cached.
+    ///
+    /// The default is [`PccsMode::Remote`].
     pub fn with_pccs_mode(mut self, pccs_mode: PccsMode) -> Self {
         self.pccs_mode = pccs_mode;
         self
     }
 
-    /// Set the URL used by internal PCCS
+    /// Sets the Intel PCS or PCCS endpoint used to fetch collateral.
     pub fn with_pccs_url(mut self, pccs_url: String) -> Self {
         self.pccs_url = Some(pccs_url);
         self
@@ -464,12 +467,17 @@ impl AttestationVerifier {
         }
     }
 
-    /// Resolves once the internal PCCS cache is ready to verify
-    /// attestations
+    /// Waits for initial PCCS pre-warming when configured.
     ///
-    /// Calling this is optional - it is only really needed when you want to
-    /// guarantee that collateral will not be fetched during
-    /// verification
+    /// In [`PccsMode::Prewarmed`], this waits for the initial pre-warm and
+    /// returns an error if pre-warm bootstrap failed. In
+    /// [`PccsMode::Remote`] and [`PccsMode::Lazy`], there is no initial
+    /// pre-warm to await, so this returns immediately.
+    ///
+    /// Only `Prewarmed` mode is intended to avoid on-demand collateral
+    /// fetches during verification. Initial pre-warming can complete even
+    /// if individual collateral fetches failed, so it is not an
+    /// absolute guarantee that verification will avoid a fetch.
     pub async fn ready(&self) -> Result<(), AttestationError> {
         // If pre-warm is disabled we are ready
         match self.internal_pccs.ready().await {
@@ -556,6 +564,12 @@ impl AttestationVerifier {
         Ok(Some(measurements))
     }
 
+    /// Synchronously verifies an attestation against the configured policy.
+    ///
+    /// DCAP and Azure verification require `Lazy` or `Prewarmed` mode with
+    /// the requested collateral already cached. `Remote` mode cannot fetch
+    /// collateral synchronously. A cache miss returns an error and starts a
+    /// background fetch for a later attempt.
     pub fn verify_attestation_sync(
         &self,
         attestation_exchange_message: AttestationExchangeMessage,

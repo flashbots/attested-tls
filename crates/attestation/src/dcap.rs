@@ -51,6 +51,9 @@ pub async fn verify_dcap_attestation(
 ///
 /// This relies on having DCAP collateral already present in the cache
 ///
+/// [`PccsMode::Remote`](pccs::PccsMode::Remote) is not supported because
+/// fetching collateral requires asynchronous I/O.
+///
 /// If possible, prefer the async version
 #[cfg(not(any(test, feature = "mock")))]
 pub fn verify_dcap_attestation_sync(
@@ -74,6 +77,9 @@ pub fn verify_dcap_attestation_sync(
 /// timestamp an optional pre-fetched collateral
 ///
 /// This relies on having DCAP collateral already present in the cache
+///
+/// [`PccsMode::Remote`](pccs::PccsMode::Remote) is not supported unless
+/// `collateral` is provided.
 ///
 /// If possible, prefer the async version
 pub fn verify_dcap_attestation_with_timestamp_sync(

@@ -41,7 +41,8 @@ More details in the individual READMEs of the provided crates:
   session for attestation.
 - [`attestation`](./crates/attestation) - provides attestation generation,
   verification and measurement handling.
-- [`pccs`](./crates/pccs) provides collateral fetching and caching for DCAP
+- [`pccs`](./crates/pccs) provides collateral fetching and optional caching
+  for DCAP
   verification.
 - [`mock-tdx`](./crates/mock-tdx) - generates deterministic mock TDX DCAP
   quotes, collateral, and trust roots for tests and development on non-TDX

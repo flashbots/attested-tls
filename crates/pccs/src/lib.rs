@@ -42,20 +42,24 @@ const REFRESH_RETRY_SECS: u64 = 60;
 /// pre-warm
 const STARTUP_PREWARM_CONCURRENCY: usize = 8;
 
-/// How the verifier obtains DCAP collateral
+/// How PCCS obtains and stores DCAP collateral.
 #[derive(Clone, Debug)]
 pub enum PccsMode {
-    /// No internal collateral cache. Collateral is always fetched from
-    /// remote source.
+    /// Fetch collateral from the configured endpoint for every asynchronous
+    /// lookup, without keeping an internal cache.
+    ///
+    /// Synchronous lookups are unavailable in this mode because fetching
+    /// collateral requires asynchronous I/O.
     Remote,
-    /// Internal cache pre-filled with all available collateral at build
-    /// time.
+    /// Start pre-warming an internal cache when [`Pccs`] is constructed.
+    ///
+    /// Call [`Pccs::ready`] to wait for the initial pre-warm to complete.
     Prewarmed,
-    /// Internal cache that starts empty and fetches on demand.
+    /// Start with an empty internal cache and fetch collateral on demand.
     Lazy,
 }
 
-/// PCCS collateral cache with proactive background refresh
+/// DCAP collateral source with optional caching and background refresh.
 ///
 /// Fetching runs over rustls-backed HTTP, so the application must install a
 /// process-level rustls [crypto provider] before collateral can be fetched,
@@ -92,7 +96,11 @@ impl std::fmt::Debug for Pccs {
 }
 
 impl Pccs {
-    /// Creates a new PCCS cache using the provided URL or Intel PCS default
+    /// Creates a collateral source in the requested mode.
+    ///
+    /// The endpoint defaults to Intel PCS when `url` is `None`.
+    /// Constructing [`PccsMode::Prewarmed`] immediately spawns its initial
+    /// fetch task and therefore requires an active Tokio runtime.
     pub fn new(url: Option<String>, mode: PccsMode) -> Self {
         let url = url
             .unwrap_or(PCS_URL.to_string())
@@ -143,7 +151,12 @@ impl Pccs {
         self.inner.is_none()
     }
 
-    /// Resolves when cache is pre-warmed with all available collateral
+    /// Waits for the initial pre-warm to complete.
+    ///
+    /// Returns [`PccsError::PrewarmDisabled`] for [`PccsMode::Remote`] and
+    /// [`PccsMode::Lazy`]. A successful result means the initial pre-warm
+    /// completed; individual collateral fetches may still have failed, as
+    /// reported in [`PrewarmSummary`].
     pub async fn ready(&self) -> Result<PrewarmSummary, PccsError> {
         if let Some(ref inner) = self.inner &&
             let Some(prewarm_outcome_tx) = &inner.prewarm_outcome_tx
@@ -168,7 +181,8 @@ impl Pccs {
     /// Remote mode always fetches from the configured endpoint.
     ///
     /// Returns collateral together with a flag indicating whether it is
-    /// fresh (true) or from the cache (false)
+    /// freshly fetched (`true`) or from the cache (`false`). Remote mode
+    /// always returns `true`.
     pub async fn get_collateral(
         &self,
         fmspc: String,
@@ -216,6 +230,10 @@ impl Pccs {
     }
 
     /// A synchronous method to get collateral from the cache.
+    ///
+    /// In [`PccsMode::Remote`], this returns [`PccsError::CacheDisabled`]
+    /// because a synchronous call cannot perform the required asynchronous
+    /// fetch.
     ///
     /// If the requested collateral is not present in the cache, this will
     /// return an error rather than waiting to fetch it.  But it does
