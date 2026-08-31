@@ -783,6 +783,7 @@ mod tests {
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
+            ..MockPcsConfig::default()
         })
         .await
         .unwrap();
@@ -830,6 +831,7 @@ mod tests {
             qe_next_update: initial_next_update,
             refreshed_tcb_next_update: Some(refreshed_next_update.clone()),
             refreshed_qe_next_update: Some(refreshed_next_update),
+            ..MockPcsConfig::default()
         })
         .await
         .unwrap();
@@ -873,6 +875,7 @@ mod tests {
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
+            ..MockPcsConfig::default()
         })
         .await
         .unwrap();
@@ -909,6 +912,7 @@ mod tests {
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
+            ..MockPcsConfig::default()
         })
         .await
         .unwrap();
@@ -946,6 +950,7 @@ mod tests {
             qe_next_update: "2999-01-01T00:00:00Z".to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
+            ..MockPcsConfig::default()
         })
         .await
         .unwrap();
@@ -986,6 +991,7 @@ mod tests {
             qe_next_update: initial_next_update,
             refreshed_tcb_next_update: Some(refreshed_next_update.clone()),
             refreshed_qe_next_update: Some(refreshed_next_update),
+            ..MockPcsConfig::default()
         })
         .await
         .unwrap();

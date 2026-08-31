@@ -14,11 +14,11 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use dcap_qvl::QuoteCollateralV3;
+use dcap_qvl::{QuoteCollateralV3, tcb_info::TcbStatus};
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 
-use crate::mock_collateral;
+use crate::{TCB_SIGNER_SK, mock_collateral, sign_raw_p256, signing_key_from_secret};
 
 /// Configuration for a mock PCS server backed by `mock-tdx` collateral
 #[derive(Clone)]
@@ -33,6 +33,10 @@ pub struct MockPcsConfig {
     pub refreshed_tcb_next_update: Option<String>,
     /// Optional `nextUpdate` value returned by later QE identity responses
     pub refreshed_qe_next_update: Option<String>,
+    /// Optional TCB status to serve for all TCB levels
+    pub tcb_status: Option<TcbStatus>,
+    /// Advisory IDs to serve with the configured TCB status
+    pub tcb_advisory_ids: Vec<String>,
 }
 
 impl Default for MockPcsConfig {
@@ -48,6 +52,8 @@ impl Default for MockPcsConfig {
             qe_next_update: qe_identity["nextUpdate"].as_str().unwrap().to_string(),
             refreshed_tcb_next_update: None,
             refreshed_qe_next_update: None,
+            tcb_status: None,
+            tcb_advisory_ids: Vec::new(),
         }
     }
 }
@@ -86,12 +92,12 @@ struct MockPcsState {
     include_fmspcs_listing: bool,
     base_tcb_info: Value,
     base_qe_identity: Value,
-    tcb_signature_hex: String,
-    qe_signature_hex: String,
     tcb_next_update: String,
     qe_next_update: String,
     refreshed_tcb_next_update: Option<String>,
     refreshed_qe_next_update: Option<String>,
+    tcb_status: Option<TcbStatus>,
+    tcb_advisory_ids: Vec<String>,
     pck_crl: Vec<u8>,
     pck_crl_issuer_chain: String,
     tcb_issuer_chain: String,
@@ -120,12 +126,12 @@ pub async fn spawn_mock_pcs_server(
         include_fmspcs_listing: config.include_fmspcs_listing,
         base_tcb_info: tcb_info,
         base_qe_identity: qe_identity,
-        tcb_signature_hex: hex::encode(&base_collateral.tcb_info_signature),
-        qe_signature_hex: hex::encode(&base_collateral.qe_identity_signature),
         tcb_next_update: config.tcb_next_update,
         qe_next_update: config.qe_next_update,
         refreshed_tcb_next_update: config.refreshed_tcb_next_update,
         refreshed_qe_next_update: config.refreshed_qe_next_update,
+        tcb_status: config.tcb_status,
+        tcb_advisory_ids: config.tcb_advisory_ids,
         pck_crl: base_collateral.pck_crl,
         pck_crl_issuer_chain: urlencoding::encode(&base_collateral.pck_crl_issuer_chain).into(),
         tcb_issuer_chain: urlencoding::encode(&base_collateral.tcb_info_issuer_chain).into(),
@@ -191,11 +197,21 @@ async fn mock_tcb_handler(
         state.refreshed_tcb_next_update.clone().unwrap_or_else(|| state.tcb_next_update.clone())
     };
     tcb_info["nextUpdate"] = Value::String(next_update);
+    if let Some(status) = state.tcb_status &&
+        let Some(tcb_levels) = tcb_info["tcbLevels"].as_array_mut()
+    {
+        for tcb_level in tcb_levels {
+            tcb_level["tcbStatus"] = Value::String(status.to_string());
+            tcb_level["advisoryIDs"] =
+                Value::Array(state.tcb_advisory_ids.iter().cloned().map(Value::String).collect());
+        }
+    }
+    let tcb_signature_hex = sign_json_value_hex(&tcb_info);
     (
         [("SGX-TCB-Info-Issuer-Chain", state.tcb_issuer_chain.clone())],
         Json(json!({
             "tcbInfo": tcb_info,
-            "signature": state.tcb_signature_hex,
+            "signature": tcb_signature_hex,
         })),
     )
 }
@@ -214,11 +230,12 @@ async fn mock_qe_identity_handler(
         state.refreshed_qe_next_update.clone().unwrap_or_else(|| state.qe_next_update.clone())
     };
     qe_identity["nextUpdate"] = Value::String(next_update);
+    let qe_signature_hex = sign_json_value_hex(&qe_identity);
     (
         [("SGX-Enclave-Identity-Issuer-Chain", state.qe_issuer_chain.clone())],
         Json(json!({
             "enclaveIdentity": qe_identity,
-            "signature": state.qe_signature_hex,
+            "signature": qe_signature_hex,
         })),
     )
 }
@@ -226,4 +243,9 @@ async fn mock_qe_identity_handler(
 /// Serves the root CA CRL expected by the PCS client
 async fn mock_root_ca_crl_handler(State(state): State<Arc<MockPcsState>>) -> impl IntoResponse {
     state.root_ca_crl_hex.clone()
+}
+
+fn sign_json_value_hex(value: &Value) -> String {
+    let signing_key = signing_key_from_secret(TCB_SIGNER_SK).expect("valid mock TCB signer key");
+    hex::encode(sign_raw_p256(&signing_key, value.to_string().as_bytes()))
 }
