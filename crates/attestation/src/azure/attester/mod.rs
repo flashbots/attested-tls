@@ -20,7 +20,6 @@ use super::{
     ak_certificate::verify_ak_cert_with_azure_roots,
     ensure_azure_attestation_payload_size,
     tpm_quote::TpmQuote,
-    unix_time_now_secs,
 };
 
 /// Used in attestation type detection to check if we are on Azure
@@ -149,6 +148,10 @@ impl TryFrom<&vtpm::Quote> for TpmQuote {
     fn try_from(quote: &vtpm::Quote) -> Result<Self, Self::Error> {
         serde_json::from_value(serde_json::to_value(quote)?)
     }
+}
+
+fn unix_time_now_secs() -> Result<u64, MaaError> {
+    Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs())
 }
 
 /// Fetch intermediate certificates from the Authority Information Access

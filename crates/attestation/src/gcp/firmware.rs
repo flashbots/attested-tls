@@ -73,13 +73,15 @@ pub(crate) enum GcpFirmwareCacheError {
 mod tests {
     use attest_measure::dcap::DcapFirmware;
     use attest_types::{AcpiHashes, DcapImageHashes};
-    use dcap_qvl::quote::Quote;
+    use dcap_qvl::{quote::Quote, verify::QuoteVerifier};
 
     use super::GcpFirmwareCache;
     use crate::{
+        EndorsementSnapshot,
         PlatformMetadata,
         VerifiedAttestation,
-        dcap::{get_quote_input_data, verify_dcap_attestation_with_given_timestamp},
+        VerifyMode,
+        dcap::{get_quote_input_data, verify_quote},
         measurements::{ExpectedMeasurements, MeasurementPolicy, MeasurementRecord},
     };
 
@@ -156,20 +158,23 @@ mod tests {
 
         let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
         let firmware = serde_saphyr::from_slice(firmware_bytes).unwrap();
-        let (VerifiedAttestation { measurements, .. }, _) =
-            verify_dcap_attestation_with_given_timestamp(
-                attestation_bytes.to_vec(),
-                expected_input_data,
-                pccs::Pccs::new(
-                    pccs::CollateralSource::IntelPcs { subscription_key: None },
-                    pccs::CachePolicy::Passthrough,
-                ),
-                Some(collateral),
+        let (VerifiedAttestation { measurements, .. }, _) = verify_quote(
+            attestation_bytes.to_vec(),
+            expected_input_data,
+            VerifyMode::Archived(EndorsementSnapshot::dcap(
+                collateral,
                 GCP_TDX_PORTABLE_FIXTURE_TIMESTAMP,
-                false,
-            )
-            .await
-            .unwrap();
+            )),
+            pccs::Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::Passthrough,
+            ),
+            false,
+            &QuoteVerifier::new_prod(),
+            None,
+        )
+        .await
+        .unwrap();
 
         let measurement_policy = MeasurementPolicy {
             accepted_measurements: vec![MeasurementRecord {
