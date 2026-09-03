@@ -10,6 +10,22 @@ This crate provides:
 - Attestation generation and verification for DCAP and (optionally) Azure
 - Parsing and evaluation of measurement policies
 
+## Verification results
+
+When an attestation is present, `AttestationVerifier::verify_attestation` and
+`AttestationVerifier::verify_attestation_sync` return a `VerifiedAttestation`
+containing the `ExpectedMeasurements` value from the policy record that
+accepted it. This is the matched policy value, not the raw register values
+extracted from the quote. For example, verification against a portable policy
+returns `ExpectedMeasurements::Image`, while an allow-any DCAP policy returns
+`ExpectedMeasurements::Dcap` with an empty register map. Successful
+verification without attestation returns `None`.
+
+Matched expected measurements can be transported in an HTTP header using
+`ExpectedMeasurements::to_header_format` and reconstructed with
+`ExpectedMeasurements::from_header_format`. See
+[Expected measurement header format](#expected-measurement-header-format).
+
 ## Runtime Requirements
 
 Verification uses the [`pccs`](../pccs) crate to fetch DCAP collateral and,
@@ -141,8 +157,7 @@ These objects have the following fields:
 - `attestation_type` - a string containing one of the attestation types
   (confidential computing platforms) described below.
 - `measurements` - an object with fields referring to the five measurement
-  registers. Field names are the same as for the measurement headers (see
-  below).
+  registers. See [Measurement field names](#measurement-field-names).
 - `dcap_image_hashes` - an alternative to `measurements` that pins the hashes
   of the boot components (UKI, kernel, initrd, cmdline, GPT disk GUID) rather
   than raw register values. The verifier reconstructs the expected RTMRs at
@@ -286,27 +301,93 @@ Legacy numeric field names are still supported for backwards compatibility:
 - "3" - RTMR2
 - "4" - RTMR3
 
+### Expected measurement header format
+
+`ExpectedMeasurements::to_header_format` serializes the matched policy value
+as self-describing JSON suitable for an HTTP `HeaderValue`. Hashes are
+lowercase hexadecimal strings. Both SHA-384 DCAP values and SHA-256 Azure
+values are represented as hex.
+
+DCAP and Azure register values are arrays because a policy can accept more
+than one value for each register. Header JSON uses numeric register keys:
+
+- DCAP: `"0"` is MRTD, followed by `"1"` through `"4"` for RTMR0 through
+  RTMR3.
+- Azure: the key is the PCR index.
+
+DCAP example:
+
+```JSON
+{
+  "type": "dcap",
+  "measurements": {
+    "0": ["<96 hex characters>"],
+    "3": ["<96 hex characters>", "<96 hex characters>"]
+  }
+}
+```
+
+Azure example:
+
+```JSON
+{
+  "type": "azure",
+  "measurements": {
+    "4": ["<64 hex characters>"],
+    "11": ["<64 hex characters>"]
+  }
+}
+```
+
+Portable image-hash example:
+
+```JSON
+{
+  "type": "image",
+  "measurements": {
+    "uki_authenticode": "<96 hex characters>",
+    "kernel_authenticode": "<96 hex characters>",
+    "cmdline_hash": "<96 hex characters>",
+    "initrd_hash": "<96 hex characters>",
+    "gpt_disk_guid_hash": "<96 hex characters>"
+  }
+}
+```
+
+No-attestation example:
+
+```JSON
+{"type":"no_attestation"}
+```
+
+The actual header value is compact JSON on one line. The decoder preserves
+partial register policies and every alternative value in a register's
+`expected_any` list.
+
 ### Portable measurement policies
 
 The `measurements` format above specifies register values, so any change
 to platform-injected values (firmware, RAM size, disk count, ACPI tables)
 changes the expected register values even when the OS image is unchanged.
 
-The `dcap_image_hashes` alternative allows you to specify the OS image's 
+The `dcap_image_hashes` alternative allows you to specify the OS image's
 boot-component hashes instead, and the verifier reconstructs the expected
-register values from those hashes plus platform metadata fetched attest
-verification time. The same policy record then matches the same OS images
-across platform variants.
+register values from those hashes plus platform metadata available at
+attestation verification time. The same policy record then matches the same OS
+images across platform variants.
 
 This can be done with the `attest measure` CLI from
 [Easy-TEE/attest](https://github.com/Easy-TEE/attest) which outputs five
-hex-encoded SHA-384 values:
+hex-encoded SHA-384 values and, for images using a recent systemd EFI stub, one
+additional optional value:
 
 - `uki_authenticode` - authenticode hash of the UKI (unified kernel image)
 - `kernel_authenticode` - authenticode hash of the kernel binary
 - `cmdline_hash` - hash of the kernel command line
 - `initrd_hash` - hash of the initramfs
 - `gpt_disk_guid_hash` - hash derived from GPT partition GUIDs
+- `pe_sections` - optional accumulated hash of the UKI PE sections measured by
+  recent systemd EFI stubs
 
 Example:
 
@@ -314,7 +395,7 @@ Example:
 [
   {
     "measurement_id": "flashbox-l1-v1.0.0",
-    "attestation_type": "gcp-tdx",
+    "attestation_type": "dcap-tdx",
     "dcap_image_hashes": {
       "uki_authenticode": "fcaceb6d87694746ba2d93a87ef4209f2a7629b7f400097b93241e80b9ec3e1e80f9a4cd8028e6a83f297ea5de8d9abc",
       "kernel_authenticode": "b6c5133268aa8b440509f3d53ee855a5cd3aeb6441eb109a9f27f14c43bce3e2383856df4af876501ceeb4c9a3b15f0c",
@@ -328,17 +409,21 @@ Example:
 
 #### Supported attestation types for portable measurements
 
-Portable policies currently only work with the `"gcp-tdx"` attestation type.
-For GCP, the verifier fetches the platform firmware blob from Google's metadata
-service (keyed by MRTD) and combines it with the image hashes to reconstruct the
-expected registers. A `dcap_image_hashes` record with any other attestation type
-is rejected when parsing from JSON.
+Portable policies work with the `"dcap-tdx"` and `"gcp-tdx"` attestation types.
+`"dcap-tdx"` accepts DCAP evidence from any platform, including GCP and
+bare-metal TDX, while `"gcp-tdx"` restricts the record to GCP. For bare-metal
+DCAP TDX, MRTD selects a bundled trusted OVMF firmware blob. The verifier uses
+that blob and the platform metadata to reconstruct and check MRTD and RTMR0, in
+addition to the image-dependent RTMR1 and RTMR2. An unknown bare-metal MRTD is
+rejected. The accepted firmware assets and their provenance are documented in
+[`assets/ovmf`](assets/ovmf/README.md). For GCP, the verifier instead fetches a
+Google-endorsed platform firmware blob keyed by MRTD.
 
 The JSON object emitted directly by `attest measure portable` is also accepted
 as a measurement policy. Its optional `azure` PCR values and its `dcap` image
-hashes are converted into Azure TDX and GCP TDX policy records respectively.
-It can be supplied on its own or as an element of a policy array, including an
-array mixed with records in the policy format described above:
+hashes are converted into an Azure TDX record and a generic DCAP record
+respectively. It can be supplied on its own or as an element of a policy array,
+including an array mixed with records in the policy format described above:
 
 ```JSON
 {

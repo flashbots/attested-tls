@@ -20,6 +20,7 @@ use super::{
     unix_time_now_secs,
 };
 use crate::{
+    VerifiedAttestation,
     dcap::{
         verify_dcap_attestation_with_given_timestamp,
         verify_dcap_attestation_with_timestamp_sync,
@@ -43,7 +44,7 @@ pub async fn verify_azure_attestation(
     expected_input_data: [u8; 64],
     pccs: Pccs,
     override_azure_outdated_tcb: bool,
-) -> Result<MultiMeasurements, MaaError> {
+) -> Result<VerifiedAttestation, MaaError> {
     let now = unix_time_now_secs()?;
 
     verify_azure_attestation_with_given_timestamp(
@@ -70,7 +71,7 @@ pub fn verify_azure_attestation_sync(
     expected_input_data: [u8; 64],
     pccs: Pccs,
     override_azure_outdated_tcb: bool,
-) -> Result<MultiMeasurements, MaaError> {
+) -> Result<VerifiedAttestation, MaaError> {
     let now = unix_time_now_secs()?;
 
     verify_azure_attestation_with_given_timestamp_sync(
@@ -93,7 +94,7 @@ async fn verify_azure_attestation_with_given_timestamp(
     collateral: Option<QuoteCollateralV3>,
     now: u64,
     override_azure_outdated_tcb: bool,
-) -> Result<MultiMeasurements, MaaError> {
+) -> Result<VerifiedAttestation, MaaError> {
     let PreparedAzureAttestation {
         tdx_quote_bytes,
         hcl_report,
@@ -102,7 +103,9 @@ async fn verify_azure_attestation_with_given_timestamp(
         tpm_attestation,
     } = prepare_azure_attestation(input)?;
 
-    let _dcap_measurements = verify_dcap_attestation_with_given_timestamp(
+    // Only the endorsements travel upward: this platform is judged on the
+    // vTPM PCRs, not the TD quote
+    let (dcap, _) = verify_dcap_attestation_with_given_timestamp(
         tdx_quote_bytes,
         expected_tdx_input_data,
         pccs,
@@ -112,13 +115,20 @@ async fn verify_azure_attestation_with_given_timestamp(
     )
     .await?;
 
-    finish_azure_attestation_verification(
+    // The vTPM leg fetches nothing — AK chain in the evidence, roots
+    // compiled in — so it adds no endorsements of its own
+    let measurements = finish_azure_attestation_verification(
         hcl_report,
         var_data_hash,
         tpm_attestation,
         expected_input_data,
         now,
-    )
+    )?;
+    Ok(VerifiedAttestation {
+        measurements,
+        expected_measurements: None,
+        endorsements: dcap.endorsements,
+    })
 }
 
 /// Synchronous version of the verifier
@@ -129,7 +139,7 @@ fn verify_azure_attestation_with_given_timestamp_sync(
     collateral: Option<QuoteCollateralV3>,
     now: u64,
     override_azure_outdated_tcb: bool,
-) -> Result<MultiMeasurements, MaaError> {
+) -> Result<VerifiedAttestation, MaaError> {
     let PreparedAzureAttestation {
         tdx_quote_bytes,
         hcl_report,
@@ -138,7 +148,7 @@ fn verify_azure_attestation_with_given_timestamp_sync(
         tpm_attestation,
     } = prepare_azure_attestation(input)?;
 
-    let _dcap_measurements = verify_dcap_attestation_with_timestamp_sync(
+    let (dcap, _) = verify_dcap_attestation_with_timestamp_sync(
         tdx_quote_bytes,
         expected_tdx_input_data,
         pccs,
@@ -147,13 +157,18 @@ fn verify_azure_attestation_with_given_timestamp_sync(
         override_azure_outdated_tcb,
     )?;
 
-    finish_azure_attestation_verification(
+    let measurements = finish_azure_attestation_verification(
         hcl_report,
         var_data_hash,
         tpm_attestation,
         expected_input_data,
         now,
-    )
+    )?;
+    Ok(VerifiedAttestation {
+        measurements,
+        expected_measurements: None,
+        endorsements: dcap.endorsements,
+    })
 }
 
 /// Parses the attestation during verification
@@ -226,9 +241,7 @@ fn finish_azure_attestation_verification(
     let vtpm_quote = tpm_attestation.quote;
     let hcl_ak_pub_der = hcl_ak_pub.key.try_to_der().map_err(|_| MaaError::JwkConversion)?;
     let pub_key = PKey::public_key_from_der(&hcl_ak_pub_der)?;
-    vtpm_quote.verify(&pub_key, &expected_input_data[..32])?;
-
-    let pcrs = vtpm_quote.pcrs_sha256();
+    let pcrs = vtpm_quote.verify(&pub_key, &expected_input_data[..32])?;
 
     // Parse AK certificate
     let (_type_label, ak_certificate_der) =
@@ -260,7 +273,7 @@ fn finish_azure_attestation_verification(
         now,
     )?;
 
-    Ok(MultiMeasurements::from_pcrs(pcrs))
+    Ok(MultiMeasurements::from_indexed_pcrs(pcrs))
 }
 
 /// Extract the measurements from the attestation, but do not verify
@@ -271,8 +284,8 @@ pub fn get_measurements(input: &[u8]) -> Result<MultiMeasurements, MaaError> {
 
     let attestation_document: AttestationDocument = serde_json::from_slice(input)?;
     let vtpm_quote = attestation_document.tpm_attestation.quote;
-    let pcrs = vtpm_quote.pcrs_sha256();
-    Ok(MultiMeasurements::from_pcrs(pcrs))
+    let pcrs = vtpm_quote.indexed_pcrs_unverified()?;
+    Ok(MultiMeasurements::from_indexed_pcrs(pcrs))
 }
 
 /// JSON Web Key used in [HclRuntimeClaims]
@@ -344,7 +357,10 @@ impl RsaPubKey {
 
 #[cfg(test)]
 mod tests {
+    use dcap_qvl::QuoteCollateralV3;
+
     use super::{super::MAX_AZURE_ATTESTATION_PAYLOAD_SIZE, *};
+    use crate::EndorsementSnapshot;
 
     fn input_data_from_attestation(attestation_bytes: &[u8]) -> [u8; 64] {
         let attestation_document: AttestationDocument =
@@ -433,8 +449,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_decode_hcl() {
-        // From cvm-reverse-proxy/internal/attestation/azure/tdx/testdata/hclreport.
-        // bin
+        // From cvm-reverse-proxy/internal/attestation/azure/tdx/testdata/
+        // hclreport. bin
         let hcl_bytes: &'static [u8] = include_bytes!("../../test-assets/hclreport.bin");
 
         let hcl_report = hcl::HclReport::new(hcl_bytes.to_vec()).unwrap();
@@ -457,8 +473,8 @@ mod tests {
         );
 
         // Fixed timestamp within the quote collateral and AK certificate
-        // validity windows, so this offline fixture test does not expire when
-        // wall-clock time advances.
+        // validity windows, so this offline fixture test does not expire
+        // when wall-clock time advances.
         let now = 1_780_922_561;
 
         let attestation_document: AttestationDocument =
@@ -466,31 +482,45 @@ mod tests {
         assert_eq!(attestation_document.tpm_attestation.ak_intermediate_certificates_pem.len(), 2);
 
         let attestation_json = serde_json::to_vec(&attestation_document).unwrap();
-        let async_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
-        let sync_collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
+        let fixture_collateral: QuoteCollateralV3 =
+            serde_saphyr::from_slice(collateral_bytes).unwrap();
 
-        let async_measurements = verify_azure_attestation_with_given_timestamp(
+        let VerifiedAttestation {
+            measurements: async_measurements,
+            endorsements: async_endorsements,
+            ..
+        } = verify_azure_attestation_with_given_timestamp(
             attestation_json.clone(),
             [0; 64],
             Pccs::new(None, pccs::PccsMode::Remote),
-            Some(async_collateral),
+            Some(fixture_collateral.clone()),
             now,
             false,
         )
         .await
         .unwrap();
 
-        let sync_measurements = verify_azure_attestation_with_given_timestamp_sync(
+        let VerifiedAttestation {
+            measurements: sync_measurements,
+            endorsements: sync_endorsements,
+            ..
+        } = verify_azure_attestation_with_given_timestamp_sync(
             attestation_json,
             [0; 64],
             Pccs::new(None, pccs::PccsMode::Lazy),
-            Some(sync_collateral),
+            Some(fixture_collateral.clone()),
             now,
             false,
         )
         .unwrap();
 
         assert_eq!(async_measurements, sync_measurements);
+        // The bundle handed back is the one the DCAP leg consumed, which is
+        // what makes archiving it provenance rather than a second copy, and
+        // it arrives paired with the instant both legs were held to
+        let expected = EndorsementSnapshot::dcap(fixture_collateral, now);
+        assert_eq!(async_endorsements, expected);
+        assert_eq!(sync_endorsements, expected);
     }
 
     #[tokio::test]

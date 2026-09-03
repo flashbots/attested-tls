@@ -11,10 +11,10 @@ keywords = ["attestation", "CVM", "TDX"]
 dcap-qvl = { workspace = true, features = ["danger-allow-tcb-override"] }
 pccs = { workspace = true }
 mock-tdx = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["fs", "rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["fs", "rt", "rt-multi-thread", "time"] }
 tokio-rustls = { workspace = true, default-features = false }
-attest-types = { git = "https://github.com/easy-tee/attest.git", rev = "8206cd19d9dcb1978d85a3d8dece06a3ee7a1206" }
-attest-measure = {git = "https://github.com/easy-tee/attest.git", rev = "8206cd19d9dcb1978d85a3d8dece06a3ee7a1206" }
+attest-types = { git = "https://github.com/easy-tee/attest.git", rev = "12f1e29f6ea63ecc2f80f39c2c1f1172720bcf24" }
+attest-measure = { git = "https://github.com/easy-tee/attest.git", rev = "12f1e29f6ea63ecc2f80f39c2c1f1172720bcf24" }
 
 anyhow = "1.0.100"
 pem-rfc7468 = { version = "0.7.0", features = ["std"] }
@@ -50,6 +50,10 @@ tokio-rustls = { workspace = true, default-features = true }
 rustls = { workspace = true, default-features = false, features = ["aws_lc_rs"] }
 
 serde-saphyr = "0.0.22"
+
+[build-dependencies]
+attest-measure = { git = "https://github.com/easy-tee/attest.git", rev = "12f1e29f6ea63ecc2f80f39c2c1f1172720bcf24" }
+serde_json = "1.0.145"
 
 [features]
 default = []

@@ -62,8 +62,8 @@ pub(crate) fn verify_ak_cert_with_azure_roots(
 /// Convert a PEM-encoded cert into a TrustAnchor
 fn pem_to_trust_anchor(pem: &str) -> TrustAnchor<'static> {
     let (_type_label, der_vec) = pem_rfc7468::decode_vec(pem.as_bytes()).unwrap();
-    // Leaking is ok here because plan is to set this up so it is only called
-    // once
+    // Leaking is ok here because plan is to set this up so it is only
+    // called once
     let leaked: &'static [u8] = Box::leak(der_vec.into_boxed_slice());
     let cert_der: &'static CertificateDer<'static> =
         Box::leak(Box::new(CertificateDer::from(leaked)));

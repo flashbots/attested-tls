@@ -11,7 +11,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use dcap_qvl::{QuoteCollateralV3, collateral::CollateralClient, tcb_info::TcbInfo};
+use dcap_qvl::{
+    QuoteCollateralV3,
+    collateral::CollateralClient,
+    configs::DefaultConfig,
+    http::{HttpClient as DcapHttpClient, HttpResponse},
+    tcb_info::TcbInfo,
+};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
@@ -38,6 +44,8 @@ pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 const REFRESH_MARGIN_SECS: i64 = 300;
 /// How long to wait before retrying when failing to fetch collateral
 const REFRESH_RETRY_SECS: u64 = 60;
+/// Timeout for PCCS HTTP requests.
+const PCCS_HTTP_TIMEOUT_SECS: u64 = 180;
 /// How many collateral fetches to perform concurrently during initial
 /// pre-warm
 const STARTUP_PREWARM_CONCURRENCY: usize = 8;
@@ -59,6 +67,8 @@ pub enum PccsMode {
     Lazy,
 }
 
+type SharedCollateralClient = CollateralClient<DefaultConfig, SharedReqwestHttp>;
+
 /// DCAP collateral source with optional caching and background refresh.
 ///
 /// Fetching runs over rustls-backed HTTP, so the application must install a
@@ -71,6 +81,10 @@ pub enum PccsMode {
 pub struct Pccs {
     /// The URL of the service used to fetch collateral (PCS / PCCS)
     url: String,
+    /// HTTP client used for FMSPC fetches
+    http_client: reqwest::Client,
+    /// HTTP client for collateral fetches
+    collateral_client: SharedCollateralClient,
     /// An internal cache if configured
     inner: Option<PccsInner>,
 }
@@ -108,11 +122,16 @@ impl Pccs {
             .trim_end_matches("/sgx/certification/v4")
             .trim_end_matches("/tdx/certification/v4")
             .to_string();
+        let http_client = reqwest::Client::new();
+        let collateral_client =
+            CollateralClient::new(SharedReqwestHttp { client: http_client.clone() }, url.clone());
 
         match mode {
-            PccsMode::Remote => Self { url, inner: None },
+            PccsMode::Remote => Self { url, http_client, collateral_client, inner: None },
             PccsMode::Lazy => Self {
                 url,
+                http_client,
+                collateral_client,
                 inner: Some(PccsInner {
                     cache: RwLock::new(HashMap::new()).into(),
                     pending_refreshes: RwLock::new(HashSet::new()).into(),
@@ -125,6 +144,8 @@ impl Pccs {
 
                 let pccs = Self {
                     url,
+                    http_client,
+                    collateral_client,
                     inner: Some(PccsInner {
                         cache: RwLock::new(HashMap::new()).into(),
                         pending_refreshes: RwLock::new(HashSet::new()).into(),
@@ -190,7 +211,7 @@ impl Pccs {
         now: u64,
     ) -> Result<(QuoteCollateralV3, bool), PccsError> {
         let Some(inner) = &self.inner else {
-            let collateral = fetch_collateral(&self.url, fmspc, ca).await?;
+            let collateral = fetch_collateral(&self.collateral_client, fmspc, ca).await?;
             return Ok((collateral, true));
         };
 
@@ -212,7 +233,7 @@ impl Pccs {
             }
         }
 
-        let collateral = fetch_collateral(&self.url, fmspc.clone(), ca).await?;
+        let collateral = fetch_collateral(&self.collateral_client, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
 
         {
@@ -289,11 +310,11 @@ impl Pccs {
         ca: &'static str,
     ) -> Result<QuoteCollateralV3, PccsError> {
         let Some(inner) = &self.inner else {
-            return fetch_collateral(&self.url, fmspc, ca).await;
+            return fetch_collateral(&self.collateral_client, fmspc, ca).await;
         };
 
         let now = unix_now()?;
-        let collateral = fetch_collateral(&self.url, fmspc.clone(), ca).await?;
+        let collateral = fetch_collateral(&self.collateral_client, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
         let cache_key = PccsInput::new(fmspc, ca);
 
@@ -324,9 +345,9 @@ impl Pccs {
 
         let weak_cache = Arc::downgrade(&inner.cache);
         let key = cache_key.clone();
-        let url = self.url.clone();
+        let collateral_client = self.collateral_client.clone();
         entry.refresh_task = Some(tokio::spawn(async move {
-            refresh_loop(weak_cache, url, key).await;
+            refresh_loop(weak_cache, collateral_client, key).await;
         }));
     }
 
@@ -494,14 +515,46 @@ impl Pccs {
         }
 
         let url = format!("{}/sgx/certification/v4/fmspcs", self.url);
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?;
-        let response = client.get(&url).send().await?;
+        let response = self
+            .http_client
+            .get(&url)
+            .timeout(Duration::from_secs(PCCS_HTTP_TIMEOUT_SECS))
+            .send()
+            .await?;
         if !response.status().is_success() {
             return Err(PccsError::FmspcFetch(response.status()));
         }
         let body = response.text().await?;
         let entries: Vec<FmspcEntry> = serde_json::from_str(&body)?;
         Ok(entries)
+    }
+}
+
+/// An HTTP client shared used by [CollateralClient] and to fetch FMSPCs
+/// during pre-warm
+#[derive(Clone)]
+struct SharedReqwestHttp {
+    client: reqwest::Client,
+}
+
+impl DcapHttpClient for SharedReqwestHttp {
+    async fn get(&self, url: &str) -> anyhow::Result<HttpResponse> {
+        let resp = self
+            .client
+            .get(url)
+            .timeout(Duration::from_secs(PCCS_HTTP_TIMEOUT_SECS))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value.to_str().ok().map(|v| (name.as_str().to_string(), v.to_string()))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let body = resp.bytes().await?.to_vec();
+        Ok(HttpResponse { status, headers, body })
     }
 }
 
@@ -536,17 +589,14 @@ impl PccsInput {
 
 /// Fetches collateral from PCCS for a given FMSPC and CA
 async fn fetch_collateral(
-    url: &str,
+    client: &SharedCollateralClient,
     fmspc: String,
     ca: &'static str,
 ) -> Result<QuoteCollateralV3, PccsError> {
     #[cfg(test)]
     install_test_crypto_provider();
 
-    CollateralClient::with_default_http(url)?
-        .fetch_for_fmspc_without_pck_chain(&fmspc, ca, false)
-        .await
-        .map_err(Into::into)
+    client.fetch_for_fmspc_without_pck_chain(&fmspc, ca, false).await.map_err(Into::into)
 }
 
 /// Extracts the earliest next update timestamp from collateral metadata
@@ -649,7 +699,7 @@ fn ca_as_static(ca: &str) -> Option<&'static str> {
 /// Background loop that refreshes collateral for a single cache key
 async fn refresh_loop(
     weak_cache: Weak<RwLock<HashMap<PccsInput, CacheEntry>>>,
-    pccs_url: String,
+    collateral_client: SharedCollateralClient,
     key: PccsInput,
 ) {
     let Some(ca_static) = ca_as_static(&key.ca) else {
@@ -707,11 +757,12 @@ async fn refresh_loop(
             refresh_sleep_seconds(entry.next_update, now) == 0
         };
         if !should_refresh {
-            // The cached schedule moved forward, so skip the redundant fetch.
+            // The cached schedule moved forward, so skip the redundant
+            // fetch.
             continue;
         }
 
-        match fetch_collateral(&pccs_url, key.fmspc.clone(), ca_static).await {
+        match fetch_collateral(&collateral_client, key.fmspc.clone(), ca_static).await {
             Ok(collateral) => {
                 let validate_now = match unix_now() {
                     Ok(timestamp) => timestamp,

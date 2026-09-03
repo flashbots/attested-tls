@@ -55,8 +55,8 @@ pub fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaErro
 
     let td_report_from_hcl = hcl.try_into()?;
 
-    // This makes a request to Azure Instance metadata service and gives us a
-    // binary response
+    // This makes a request to Azure Instance metadata service and gives us
+    // a binary response
     let td_quote_bytes = imds::get_td_quote(&td_report_from_hcl)?;
 
     let ak_certificate_der = read_ak_certificate_from_tpm()?;
@@ -314,8 +314,8 @@ mod test_utils {
         let output_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test-assets");
         std::fs::create_dir_all(&output_dir).unwrap();
 
-        // Keep this aligned with existing Azure fixture tests, which use zeroed
-        // report input data.
+        // Keep this aligned with existing Azure fixture tests, which use
+        // zeroed report input data.
         let attestation_json = create_azure_attestation([0u8; 64]).unwrap();
         let attestation_document: AttestationDocument =
             serde_json::from_slice(&attestation_json).unwrap();
@@ -345,8 +345,8 @@ mod test_utils {
         // With compact list indentation enabled, serde_saphyr can emit an
         // indentless empty sequence after a nested block sequence, e.g.
         // `event_log:\n[]`, which its parser rejects. Disable compact list
-        // indentation for fixture output so nested/empty sequences are always
-        // indented under their mapping keys.
+        // indentation for fixture output so nested/empty sequences are
+        // always indented under their mapping keys.
         serializer_options.compact_list_indent = false;
         std::fs::write(
             &attestation_path,
@@ -400,6 +400,21 @@ mod tests {
         let parsed = TpmsAttest::parse(&message).unwrap();
         assert_eq!(parsed.extra_data(), attest.extra_data().as_slice());
         assert_eq!(parsed.pcr_digest(), info.pcr_digest().as_slice());
+
+        // The selection decides which register each PCR value is attributed
+        // to, so it is cross-checked as well. `PcrSlot` is a bit flag, so a
+        // register's number is the position of its one bit. Sorted, because
+        // agreement on the set is the claim being tested; our own ascending
+        // order is pinned by the tests in `tpms_attest`.
+        let mut tss_registers: Vec<u32> = info
+            .pcr_selection()
+            .get_selections()
+            .iter()
+            .flat_map(|selection| selection.selected())
+            .map(|slot| (slot as u32).trailing_zeros())
+            .collect();
+        tss_registers.sort_unstable();
+        assert_eq!(parsed.selected_pcrs(), tss_registers.as_slice());
     }
 
     #[test]
@@ -458,8 +473,9 @@ mod tests {
     }
 
     fn request_path(request: &str) -> &str {
-        // HTTP/1.1 request line format is: `<method> <request-target> <version>`.
-        // The local test server only needs the request target, e.g. `/root.pem`.
+        // HTTP/1.1 request line format is: `<method> <request-target>
+        // <version>`. The local test server only needs the request
+        // target, e.g. `/root.pem`.
         request.lines().next().and_then(|line| line.split_ascii_whitespace().nth(1)).unwrap_or("/")
     }
 

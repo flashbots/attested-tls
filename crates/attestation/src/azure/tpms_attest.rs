@@ -22,11 +22,17 @@ const TPM_GENERATED_VALUE: u32 = 0xff54_4347;
 /// (TPM 2.0 spec Part 2, section 6.9).
 const TPM_ST_ATTEST_QUOTE: u16 = 0x8018;
 
-/// Maximum number of TPMS_PCR_SELECTION entries accepted in a
-/// TPML_PCR_SELECTION. The spec bounds the list by the number of hash
-/// algorithms the TPM implements (TPM 2.0 spec Part 2, section 10.9.7);
-/// 16 is far above any real TPM and merely bounds work on hostile input.
-const MAX_PCR_SELECTIONS: u32 = 16;
+/// TPM_ALG_SHA256, the only PCR bank a quote may select here: the PCR
+/// values travel as `[u8; 32]`, so no other digest size can be carried
+/// (TPM 2.0 spec Part 2, section 6.3).
+const TPM_ALG_SHA256: u16 = 0x000b;
+
+/// Maximum octets accepted in a `pcrSelect` bitmap. The spec bounds it by
+/// PCR_SELECT_MAX, the octets needed for the TPM's own PCR count (TPM 2.0
+/// spec Part 2, section 10.6.2); four covers 32 registers, more than any
+/// TPM allocates. Bounding it keeps one attacker-supplied byte from
+/// deciding how much work the expansion below does.
+const MAX_SIZE_OF_SELECT: usize = 4;
 
 #[derive(Error, Debug)]
 pub enum AttestError {
@@ -36,8 +42,12 @@ pub enum AttestError {
     Magic,
     #[error("TPMS_ATTEST is not a quote")]
     NotAQuote,
-    #[error("TPML_PCR_SELECTION count is implausibly large")]
-    PcrSelectionCount,
+    #[error("quote selects {0} PCR banks; exactly one SHA-256 bank is required")]
+    PcrSelectionBanks(u32),
+    #[error("quote selects PCR bank with hash algorithm {0:#06x}, not SHA-256")]
+    PcrSelectionAlgorithm(u16),
+    #[error("pcrSelect bitmap is {0} octets; at most 4 are allowed")]
+    PcrSelectionSize(usize),
     #[error("trailing bytes after TPMS_ATTEST")]
     TrailingData,
 }
@@ -47,6 +57,7 @@ pub enum AttestError {
 pub(crate) struct TpmsAttest {
     extra_data: Vec<u8>,
     pcr_digest: Vec<u8>,
+    selected_pcrs: Vec<u32>,
 }
 
 impl TpmsAttest {
@@ -64,28 +75,53 @@ impl TpmsAttest {
         reader.read_tpm2b()?;
         // extraData: TPM2B_DATA
         let extra_data = reader.read_tpm2b()?.to_vec();
-        // clockInfo: TPMS_CLOCK_INFO (clock, resetCount, restartCount, safe)
+        // clockInfo: TPMS_CLOCK_INFO (clock, resetCount, restartCount,
+        // safe)
         reader.skip(8 + 4 + 4 + 1)?;
         // firmwareVersion: UINT64
         reader.skip(8)?;
         // attested.quote: TPMS_QUOTE_INFO, starting with the pcrSelect
         // list (TPML_PCR_SELECTION)
         let selection_count = reader.read_u32()?;
-        if selection_count > MAX_PCR_SELECTIONS {
-            return Err(AttestError::PcrSelectionCount);
+        // Exactly one bank, and it has to be SHA-256. The values a quote
+        // carries alongside this structure are fixed-width `[u8; 32]`, so a
+        // second bank would have no room and a different algorithm would
+        // not fit at all. Refusing beats guessing: which value
+        // belongs to which register is what a measurement policy is
+        // compared against.
+        if selection_count != 1 {
+            return Err(AttestError::PcrSelectionBanks(selection_count));
         }
-        for _ in 0..selection_count {
-            // TPMS_PCR_SELECTION: hash algorithm, sizeofSelect, pcrSelect
-            reader.skip(2)?;
-            let size_of_select = reader.read_u8()? as usize;
-            reader.skip(size_of_select)?;
+        // TPMS_PCR_SELECTION: hash algorithm, sizeofSelect, pcrSelect
+        let hash_algorithm = reader.read_u16()?;
+        if hash_algorithm != TPM_ALG_SHA256 {
+            return Err(AttestError::PcrSelectionAlgorithm(hash_algorithm));
         }
+        let size_of_select = reader.read_u8()? as usize;
+        if size_of_select > MAX_SIZE_OF_SELECT {
+            return Err(AttestError::PcrSelectionSize(size_of_select));
+        }
+        let selection_bitmap = reader.take(size_of_select)?;
+        // pcrSelect is a bitmap, LSB first within each octet: octet i bit j
+        // selects PCR i * 8 + j (TPM 2.0 spec Part 2, section 10.6.2).
+        //
+        // Ascending order is what lets a caller pair this list with the
+        // values a quote ships, and the quote's own signature is what
+        // enforces it: the TPM computes pcrDigest over the selected values
+        // concatenated in selection order, which is ascending by register.
+        // A sender that reorders the values it ships therefore fails the
+        // digest comparison in `TpmQuote::verify_pcrs`. The pairing means
+        // nothing until that comparison has run.
+        let selected_pcrs = (0..size_of_select * 8)
+            .filter(|pcr| selection_bitmap[pcr / 8] & (1 << (pcr % 8)) != 0)
+            .map(|pcr| pcr as u32)
+            .collect();
         // attested.quote.pcrDigest: TPM2B_DIGEST
         let pcr_digest = reader.read_tpm2b()?.to_vec();
         if reader.offset != bytes.len() {
             return Err(AttestError::TrailingData);
         }
-        Ok(Self { extra_data, pcr_digest })
+        Ok(Self { extra_data, pcr_digest, selected_pcrs })
     }
 
     /// The `extraData` field: caller-provided qualifying data (the nonce).
@@ -96,6 +132,12 @@ impl TpmsAttest {
     /// The attested `pcrDigest`: digest of the selected PCR values.
     pub(crate) fn pcr_digest(&self) -> &[u8] {
         &self.pcr_digest
+    }
+
+    /// The PCR registers this quote attests, ascending — the registers the
+    /// quote's values belong to, in the order they arrive.
+    pub(crate) fn selected_pcrs(&self) -> &[u32] {
+        &self.selected_pcrs
     }
 }
 
@@ -136,12 +178,56 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Marshalling helpers shared by the tests of this module and of
+/// `tpm_quote`, which needs quotes over selections other than the usual
+/// PCRs 0-23.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    use super::{TPM_ALG_SHA256, TPM_GENERATED_VALUE, TPM_ST_ATTEST_QUOTE};
 
-    /// Build a minimal marshalled quote-type TPMS_ATTEST.
-    fn build_attest(magic: u32, attest_type: u16, extra_data: &[u8], pcr_digest: &[u8]) -> Vec<u8> {
+    /// The SHA-256 bank identifier, for building selections over
+    /// registers other than the usual 0-23.
+    pub(crate) const SHA256_BANK: u16 = TPM_ALG_SHA256;
+
+    /// A single SHA-256 TPMS_PCR_SELECTION of PCRs 0-23, what an Azure
+    /// vTPM quote carries.
+    pub(crate) const ALL_24_PCRS: &[(u16, &[u8])] = &[(TPM_ALG_SHA256, &[0xff, 0xff, 0xff])];
+
+    /// A `pcrSelect` bitmap selecting the given registers: octet i bit j
+    /// selects PCR i * 8 + j.
+    pub(crate) fn pcr_bitmap(registers: &[u32]) -> Vec<u8> {
+        let octets = registers.iter().map(|pcr| pcr / 8 + 1).max().unwrap_or(0) as usize;
+        let mut bitmap = vec![0u8; octets];
+        for pcr in registers {
+            bitmap[(pcr / 8) as usize] |= 1 << (pcr % 8);
+        }
+        bitmap
+    }
+
+    /// Marshal a quote-type TPMS_ATTEST over the given PCR selections.
+    pub(crate) fn build_attest(
+        extra_data: &[u8],
+        selections: &[(u16, &[u8])],
+        pcr_digest: &[u8],
+    ) -> Vec<u8> {
+        build_attest_tagged(
+            TPM_GENERATED_VALUE,
+            TPM_ST_ATTEST_QUOTE,
+            extra_data,
+            selections,
+            pcr_digest,
+        )
+    }
+
+    /// As [`build_attest`], with the leading magic and structure tag under
+    /// the caller's control.
+    pub(crate) fn build_attest_tagged(
+        magic: u32,
+        attest_type: u16,
+        extra_data: &[u8],
+        selections: &[(u16, &[u8])],
+        pcr_digest: &[u8],
+    ) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&magic.to_be_bytes());
         bytes.extend_from_slice(&attest_type.to_be_bytes());
@@ -154,58 +240,90 @@ mod tests {
         // clockInfo + firmwareVersion
         bytes.extend_from_slice(&[0; 8 + 4 + 4 + 1]);
         bytes.extend_from_slice(&[0; 8]);
-        // TPML_PCR_SELECTION: one SHA-256 selection of PCRs 0-23
-        bytes.extend_from_slice(&1u32.to_be_bytes());
-        bytes.extend_from_slice(&0x000bu16.to_be_bytes());
-        bytes.push(3);
-        bytes.extend_from_slice(&[0xff, 0xff, 0xff]);
+        // attested.quote.pcrSelect: TPML_PCR_SELECTION
+        bytes.extend_from_slice(&(selections.len() as u32).to_be_bytes());
+        for (hash_algorithm, bitmap) in selections {
+            // TPMS_PCR_SELECTION: hash algorithm, sizeofSelect, pcrSelect
+            bytes.extend_from_slice(&hash_algorithm.to_be_bytes());
+            bytes.push(bitmap.len() as u8);
+            bytes.extend_from_slice(bitmap);
+        }
         // pcrDigest: TPM2B_DIGEST
         bytes.extend_from_slice(&(pcr_digest.len() as u16).to_be_bytes());
         bytes.extend_from_slice(pcr_digest);
         bytes
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{test_support::*, *};
 
     #[test]
     fn parses_quote_fields() {
         let extra_data = b"challenge";
         let pcr_digest = [0x42; 32];
-        let bytes = build_attest(TPM_GENERATED_VALUE, TPM_ST_ATTEST_QUOTE, extra_data, &pcr_digest);
+        let bytes = build_attest(extra_data, ALL_24_PCRS, &pcr_digest);
         let attest = TpmsAttest::parse(&bytes).unwrap();
         assert_eq!(attest.extra_data(), extra_data);
         assert_eq!(attest.pcr_digest(), pcr_digest);
+        assert_eq!(attest.selected_pcrs(), (0..24).collect::<Vec<u32>>().as_slice());
+    }
+
+    /// `pcrSelect` is a bitmap, LSB first within each octet, and the
+    /// registers it names come out ascending: that order is what pairs a
+    /// quote's values with their registers.
+    #[test]
+    fn reads_the_selected_registers_off_the_bitmap() {
+        let registers = [0, 1, 4, 7, 8, 15, 16, 23];
+        let bytes = build_attest(b"x", &[(TPM_ALG_SHA256, &pcr_bitmap(&registers))], &[0; 32]);
+        let attest = TpmsAttest::parse(&bytes).unwrap();
+        assert_eq!(attest.selected_pcrs(), registers);
     }
 
     #[test]
     fn rejects_bad_magic() {
-        let bytes = build_attest(0xdeadbeef, TPM_ST_ATTEST_QUOTE, b"x", &[0; 32]);
+        let bytes =
+            build_attest_tagged(0xdeadbeef, TPM_ST_ATTEST_QUOTE, b"x", ALL_24_PCRS, &[0; 32]);
         assert!(matches!(TpmsAttest::parse(&bytes), Err(AttestError::Magic)));
     }
 
     #[test]
     fn rejects_non_quote_attestation() {
         // TPM_ST_ATTEST_CERTIFY
-        let bytes = build_attest(TPM_GENERATED_VALUE, 0x8017, b"x", &[0; 32]);
+        let bytes = build_attest_tagged(TPM_GENERATED_VALUE, 0x8017, b"x", ALL_24_PCRS, &[0; 32]);
         assert!(matches!(TpmsAttest::parse(&bytes), Err(AttestError::NotAQuote)));
     }
 
+    /// The values a quote carries are fixed-width SHA-256 digests in one
+    /// list, so a second bank has nowhere to put its values.
     #[test]
-    fn rejects_trailing_bytes() {
-        let mut bytes = build_attest(TPM_GENERATED_VALUE, TPM_ST_ATTEST_QUOTE, b"x", &[0; 32]);
-        bytes.push(0);
-        assert!(matches!(TpmsAttest::parse(&bytes), Err(AttestError::TrailingData)));
+    fn rejects_more_than_one_pcr_bank() {
+        let sha1 = (0x0004u16, &[0xff, 0xff, 0xff][..]);
+        let bytes = build_attest(b"x", &[ALL_24_PCRS[0], sha1], &[0; 32]);
+        assert!(matches!(TpmsAttest::parse(&bytes), Err(AttestError::PcrSelectionBanks(2))));
     }
 
     #[test]
-    fn rejects_truncation_at_every_length() {
-        let bytes = build_attest(TPM_GENERATED_VALUE, TPM_ST_ATTEST_QUOTE, b"x", &[0; 32]);
-        for len in 0..bytes.len() {
-            assert!(
-                matches!(TpmsAttest::parse(&bytes[..len]), Err(AttestError::Truncated)),
-                "unexpected result at length {len}"
-            );
-        }
+    fn rejects_a_bank_that_is_not_sha256() {
+        let sha384 = (0x000cu16, &[0xff, 0xff, 0xff][..]);
+        let bytes = build_attest(b"x", &[sha384], &[0; 32]);
+        assert!(matches!(
+            TpmsAttest::parse(&bytes),
+            Err(AttestError::PcrSelectionAlgorithm(0x000c))
+        ));
     }
 
+    /// One attacker-supplied byte must not decide how many registers the
+    /// expansion walks.
+    #[test]
+    fn rejects_an_oversized_pcr_select_bitmap() {
+        let bytes = build_attest(b"x", &[(TPM_ALG_SHA256, &[0xff; 5][..])], &[0; 32]);
+        assert!(matches!(TpmsAttest::parse(&bytes), Err(AttestError::PcrSelectionSize(5))));
+    }
+
+    /// A hostile selection count is refused before anything is read on the
+    /// strength of it.
     #[test]
     fn rejects_implausible_pcr_selection_count() {
         let mut bytes = Vec::new();
@@ -215,6 +333,24 @@ mod tests {
         bytes.extend_from_slice(&0u16.to_be_bytes()); // extraData
         bytes.extend_from_slice(&[0; 8 + 4 + 4 + 1 + 8]); // clockInfo + firmwareVersion
         bytes.extend_from_slice(&u32::MAX.to_be_bytes()); // pcrSelect count
-        assert!(matches!(TpmsAttest::parse(&bytes), Err(AttestError::PcrSelectionCount)));
+        assert!(matches!(TpmsAttest::parse(&bytes), Err(AttestError::PcrSelectionBanks(u32::MAX))));
+    }
+
+    #[test]
+    fn rejects_trailing_bytes() {
+        let mut bytes = build_attest(b"x", ALL_24_PCRS, &[0; 32]);
+        bytes.push(0);
+        assert!(matches!(TpmsAttest::parse(&bytes), Err(AttestError::TrailingData)));
+    }
+
+    #[test]
+    fn rejects_truncation_at_every_length() {
+        let bytes = build_attest(b"x", ALL_24_PCRS, &[0; 32]);
+        for len in 0..bytes.len() {
+            assert!(
+                matches!(TpmsAttest::parse(&bytes[..len]), Err(AttestError::Truncated)),
+                "unexpected result at length {len}"
+            );
+        }
     }
 }
