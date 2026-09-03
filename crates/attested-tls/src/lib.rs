@@ -7,12 +7,8 @@ use std::{
 };
 
 pub use attestation::{
-    AttestationEvidence,
-    AttestationExchangeMessage,
-    AttestationGenerator,
-    AttestationType,
-    AttestationVerifier,
-    PlatformMetadata,
+    AttestationEvidence, AttestationExchangeMessage, AttestationGenerator, AttestationType,
+    AttestationVerifier, PlatformMetadata,
 };
 use ra_tls::{
     attestation::{Attestation, AttestationQuote, VersionedAttestation},
@@ -21,32 +17,20 @@ use ra_tls::{
 };
 pub use ra_tls::{cert::CaCert, rcgen};
 use rustls::{
-    CertificateError,
-    DigitallySignedStruct,
-    DistinguishedName,
+    CertificateError, DigitallySignedStruct, DistinguishedName,
     Error::InvalidCertificate,
-    RootCertStore,
-    SignatureScheme,
+    RootCertStore, SignatureScheme,
     client::{
-        ResolvesClientCert,
-        VerifierBuilderError,
-        WebPkiServerVerifier,
+        ResolvesClientCert, VerifierBuilderError, WebPkiServerVerifier,
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
         verify_server_name,
     },
     crypto::CryptoProvider,
     pki_types::{
-        CertificateDer,
-        PrivateKeyDer,
-        PrivatePkcs8KeyDer,
-        ServerName,
-        UnixTime,
-        pem::PemObject,
+        CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime, pem::PemObject,
     },
     server::{
-        ParsedCertificate,
-        ResolvesServerCert,
-        WebPkiClientVerifier,
+        ParsedCertificate, ResolvesServerCert, WebPkiClientVerifier,
         danger::{ClientCertVerified, ClientCertVerifier},
     },
     sign::{CertifiedKey, SigningKey},
@@ -537,8 +521,8 @@ impl AttestedCertificateVerifier {
         cert: &X509Certificate<'_>,
     ) -> Result<AttestationExchangeMessage, rustls::Error> {
         if let Ok(Some(VersionedAttestation::V0 { attestation })) =
-            ra_tls::attestation::from_cert(cert) &&
-            let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote
+            ra_tls::attestation::from_cert(cert)
+            && let AttestationQuote::DstackTdx(tdx_quote) = attestation.quote
         {
             return serde_json::from_slice::<AttestationExchangeMessage>(&tdx_quote.quote).map_err(
                 |err| {
@@ -753,8 +737,8 @@ impl ServerCertVerifier for AttestedCertificateVerifier {
             Ok(_) => {}
         };
 
-        if let Some(ref allowed_leaf_cert_pubkeys) = self.allowed_leaf_cert_pubkeys &&
-            !allowed_leaf_cert_pubkeys.contains(&Sha512::digest(cert.public_key().raw).into())
+        if let Some(ref allowed_leaf_cert_pubkeys) = self.allowed_leaf_cert_pubkeys
+            && !allowed_leaf_cert_pubkeys.contains(&Sha512::digest(cert.public_key().raw).into())
         {
             tracing::warn!("Rejecting leaf certificate with un-allowed public key");
             return Err(InvalidCertificate(CertificateError::UnknownIssuer));
@@ -841,8 +825,8 @@ impl ClientCertVerifier for AttestedCertificateVerifier {
             Ok(_) => {}
         }
 
-        if let Some(ref allowed_leaf_cert_pubkeys) = self.allowed_leaf_cert_pubkeys &&
-            !allowed_leaf_cert_pubkeys.contains(&Sha512::digest(cert.public_key().raw).into())
+        if let Some(ref allowed_leaf_cert_pubkeys) = self.allowed_leaf_cert_pubkeys
+            && !allowed_leaf_cert_pubkeys.contains(&Sha512::digest(cert.public_key().raw).into())
         {
             tracing::warn!("Rejecting leaf certificate with un-allowed public key");
             return Err(InvalidCertificate(CertificateError::UnknownIssuer));
@@ -1048,21 +1032,11 @@ mod tests {
 
     use mock_tdx::mock_pcs::{MockPcsConfig, spawn_mock_pcs_server};
     use ra_tls::rcgen::{
-        BasicConstraints,
-        CertificateParams,
-        IsCa,
-        KeyPair,
-        PKCS_ECDSA_P256_SHA256,
+        BasicConstraints, CertificateParams, IsCa, KeyPair, PKCS_ECDSA_P256_SHA256,
     };
     use rustls::{
-        CertificateError,
-        ClientConfig,
-        ClientConnection,
-        Error,
-        RootCertStore,
-        ServerConfig,
-        ServerConnection,
-        crypto::aws_lc_rs,
+        CertificateError, ClientConfig, ClientConnection, Error, RootCertStore, ServerConfig,
+        ServerConnection, crypto::aws_lc_rs,
     };
 
     use super::*;
@@ -1742,7 +1716,7 @@ mod tests {
         let dynamic_verifier = AttestationVerifier::builder(
             attestation::measurements::MeasurementPolicy::expect_none(),
         )
-        .with_pccs_mode(attestation::PccsMode::None)
+        .with_pccs_mode(attestation::PccsMode::Remote)
         .with_dynamic_measurements_file_or_url("measurements.json".into())
         .build();
 
