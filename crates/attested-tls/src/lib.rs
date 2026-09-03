@@ -13,6 +13,7 @@ pub use attestation::{
     AttestationType,
     AttestationVerifier,
     PlatformMetadata,
+    VerifyMode,
 };
 use ra_tls::{
     attestation::{Attestation, AttestationQuote, VersionedAttestation},
@@ -676,7 +677,7 @@ impl AttestedCertificateVerifier {
         let attestation = Self::extract_custom_attestation_from_cert(cert)?;
 
         self.attestation_verifier
-            .verify_attestation_sync(attestation, expected_input_data)
+            .verify_attestation_sync(attestation, expected_input_data, VerifyMode::Live)
             .map_err(|err| {
                 tracing::warn!(
                     "Rejecting certificate after attestation verification failure: {err}"

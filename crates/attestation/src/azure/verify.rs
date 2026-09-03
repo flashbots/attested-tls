@@ -4,7 +4,7 @@
 //! chain verification against pinned Azure roots.
 use az_cvm_vtpm::{hcl, tdx};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE as BASE64_URL_SAFE};
-use dcap_qvl::QuoteCollateralV3;
+use dcap_qvl::verify::QuoteVerifier;
 use num_bigint::BigUint;
 use openssl::pkey::PKey;
 use pccs::Pccs;
@@ -17,14 +17,11 @@ use super::{
     TpmAttest,
     ak_certificate::verify_ak_cert_with_azure_roots,
     ensure_azure_attestation_payload_size,
-    unix_time_now_secs,
 };
 use crate::{
     VerifiedAttestation,
-    dcap::{
-        verify_dcap_attestation_with_given_timestamp,
-        verify_dcap_attestation_with_timestamp_sync,
-    },
+    VerifyMode,
+    dcap::{verify_quote, verify_quote_sync},
     measurements::MultiMeasurements,
 };
 
@@ -39,57 +36,67 @@ struct PreparedAzureAttestation {
 }
 
 /// Verify a TDX attestation from Azure
+///
+/// `mode` gates the DCAP leg and the vTPM leg alike: on
+/// [VerifyMode::Archived] the AK certificate chain is checked as of the
+/// same instant as the snapshot, and nothing reaches the network.
+/// `pccs` only matters on [VerifyMode::Live]; see
+/// [crate::dcap::verify_dcap_attestation].
 pub async fn verify_azure_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
+    mode: VerifyMode,
     pccs: Option<Pccs>,
     override_azure_outdated_tcb: bool,
 ) -> Result<VerifiedAttestation, MaaError> {
-    let now = unix_time_now_secs()?;
+    let PreparedAzureAttestation {
+        tdx_quote_bytes,
+        hcl_report,
+        var_data_hash,
+        expected_tdx_input_data,
+        tpm_attestation,
+    } = prepare_azure_attestation(input)?;
 
-    verify_azure_attestation_with_given_timestamp(
-        input,
-        expected_input_data,
+    // The DCAP leg reports the instant it evaluated at, so the vTPM leg
+    // below is held to the same one - on [VerifyMode::Live] the clock
+    // is read once, not once per leg. Only the endorsements travel
+    // upward: this platform is judged on the vTPM PCRs, not the TD
+    // quote
+    let (dcap, _) = verify_quote(
+        tdx_quote_bytes,
+        expected_tdx_input_data,
+        mode,
         pccs,
-        None,
-        now,
         override_azure_outdated_tcb,
+        &QuoteVerifier::new_prod(),
+        None,
     )
-    .await
+    .await?;
+
+    // The vTPM leg fetches nothing - AK chain in the evidence, roots
+    // compiled in - so it adds no endorsements of its own
+    let measurements = finish_azure_attestation_verification(
+        hcl_report,
+        var_data_hash,
+        tpm_attestation,
+        expected_input_data,
+        dcap.endorsements.at,
+    )?;
+    Ok(VerifiedAttestation { measurements, endorsements: dcap.endorsements })
 }
 
 /// Verify a TDX attestation from Azure - synchronous version
 ///
-/// This relies on having DCAP collateral already present in the cache
+/// `pccs` only matters on [VerifyMode::Live], and then the collateral has
+/// to be in its cache already; see
+/// [crate::dcap::verify_dcap_attestation_sync].
 ///
 /// If possible, prefer the async version
 pub fn verify_azure_attestation_sync(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
+    mode: VerifyMode,
     pccs: Pccs,
-    override_azure_outdated_tcb: bool,
-) -> Result<VerifiedAttestation, MaaError> {
-    let now = unix_time_now_secs()?;
-
-    verify_azure_attestation_with_given_timestamp_sync(
-        input,
-        expected_input_data,
-        pccs,
-        None,
-        now,
-        override_azure_outdated_tcb,
-    )
-}
-
-/// Do the verification, passing in the current time
-/// This allows us to test this function without time checks going out of
-/// date
-async fn verify_azure_attestation_with_given_timestamp(
-    input: Vec<u8>,
-    expected_input_data: [u8; 64],
-    pccs: Option<Pccs>,
-    collateral: Option<QuoteCollateralV3>,
-    now: u64,
     override_azure_outdated_tcb: bool,
 ) -> Result<VerifiedAttestation, MaaError> {
     let PreparedAzureAttestation {
@@ -100,54 +107,13 @@ async fn verify_azure_attestation_with_given_timestamp(
         tpm_attestation,
     } = prepare_azure_attestation(input)?;
 
-    // Only the endorsements travel upward: this platform is judged on the
-    // vTPM PCRs, not the TD quote
-    let (dcap, _) = verify_dcap_attestation_with_given_timestamp(
+    let (dcap, _) = verify_quote_sync(
         tdx_quote_bytes,
         expected_tdx_input_data,
+        mode,
         pccs,
-        collateral,
-        now,
         override_azure_outdated_tcb,
-    )
-    .await?;
-
-    // The vTPM leg fetches nothing — AK chain in the evidence, roots
-    // compiled in — so it adds no endorsements of its own
-    let measurements = finish_azure_attestation_verification(
-        hcl_report,
-        var_data_hash,
-        tpm_attestation,
-        expected_input_data,
-        now,
-    )?;
-    Ok(VerifiedAttestation { measurements, endorsements: dcap.endorsements })
-}
-
-/// Synchronous version of the verifier
-fn verify_azure_attestation_with_given_timestamp_sync(
-    input: Vec<u8>,
-    expected_input_data: [u8; 64],
-    pccs: Pccs,
-    collateral: Option<QuoteCollateralV3>,
-    now: u64,
-    override_azure_outdated_tcb: bool,
-) -> Result<VerifiedAttestation, MaaError> {
-    let PreparedAzureAttestation {
-        tdx_quote_bytes,
-        hcl_report,
-        var_data_hash,
-        expected_tdx_input_data,
-        tpm_attestation,
-    } = prepare_azure_attestation(input)?;
-
-    let (dcap, _) = verify_dcap_attestation_with_timestamp_sync(
-        tdx_quote_bytes,
-        expected_tdx_input_data,
-        pccs,
-        collateral,
-        now,
-        override_azure_outdated_tcb,
+        &QuoteVerifier::new_prod(),
     )?;
 
     let measurements = finish_azure_attestation_verification(
@@ -155,7 +121,7 @@ fn verify_azure_attestation_with_given_timestamp_sync(
         var_data_hash,
         tpm_attestation,
         expected_input_data,
-        now,
+        dcap.endorsements.at,
     )?;
     Ok(VerifiedAttestation { measurements, endorsements: dcap.endorsements })
 }
@@ -346,10 +312,9 @@ impl RsaPubKey {
 
 #[cfg(test)]
 mod tests {
-    use dcap_qvl::QuoteCollateralV3;
 
     use super::{super::MAX_AZURE_ATTESTATION_PAYLOAD_SIZE, *};
-    use crate::EndorsementSnapshot;
+    use crate::{EndorsementSnapshot, QuoteCollateralV3};
 
     fn input_data_from_attestation(attestation_bytes: &[u8]) -> [u8; 64] {
         let attestation_document: AttestationDocument =
@@ -386,43 +351,24 @@ mod tests {
     }
 
     /// All verification entry points must reject an oversized payload, and
-    /// must do so before attempting DCAP verification (no collateral or
-    /// usable PCCS is provided here).
+    /// must do so before attempting DCAP verification. [VerifyMode::Live]
+    /// with no PCCS is the strict case: were the size gate to miss, the
+    /// verification would reach out to Intel.
     #[tokio::test]
     async fn verify_rejects_oversized_payload_before_deserialize() {
         let actual = MAX_AZURE_ATTESTATION_PAYLOAD_SIZE + 1;
         let input = vec![b'{'; actual];
 
-        let err = verify_azure_attestation(input.clone(), [0; 64], None, false).await.unwrap_err();
+        let err = verify_azure_attestation(input.clone(), [0; 64], VerifyMode::Live, None, false)
+            .await
+            .unwrap_err();
         assert_payload_too_large(err, actual);
 
         let err = verify_azure_attestation_sync(
-            input.clone(),
-            [0; 64],
-            Pccs::new_without_prewarm(None),
-            false,
-        )
-        .unwrap_err();
-        assert_payload_too_large(err, actual);
-
-        let err = verify_azure_attestation_with_given_timestamp(
-            input.clone(),
-            [0; 64],
-            None,
-            None,
-            0,
-            false,
-        )
-        .await
-        .unwrap_err();
-        assert_payload_too_large(err, actual);
-
-        let err = verify_azure_attestation_with_given_timestamp_sync(
             input,
             [0; 64],
+            VerifyMode::Live,
             Pccs::new_without_prewarm(None),
-            None,
-            0,
             false,
         )
         .unwrap_err();
@@ -470,12 +416,11 @@ mod tests {
         let VerifiedAttestation {
             measurements: async_measurements,
             endorsements: async_endorsements,
-        } = verify_azure_attestation_with_given_timestamp(
+        } = verify_azure_attestation(
             attestation_json.clone(),
             [0; 64],
+            VerifyMode::Archived(EndorsementSnapshot::dcap(fixture_collateral.clone(), now)),
             None,
-            Some(fixture_collateral.clone()),
-            now,
             false,
         )
         .await
@@ -484,20 +429,20 @@ mod tests {
         let VerifiedAttestation {
             measurements: sync_measurements,
             endorsements: sync_endorsements,
-        } = verify_azure_attestation_with_given_timestamp_sync(
+        } = verify_azure_attestation_sync(
             attestation_json,
             [0; 64],
+            VerifyMode::Archived(EndorsementSnapshot::dcap(fixture_collateral.clone(), now)),
             Pccs::new_without_prewarm(None),
-            Some(fixture_collateral.clone()),
-            now,
             false,
         )
         .unwrap();
 
         assert_eq!(async_measurements, sync_measurements);
-        // The bundle handed back is the one the DCAP leg consumed, which is
-        // what makes archiving it provenance rather than a second copy, and
-        // it arrives paired with the instant both legs were held to
+        // The bundle handed back is the one the verification consumed,
+        // which is what makes archiving it provenance rather than a
+        // second copy, and it arrives paired with the instant it
+        // was held to
         let expected = EndorsementSnapshot::dcap(fixture_collateral, now);
         assert_eq!(async_endorsements, expected);
         assert_eq!(sync_endorsements, expected);
@@ -520,12 +465,11 @@ mod tests {
         )
         .unwrap();
 
-        let err = verify_azure_attestation_with_given_timestamp(
+        let err = verify_azure_attestation(
             attestation_json,
             expected_input_data,
+            VerifyMode::Archived(EndorsementSnapshot::dcap(collateral, now)),
             None,
-            Some(collateral),
-            now,
             false,
         )
         .await

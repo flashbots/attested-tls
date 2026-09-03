@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 pub use attestation::AttestationGenerator;
-use attestation::{AttestationError, AttestationExchangeMessage, AttestationVerifier};
+use attestation::{AttestationError, AttestationExchangeMessage, AttestationVerifier, VerifyMode};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -61,7 +61,9 @@ pub async fn attestation_provider_client(
 
     println!("Remote attestation type: {remote_attestation_type}");
 
-    attestation_verifier.verify_attestation(remote_attestation_message.clone(), input_data).await?;
+    attestation_verifier
+        .verify_attestation(remote_attestation_message.clone(), input_data, VerifyMode::Live)
+        .await?;
 
     Ok(remote_attestation_message)
 }

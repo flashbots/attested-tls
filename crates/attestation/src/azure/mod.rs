@@ -103,10 +103,6 @@ where
     Ok(certificates)
 }
 
-fn unix_time_now_secs() -> Result<u64, MaaError> {
-    Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs())
-}
-
 /// An error when generating or verifying a Microsoft Azure vTPM attestation
 /// (MAA is short for Microsoft Azure Attestation)
 #[derive(Error, Debug)]
