@@ -504,6 +504,19 @@ impl AttestationVerifierBuilder {
         self
     }
 
+    /// Fetches DCAP collateral from Intel PCS using the provided
+    /// subscription key.
+    pub fn with_intel_pcs_subscription_key(mut self, key: impl Into<String>) -> Self {
+        self.collateral_source = CollateralSource::IntelPcs { subscription_key: Some(key.into()) };
+        self
+    }
+
+    /// Fetches DCAP collateral from the PCCS-compatible service at `url`.
+    pub fn with_pccs_url(mut self, url: impl Into<String>) -> Self {
+        self.collateral_source = CollateralSource::Pccs { url: url.into() };
+        self
+    }
+
     /// Configures whether and how DCAP collateral is cached in process.
     ///
     /// The default is [`CachePolicy::Passthrough`].
@@ -719,10 +732,11 @@ impl AttestationVerifier {
 
     /// Synchronously verifies an attestation against the configured policy.
     ///
-    /// DCAP and Azure verification require `Lazy` or `Prewarmed` mode with
-    /// the requested collateral already cached. `Remote` mode cannot fetch
-    /// collateral synchronously. A cache miss returns an error and starts a
-    /// background fetch for a later attempt.
+    /// DCAP and Azure verification require [`CachePolicy::OnDemand`] or
+    /// [`CachePolicy::Prewarmed`] with the requested collateral already
+    /// cached. [`CachePolicy::Passthrough`] cannot fetch collateral
+    /// synchronously. A cache miss returns an error and starts a background
+    /// fetch for a later attempt.
     pub fn verify_attestation_sync(
         &self,
         attestation_exchange_message: AttestationExchangeMessage,
@@ -1144,6 +1158,32 @@ mod tests {
     #[test]
     fn running_on_gcp_check_does_not_panic() {
         let _ = running_on_gcp();
+    }
+
+    #[test]
+    fn verifier_builder_configures_intel_pcs_subscription_key() {
+        let builder = AttestationVerifier::builder(MeasurementPolicy::tdx())
+            .with_cache_policy(CachePolicy::OnDemand)
+            .with_intel_pcs_subscription_key("subscription-key");
+
+        assert_eq!(builder.cache_policy, CachePolicy::OnDemand);
+        assert_eq!(
+            builder.collateral_source,
+            CollateralSource::IntelPcs { subscription_key: Some("subscription-key".to_string()) }
+        );
+    }
+
+    #[test]
+    fn verifier_builder_configures_pccs_url() {
+        let builder = AttestationVerifier::builder(MeasurementPolicy::tdx())
+            .with_cache_policy(CachePolicy::Prewarmed)
+            .with_pccs_url("https://pccs.example");
+
+        assert_eq!(builder.cache_policy, CachePolicy::Prewarmed);
+        assert_eq!(
+            builder.collateral_source,
+            CollateralSource::Pccs { url: "https://pccs.example".to_string() }
+        );
     }
 
     #[tokio::test]

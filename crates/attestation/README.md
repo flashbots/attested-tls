@@ -57,6 +57,9 @@ Intel PCS with `CachePolicy::Passthrough`.
 
 Use `CollateralSource::IntelPcs` with an optional subscription key, or
 `CollateralSource::Pccs` with the URL of a compatible service.
+`AttestationVerifierBuilder::with_intel_pcs_subscription_key` and
+`AttestationVerifierBuilder::with_pccs_url` provide shortcuts for these common
+configurations.
 
 `AttestationVerifier::ready()` waits for initial work only with `Prewarmed`.
 It returns immediately for `Passthrough` and `OnDemand`. A successful
@@ -107,9 +110,10 @@ must be explicitly enabled via the `override_azure_outdated_tcb` flag on
 Enables mock quote support via the local `mock-tdx` crate for tests and
 development on non-TDX hardware.
 
-In mock builds, `Remote` mode uses embedded mock collateral rather than making
-an external request. Cached modes can be pointed at a local mock PCCS when
-testing cache behavior.
+In mock builds, `CachePolicy::Passthrough` uses embedded mock collateral rather
+than making an external request. `CachePolicy::OnDemand` and
+`CachePolicy::Prewarmed` can be pointed at a local mock PCCS when testing cache
+behavior.
 
 Do not use in production. Disabled by default.
 
@@ -138,11 +142,11 @@ Alternatively, an external 'attestation provider service' URL can be provided
 which outsources the attestation generation to another process.
 
 When verifying DCAP attestations, collateral is retrieved according to the
-configured PCCS mode. The endpoint defaults to Intel PCS unless a PCCS URL is
-provided through the verifier builder. If outdated TCB is used, the quote will
-fail to verify. For special cases where outdated TCB should be allowed, a
-custom override function can be passed when verifying which may modify
-collateral before it is validated against the TCB.
+configured collateral source and cache policy. The source defaults to Intel PCS
+unless a PCCS URL is provided through the verifier builder. If outdated TCB is
+used, the quote will fail to verify. For special cases where outdated TCB
+should be allowed, a custom override function can be passed when verifying
+which may modify collateral before it is validated against the TCB.
 
 ## Measurements File
 
