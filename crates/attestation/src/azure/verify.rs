@@ -42,7 +42,7 @@ struct PreparedAzureAttestation {
 pub async fn verify_azure_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs: Option<Pccs>,
+    pccs: Pccs,
     override_azure_outdated_tcb: bool,
 ) -> Result<VerifiedAttestation, MaaError> {
     let now = unix_time_now_secs()?;
@@ -61,6 +61,9 @@ pub async fn verify_azure_attestation(
 /// Verify a TDX attestation from Azure - synchronous version
 ///
 /// This relies on having DCAP collateral already present in the cache
+///
+/// [`CachePolicy::Passthrough`](pccs::CachePolicy::Passthrough) is not
+/// supported because fetching collateral requires asynchronous I/O.
 ///
 /// If possible, prefer the async version
 pub fn verify_azure_attestation_sync(
@@ -87,7 +90,7 @@ pub fn verify_azure_attestation_sync(
 async fn verify_azure_attestation_with_given_timestamp(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs: Option<Pccs>,
+    pccs: Pccs,
     collateral: Option<QuoteCollateralV3>,
     now: u64,
     override_azure_outdated_tcb: bool,
@@ -401,13 +404,26 @@ mod tests {
         let actual = MAX_AZURE_ATTESTATION_PAYLOAD_SIZE + 1;
         let input = vec![b'{'; actual];
 
-        let err = verify_azure_attestation(input.clone(), [0; 64], None, false).await.unwrap_err();
+        let err = verify_azure_attestation(
+            input.clone(),
+            [0; 64],
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::Passthrough,
+            ),
+            false,
+        )
+        .await
+        .unwrap_err();
         assert_payload_too_large(err, actual);
 
         let err = verify_azure_attestation_sync(
             input.clone(),
             [0; 64],
-            Pccs::new_without_prewarm(None),
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::OnDemand,
+            ),
             false,
         )
         .unwrap_err();
@@ -416,7 +432,10 @@ mod tests {
         let err = verify_azure_attestation_with_given_timestamp(
             input.clone(),
             [0; 64],
-            None,
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::Passthrough,
+            ),
             None,
             0,
             false,
@@ -428,7 +447,10 @@ mod tests {
         let err = verify_azure_attestation_with_given_timestamp_sync(
             input,
             [0; 64],
-            Pccs::new_without_prewarm(None),
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::OnDemand,
+            ),
             None,
             0,
             false,
@@ -482,7 +504,10 @@ mod tests {
         } = verify_azure_attestation_with_given_timestamp(
             attestation_json.clone(),
             [0; 64],
-            None,
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::Passthrough,
+            ),
             Some(fixture_collateral.clone()),
             now,
             false,
@@ -497,7 +522,10 @@ mod tests {
         } = verify_azure_attestation_with_given_timestamp_sync(
             attestation_json,
             [0; 64],
-            Pccs::new_without_prewarm(None),
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::OnDemand,
+            ),
             Some(fixture_collateral.clone()),
             now,
             false,
@@ -533,7 +561,10 @@ mod tests {
         let err = verify_azure_attestation_with_given_timestamp(
             attestation_json,
             expected_input_data,
-            None,
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::Passthrough,
+            ),
             Some(collateral),
             now,
             false,

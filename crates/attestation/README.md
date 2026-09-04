@@ -28,14 +28,44 @@ Matched expected measurements can be transported in an HTTP header using
 
 ## Runtime Requirements
 
-Verification uses the [`pccs`](../pccs) crate for collateral caching and
-background refresh. As a result, constructing an `AttestationVerifier` with
-PCCS enabled and calling verification APIs is expected to happen from within a
-Tokio runtime and might panic if called outside of one.
+Verification uses the [`pccs`](../pccs) crate to fetch DCAP collateral and,
+depending on the selected cache policy, cache and refresh it. Asynchronous
+verification requires a Tokio runtime. Constructing an `AttestationVerifier`
+with the `Prewarmed` policy also requires an active runtime because pre-warming
+starts immediately; constructing it with the `Passthrough` or `OnDemand`
+policy does not itself spawn a task.
 
-Note that although some of the verification API methods are synchronous (for
-example `verify_attestation_sync`), still their functionality depends on
-Tokio-backed background tasks such as PCCS pre-warm and cache refresh.
+Synchronous verification requires a cached policy (`OnDemand` or `Prewarmed`)
+with the required collateral already cached. Cache misses and expired entries
+may start Tokio-backed background refresh tasks. `Passthrough` cannot be used
+for synchronous verification because fetching collateral requires
+asynchronous I/O.
+
+## DCAP collateral configuration
+
+Every `AttestationVerifier` has an independent collateral source and cache
+policy configured through `AttestationVerifierBuilder::with_collateral_source`
+and `AttestationVerifierBuilder::with_cache_policy`. The default is anonymous
+Intel PCS with `CachePolicy::Passthrough`.
+
+- `Passthrough` keeps no internal cache and fetches collateral from the
+  configured endpoint for every asynchronous verification.
+- `OnDemand` starts with an empty internal cache and fetches collateral on
+  demand.
+- `Prewarmed` immediately starts discovering and caching available TDX
+  collateral, then refreshes cached entries before expiry.
+
+Use `CollateralSource::IntelPcs` with an optional subscription key, or
+`CollateralSource::Pccs` with the URL of a compatible service.
+`AttestationVerifierBuilder::with_intel_pcs_subscription_key` and
+`AttestationVerifierBuilder::with_pccs_url` provide shortcuts for these common
+configurations.
+
+`AttestationVerifier::ready()` waits for initial work only with `Prewarmed`.
+It returns immediately for `Passthrough` and `OnDemand`. A successful
+return with either policy does not mean later verification will avoid fetching
+collateral. With `Prewarmed` it means pre-warm bootstrap completed, but
+individual collateral fetches can still have failed.
 
 ## Feature flags
 
@@ -80,6 +110,11 @@ must be explicitly enabled via the `override_azure_outdated_tcb` flag on
 Enables mock quote support via the local `mock-tdx` crate for tests and
 development on non-TDX hardware.
 
+In mock builds, `CachePolicy::Passthrough` uses embedded mock collateral rather
+than making an external request. `CachePolicy::OnDemand` and
+`CachePolicy::Prewarmed` can be pointed at a local mock PCCS when testing cache
+behavior.
+
 Do not use in production. Disabled by default.
 
 ## Attestation Types
@@ -106,11 +141,12 @@ attempted.
 Alternatively, an external 'attestation provider service' URL can be provided
 which outsources the attestation generation to another process.
 
-When verifying DCAP attestations, the Intel PCS is used to retrieve collateral
-unless a PCCS URL is provided via a command line argument. If outdated TCB is
-used, the quote will fail to verify.  For special cases where outdated TCB
-should be allowed, a custom override function can be passed when verifying which
-may modify collateral before it is validated against the TCB.
+When verifying DCAP attestations, collateral is retrieved according to the
+configured collateral source and cache policy. The source defaults to Intel PCS
+unless a PCCS URL is provided through the verifier builder. If outdated TCB is
+used, the quote will fail to verify. For special cases where outdated TCB
+should be allowed, a custom override function can be passed when verifying
+which may modify collateral before it is validated against the TCB.
 
 ## Measurements File
 

@@ -3,6 +3,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc,
+        Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -11,6 +12,7 @@ use axum::{
     Json,
     Router,
     extract::{Query, State},
+    http::HeaderMap,
     response::IntoResponse,
     routing::get,
 };
@@ -59,6 +61,7 @@ pub struct MockPcsServer {
     _task: JoinHandle<()>,
     tcb_calls: Arc<AtomicUsize>,
     qe_calls: Arc<AtomicUsize>,
+    subscription_keys: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl Drop for MockPcsServer {
@@ -77,6 +80,11 @@ impl MockPcsServer {
     pub fn qe_call_count(&self) -> usize {
         self.qe_calls.load(Ordering::SeqCst)
     }
+
+    /// Returns the Intel PCS subscription key observed on each request.
+    pub fn subscription_keys(&self) -> Vec<Option<String>> {
+        self.subscription_keys.lock().unwrap().clone()
+    }
 }
 
 /// Shared state served by the mock PCS routes
@@ -92,6 +100,7 @@ struct MockPcsState {
     qe_next_update: String,
     refreshed_tcb_next_update: Option<String>,
     refreshed_qe_next_update: Option<String>,
+    subscription_keys: Arc<Mutex<Vec<Option<String>>>>,
     pck_crl: Vec<u8>,
     pck_crl_issuer_chain: String,
     tcb_issuer_chain: String,
@@ -115,6 +124,7 @@ pub async fn spawn_mock_pcs_server(
 
     let tcb_calls = Arc::new(AtomicUsize::new(0));
     let qe_calls = Arc::new(AtomicUsize::new(0));
+    let subscription_keys = Arc::new(Mutex::new(Vec::new()));
     let state = Arc::new(MockPcsState {
         fmspc: tcb_info["fmspc"].as_str().ok_or("mock collateral missing fmspc")?.to_string(),
         include_fmspcs_listing: config.include_fmspcs_listing,
@@ -126,6 +136,7 @@ pub async fn spawn_mock_pcs_server(
         qe_next_update: config.qe_next_update,
         refreshed_tcb_next_update: config.refreshed_tcb_next_update,
         refreshed_qe_next_update: config.refreshed_qe_next_update,
+        subscription_keys: subscription_keys.clone(),
         pck_crl: base_collateral.pck_crl,
         pck_crl_issuer_chain: urlencoding::encode(&base_collateral.pck_crl_issuer_chain).into(),
         tcb_issuer_chain: urlencoding::encode(&base_collateral.tcb_info_issuer_chain).into(),
@@ -149,14 +160,22 @@ pub async fn spawn_mock_pcs_server(
         axum::serve(listener, app).await.unwrap();
     });
 
-    Ok(MockPcsServer { base_url: format!("http://{addr}"), _task: task, tcb_calls, qe_calls })
+    Ok(MockPcsServer {
+        base_url: format!("http://{addr}"),
+        _task: task,
+        tcb_calls,
+        qe_calls,
+        subscription_keys,
+    })
 }
 
 /// Serves the mock PCK CRL and issuer chain
 async fn mock_pck_crl_handler(
     State(state): State<Arc<MockPcsState>>,
+    headers: HeaderMap,
     Query(params): Query<StdHashMap<String, String>>,
 ) -> impl IntoResponse {
+    record_subscription_key(&headers, &state);
     assert!(
         matches!(params.get("ca").map(String::as_str), Some("processor") | Some("platform")),
         "unexpected ca query value for pckcrl"
@@ -166,7 +185,11 @@ async fn mock_pck_crl_handler(
 }
 
 /// Serves the optional FMSPC listing used by PCCS prewarm tests
-async fn mock_fmspcs_handler(State(state): State<Arc<MockPcsState>>) -> impl IntoResponse {
+async fn mock_fmspcs_handler(
+    State(state): State<Arc<MockPcsState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    record_subscription_key(&headers, &state);
     if state.include_fmspcs_listing {
         Json(json!([{
             "fmspc": state.fmspc,
@@ -180,8 +203,10 @@ async fn mock_fmspcs_handler(State(state): State<Arc<MockPcsState>>) -> impl Int
 /// Serves signed TCB info with configurable refresh behavior
 async fn mock_tcb_handler(
     State(state): State<Arc<MockPcsState>>,
+    headers: HeaderMap,
     Query(params): Query<StdHashMap<String, String>>,
 ) -> impl IntoResponse {
+    record_subscription_key(&headers, &state);
     assert_eq!(params.get("fmspc"), Some(&state.fmspc));
     let call_number = state.tcb_calls.fetch_add(1, Ordering::SeqCst) + 1;
     let mut tcb_info = state.base_tcb_info.clone();
@@ -203,8 +228,10 @@ async fn mock_tcb_handler(
 /// Serves signed QE identity collateral with configurable refresh behavior
 async fn mock_qe_identity_handler(
     State(state): State<Arc<MockPcsState>>,
+    headers: HeaderMap,
     Query(params): Query<StdHashMap<String, String>>,
 ) -> impl IntoResponse {
+    record_subscription_key(&headers, &state);
     assert_eq!(params.get("update"), Some(&"standard".to_string()));
     let call_number = state.qe_calls.fetch_add(1, Ordering::SeqCst) + 1;
     let mut qe_identity = state.base_qe_identity.clone();
@@ -224,6 +251,17 @@ async fn mock_qe_identity_handler(
 }
 
 /// Serves the root CA CRL expected by the PCS client
-async fn mock_root_ca_crl_handler(State(state): State<Arc<MockPcsState>>) -> impl IntoResponse {
+async fn mock_root_ca_crl_handler(
+    State(state): State<Arc<MockPcsState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    record_subscription_key(&headers, &state);
     state.root_ca_crl_hex.clone()
+}
+
+fn record_subscription_key(headers: &HeaderMap, state: &MockPcsState) {
+    let subscription_key = headers
+        .get("Ocp-Apim-Subscription-Key")
+        .map(|value| value.to_str().expect("subscription key header should be ASCII").to_string());
+    state.subscription_keys.lock().unwrap().push(subscription_key);
 }

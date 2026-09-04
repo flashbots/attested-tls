@@ -18,6 +18,11 @@ use dcap_qvl::{
     http::{HttpClient as DcapHttpClient, HttpResponse},
     tcb_info::TcbInfo,
 };
+use reqwest::{
+    Url,
+    header::{HeaderValue, InvalidHeaderValue},
+    redirect::Policy,
+};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
@@ -40,6 +45,8 @@ fn install_test_crypto_provider() {
 
 /// For fetching collateral directly from Intel
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
+/// Header used to authenticate requests to Intel PCS.
+const PCS_SUBSCRIPTION_KEY_HEADER: &str = "Ocp-Apim-Subscription-Key";
 /// How long before expiry to refresh collateral
 const REFRESH_MARGIN_SECS: i64 = 300;
 /// How long to wait before retrying when failing to fetch collateral
@@ -50,9 +57,43 @@ const PCCS_HTTP_TIMEOUT_SECS: u64 = 180;
 /// pre-warm
 const STARTUP_PREWARM_CONCURRENCY: usize = 8;
 
+/// Service from which DCAP collateral is fetched.
+#[derive(Clone, PartialEq, Eq)]
+pub enum CollateralSource {
+    /// Intel PCS. A subscription key lifts the anonymous rate limit.
+    IntelPcs { subscription_key: Option<String> },
+    /// Any PCCS-compatible service, such as a self-hosted instance or local
+    /// sidecar.
+    Pccs { url: String },
+}
+
+impl std::fmt::Debug for CollateralSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IntelPcs { subscription_key } => f
+                .debug_struct("IntelPcs")
+                .field("subscription_key_configured", &subscription_key.is_some())
+                .finish(),
+            Self::Pccs { url } => f.debug_struct("Pccs").field("url", url).finish(),
+        }
+    }
+}
+
+/// Whether and how [`Pccs`] keeps an in-process collateral cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CachePolicy {
+    /// No in-process cache. Every asynchronous lookup goes directly to the
+    /// configured endpoint.
+    Passthrough,
+    /// Start with an empty cache and fill it on demand.
+    OnDemand,
+    /// Fill the cache at construction, then refresh it proactively.
+    Prewarmed,
+}
+
 type SharedCollateralClient = CollateralClient<DefaultConfig, SharedReqwestHttp>;
 
-/// PCCS collateral cache with proactive background refresh
+/// DCAP collateral source with optional caching and background refresh.
 ///
 /// Fetching runs over rustls-backed HTTP, so the application must install a
 /// process-level rustls [crypto provider] before collateral can be fetched,
@@ -65,9 +106,15 @@ pub struct Pccs {
     /// The URL of the service used to fetch collateral (PCS / PCCS)
     url: String,
     /// HTTP client used for FMSPC fetches
-    http_client: reqwest::Client,
+    http_client: SharedReqwestHttp,
     /// HTTP client for collateral fetches
     collateral_client: SharedCollateralClient,
+    /// An internal cache if configured
+    inner: Option<PccsInner>,
+}
+
+#[derive(Clone)]
+struct PccsInner {
     /// The internal cache
     cache: Arc<RwLock<HashMap<PccsInput, CacheEntry>>>,
     /// Dedupes one-shot background refreshes for cache misses
@@ -87,50 +134,92 @@ impl std::fmt::Debug for Pccs {
 }
 
 impl Pccs {
-    /// Creates a new PCCS cache using the provided URL or Intel PCS default
-    pub fn new(url: Option<String>) -> Self {
-        let mut pccs = Self::new_without_prewarm(url);
-
-        let (prewarm_outcome_tx, _) = watch::channel(None);
-        pccs.prewarm_outcome_tx = Some(prewarm_outcome_tx);
-
-        // Start filling the cache right away
-        let pccs_for_prewarm = pccs.clone();
-        tokio::spawn(async move {
-            let outcome = pccs_for_prewarm.startup_prewarm_all_tdx().await;
-            pccs_for_prewarm.finish_prewarm(outcome);
-        });
-
-        pccs
+    /// Creates a collateral client with the requested source and cache
+    /// policy.
+    ///
+    /// Constructing [`CachePolicy::Prewarmed`] immediately spawns its
+    /// initial fetch task and therefore requires an active Tokio
+    /// runtime.
+    pub fn new(source: CollateralSource, cache: CachePolicy) -> Self {
+        let (url, subscription_key) = match source {
+            CollateralSource::IntelPcs { subscription_key } => {
+                (PCS_URL.to_string(), subscription_key)
+            }
+            CollateralSource::Pccs { url } => (url, None),
+        };
+        Self::new_with_endpoint(url, subscription_key, cache)
     }
 
-    /// Creates a new PCCS cache using the provided URL or Intel PCS default
-    /// and does not pre-warm by proactively fetching collateral
-    pub fn new_without_prewarm(url: Option<String>) -> Self {
+    fn new_with_endpoint(
+        url: String,
+        subscription_key: Option<String>,
+        cache: CachePolicy,
+    ) -> Self {
         let url = url
-            .unwrap_or(PCS_URL.to_string())
             .trim_end_matches('/')
             .trim_end_matches("/sgx/certification/v4")
             .trim_end_matches("/tdx/certification/v4")
             .to_string();
-        let http_client = reqwest::Client::new();
-        let collateral_client =
-            CollateralClient::new(SharedReqwestHttp { client: http_client.clone() }, url.clone());
+        let http_client = SharedReqwestHttp::new(&url, subscription_key);
+        let collateral_client = CollateralClient::new(http_client.clone(), url.clone());
 
-        Self {
-            url,
-            http_client,
-            collateral_client,
-            cache: RwLock::new(HashMap::new()).into(),
-            pending_refreshes: RwLock::new(HashSet::new()).into(),
-            prewarm_stats: Arc::new(PrewarmStats::default()),
-            prewarm_outcome_tx: None,
+        match cache {
+            CachePolicy::Passthrough => Self { url, http_client, collateral_client, inner: None },
+            CachePolicy::OnDemand => Self {
+                url,
+                http_client,
+                collateral_client,
+                inner: Some(PccsInner {
+                    cache: RwLock::new(HashMap::new()).into(),
+                    pending_refreshes: RwLock::new(HashSet::new()).into(),
+                    prewarm_stats: Arc::new(PrewarmStats::default()),
+                    prewarm_outcome_tx: None,
+                }),
+            },
+            CachePolicy::Prewarmed => {
+                let (prewarm_outcome_tx, _) = watch::channel(None);
+
+                let pccs = Self {
+                    url,
+                    http_client,
+                    collateral_client,
+                    inner: Some(PccsInner {
+                        cache: RwLock::new(HashMap::new()).into(),
+                        pending_refreshes: RwLock::new(HashSet::new()).into(),
+                        prewarm_stats: Arc::new(PrewarmStats::default()),
+                        prewarm_outcome_tx: Some(prewarm_outcome_tx),
+                    }),
+                };
+
+                // Start filling the cache right away
+                let pccs_for_prewarm = pccs.clone();
+                tokio::spawn(async move {
+                    let outcome = pccs_for_prewarm.startup_prewarm_all_tdx().await;
+                    pccs_for_prewarm.finish_prewarm(outcome);
+                });
+
+                pccs
+            }
         }
     }
 
-    /// Resolves when cache is pre-warmed with all available collateral
+    /// Returns whether this PCCS fetches collateral directly without an
+    /// internal cache.
+    pub fn is_passthrough(&self) -> bool {
+        self.inner.is_none()
+    }
+
+    /// Waits for the initial pre-warm to complete.
+    ///
+    /// Returns [`PccsError::PrewarmDisabled`] for
+    /// [`CachePolicy::Passthrough`] and [`CachePolicy::OnDemand`]. A
+    /// successful result means the initial pre-warm
+    /// completed; individual collateral fetches may still have failed, as
+    /// reported in [`PrewarmSummary`].
     pub async fn ready(&self) -> Result<PrewarmSummary, PccsError> {
-        if let Some(prewarm_outcome_tx) = &self.prewarm_outcome_tx {
+        if let Some(ref inner) = self.inner &&
+            let Some(prewarm_outcome_tx) = &inner.prewarm_outcome_tx
+        {
             let mut outcome_rx = prewarm_outcome_tx.subscribe();
             loop {
                 if let Some(outcome) = outcome_rx.borrow_and_update().clone() {
@@ -143,26 +232,32 @@ impl Pccs {
                     return Err(PccsError::PrewarmSignalClosed);
                 }
             }
-        } else {
-            Err(PccsError::PrewarmDisabled)
         }
+        Err(PccsError::PrewarmDisabled)
     }
 
-    /// Returns collateral from cache when valid, otherwise fetches and
-    /// caches fresh collateral
+    /// Fetches collateral, using the internal cache when configured.
+    /// Passthrough always fetches from the configured endpoint.
+    ///
     /// Returns collateral together with a flag indicating whether it is
-    /// fresh (true) or from the cache (false)
+    /// freshly fetched (`true`) or from the cache (`false`). Passthrough
+    /// always returns `true`.
     pub async fn get_collateral(
         &self,
         fmspc: String,
         ca: &'static str,
         now: u64,
     ) -> Result<(QuoteCollateralV3, bool), PccsError> {
+        let Some(inner) = &self.inner else {
+            let collateral = fetch_collateral(&self.collateral_client, fmspc, ca).await?;
+            return Ok((collateral, true));
+        };
+
         let now = i64::try_from(now).map_err(|_| PccsError::TimeStampExceedsI64)?;
         let cache_key = PccsInput::new(fmspc.clone(), ca);
 
         {
-            let cache = self.cache.read().map_err(|_| PccsError::CachePoisoned)?;
+            let cache = inner.cache.read().map_err(|_| PccsError::CachePoisoned)?;
             if let Some(entry) = cache.get(&cache_key) {
                 if now < entry.next_update {
                     return Ok((entry.collateral.clone(), false));
@@ -180,7 +275,7 @@ impl Pccs {
         let next_update = extract_next_update(&collateral, now)?;
 
         {
-            let mut cache = self.cache.write().map_err(|_| PccsError::CachePoisoned)?;
+            let mut cache = inner.cache.write().map_err(|_| PccsError::CachePoisoned)?;
             if let Some(existing) = cache.get(&cache_key) &&
                 now < existing.next_update
             {
@@ -195,6 +290,11 @@ impl Pccs {
 
     /// A synchronous method to get collateral from the cache.
     ///
+    /// With [`CachePolicy::Passthrough`], this returns
+    /// [`PccsError::CacheDisabled`]
+    /// because a synchronous call cannot perform the required asynchronous
+    /// fetch.
+    ///
     /// If the requested collateral is not present in the cache, this will
     /// return an error rather than waiting to fetch it.  But it does
     /// begin fetching it in a background task.
@@ -207,9 +307,13 @@ impl Pccs {
         ca: &'static str,
         now: u64,
     ) -> Result<QuoteCollateralV3, PccsError> {
+        let Some(inner) = &self.inner else {
+            return Err(PccsError::CacheDisabled);
+        };
+
         let now = i64::try_from(now).map_err(|_| PccsError::TimeStampExceedsI64)?;
         let cache_key = PccsInput::new(fmspc.clone(), ca);
-        let cache = self.cache.read().map_err(|_| PccsError::CachePoisoned)?;
+        let cache = inner.cache.read().map_err(|_| PccsError::CachePoisoned)?;
         if let Some(entry) = cache.get(&cache_key) {
             if now >= entry.next_update {
                 let collateral = entry.collateral.clone();
@@ -244,13 +348,17 @@ impl Pccs {
         fmspc: String,
         ca: &'static str,
     ) -> Result<QuoteCollateralV3, PccsError> {
+        let Some(inner) = &self.inner else {
+            return fetch_collateral(&self.collateral_client, fmspc, ca).await;
+        };
+
         let now = unix_now()?;
         let collateral = fetch_collateral(&self.collateral_client, fmspc.clone(), ca).await?;
         let next_update = extract_next_update(&collateral, now)?;
         let cache_key = PccsInput::new(fmspc, ca);
 
         {
-            let mut cache = self.cache.write().map_err(|_| PccsError::CachePoisoned)?;
+            let mut cache = inner.cache.write().map_err(|_| PccsError::CachePoisoned)?;
             upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
         }
         self.ensure_refresh_task(&cache_key).await;
@@ -260,7 +368,10 @@ impl Pccs {
     /// Starts a background refresh loop for a cache key when no task is
     /// active
     async fn ensure_refresh_task(&self, cache_key: &PccsInput) {
-        let Ok(mut cache) = self.cache.write() else {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        let Ok(mut cache) = inner.cache.write() else {
             tracing::warn!("PCCS cache lock poisoned, cannot ensure refresh task");
             return;
         };
@@ -271,7 +382,7 @@ impl Pccs {
             return;
         }
 
-        let weak_cache = Arc::downgrade(&self.cache);
+        let weak_cache = Arc::downgrade(&inner.cache);
         let key = cache_key.clone();
         let collateral_client = self.collateral_client.clone();
         entry.refresh_task = Some(tokio::spawn(async move {
@@ -281,8 +392,11 @@ impl Pccs {
 
     /// Starts a one-shot background fetch to populate a missing cache entry
     fn spawn_background_refresh_for_cache_miss(&self, cache_key: PccsInput) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
         {
-            let Ok(mut pending_refreshes) = self.pending_refreshes.write() else {
+            let Ok(mut pending_refreshes) = inner.pending_refreshes.write() else {
                 tracing::warn!("PCCS pending-refresh lock poisoned, cannot start sync refresh");
                 return;
             };
@@ -311,7 +425,10 @@ impl Pccs {
 
             // Always clear the dedupe marker so a later sync miss can
             // retry if this repair attempt failed.
-            if let Ok(mut pending_refreshes) = pccs.pending_refreshes.write() {
+            let Some(inner) = &pccs.inner else {
+                return;
+            };
+            if let Ok(mut pending_refreshes) = inner.pending_refreshes.write() {
                 pending_refreshes.remove(&cache_key);
             } else {
                 tracing::warn!("PCCS pending-refresh lock poisoned during cleanup");
@@ -322,6 +439,10 @@ impl Pccs {
     /// Pre-provisions TDX collateral for discovered FMSPC values to reduce
     /// hot-path fetches
     async fn startup_prewarm_all_tdx(&self) -> PrewarmOutcome {
+        let Some(inner) = &self.inner else {
+            return PrewarmOutcome::Failed("PCCS cache is disabled".to_string());
+        };
+
         // First get all FMSPCs
         let fmspcs = match self.fetch_fmspcs().await {
             Ok(fmspcs) => fmspcs,
@@ -336,11 +457,11 @@ impl Pccs {
                 ));
             }
         };
-        self.prewarm_stats.discovered_fmspcs.store(fmspcs.len(), Ordering::SeqCst);
+        inner.prewarm_stats.discovered_fmspcs.store(fmspcs.len(), Ordering::SeqCst);
 
         if fmspcs.is_empty() {
             tracing::warn!("No FMSPC entries returned during startup pre-provision");
-            return PrewarmOutcome::Ready(self.prewarm_stats.snapshot());
+            return PrewarmOutcome::Ready(inner.prewarm_stats.snapshot());
         }
 
         // For each FMSPC, get the 'processor' and 'platform' collateral
@@ -353,7 +474,7 @@ impl Pccs {
                 let Ok(permit) = permit else {
                     continue;
                 };
-                self.prewarm_stats.attempted.fetch_add(1, Ordering::SeqCst);
+                inner.prewarm_stats.attempted.fetch_add(1, Ordering::SeqCst);
                 let pccs = self.clone();
                 let fmspc = entry.fmspc.clone();
                 join_set.spawn(async move {
@@ -376,11 +497,11 @@ impl Pccs {
                 Ok(Ok((fmspc, ca, Ok(())))) => {
                     successes += 1;
                     debug!("Successfully cached: {fmspc} {ca}");
-                    self.prewarm_stats.successes.fetch_add(1, Ordering::SeqCst);
+                    inner.prewarm_stats.successes.fetch_add(1, Ordering::SeqCst);
                 }
                 Ok(Ok((fmspc, ca, Err(e)))) => {
                     failures += 1;
-                    self.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
+                    inner.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
                     tracing::debug!(
                         fmspc,
                         ca,
@@ -390,29 +511,32 @@ impl Pccs {
                 }
                 Ok(Err(e)) => {
                     failures += 1;
-                    self.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
+                    inner.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
                     tracing::debug!(error = %e, "Startup pre-provision task failed");
                 }
                 Err(e) => {
                     failures += 1;
-                    self.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
+                    inner.prewarm_stats.failures.fetch_add(1, Ordering::SeqCst);
                     tracing::debug!(error = %e, "Startup pre-provision join error");
                 }
             }
         }
         tracing::info!(
-            discovered_fmspcs = self.prewarm_stats.discovered_fmspcs.load(Ordering::SeqCst),
-            attempted = self.prewarm_stats.attempted.load(Ordering::SeqCst),
+            discovered_fmspcs = inner.prewarm_stats.discovered_fmspcs.load(Ordering::SeqCst),
+            attempted = inner.prewarm_stats.attempted.load(Ordering::SeqCst),
             successes,
             failures,
             "Completed PCCS startup pre-provisioning for TDX collateral"
         );
-        PrewarmOutcome::Ready(self.prewarm_stats.snapshot())
+        PrewarmOutcome::Ready(inner.prewarm_stats.snapshot())
     }
 
     fn finish_prewarm(&self, outcome: PrewarmOutcome) {
-        if let Some(prewarm_outcome_tx) = &self.prewarm_outcome_tx {
-            self.prewarm_stats.completed.store(true, Ordering::SeqCst);
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        if let Some(prewarm_outcome_tx) = &inner.prewarm_outcome_tx {
+            inner.prewarm_stats.completed.store(true, Ordering::SeqCst);
             let _ = prewarm_outcome_tx.send(Some(outcome));
         }
     }
@@ -430,12 +554,7 @@ impl Pccs {
         }
 
         let url = format!("{}/sgx/certification/v4/fmspcs", self.url);
-        let response = self
-            .http_client
-            .get(&url)
-            .timeout(Duration::from_secs(PCCS_HTTP_TIMEOUT_SECS))
-            .send()
-            .await?;
+        let response = self.http_client.request(&url)?.send().await?;
         if !response.status().is_success() {
             return Err(PccsError::FmspcFetch(response.status()));
         }
@@ -450,16 +569,76 @@ impl Pccs {
 #[derive(Clone)]
 struct SharedReqwestHttp {
     client: reqwest::Client,
+    authenticated_client: Option<reqwest::Client>,
+    subscription_key_origin: Option<Url>,
+    subscription_key: Option<String>,
+}
+
+impl SharedReqwestHttp {
+    fn new(base_url: &str, subscription_key: Option<String>) -> Self {
+        let subscription_key_origin =
+            subscription_key.as_ref().and_then(|_| Url::parse(base_url).ok());
+        let authenticated_client = subscription_key.as_ref().map(|_| {
+            reqwest::Client::builder()
+                .redirect(Policy::custom(|attempt| {
+                    let same_origin_redirect = attempt
+                        .previous()
+                        .last()
+                        .is_some_and(|previous| same_origin(previous, attempt.url()));
+                    if !same_origin_redirect {
+                        attempt.stop()
+                    } else if attempt.previous().len() > 10 {
+                        attempt.error("too many redirects")
+                    } else {
+                        attempt.follow()
+                    }
+                }))
+                .build()
+                .expect("failed to build authenticated HTTP client")
+        });
+
+        Self {
+            client: reqwest::Client::new(),
+            authenticated_client,
+            subscription_key_origin,
+            subscription_key,
+        }
+    }
+
+    fn request(&self, url: &str) -> Result<reqwest::RequestBuilder, InvalidHeaderValue> {
+        let Some(subscription_key) = &self.subscription_key else {
+            return Ok(self.client.get(url).timeout(Duration::from_secs(PCCS_HTTP_TIMEOUT_SECS)));
+        };
+        let authenticated_request = Url::parse(url)
+            .ok()
+            .zip(self.subscription_key_origin.as_ref())
+            .is_some_and(|(url, origin)| same_origin(&url, origin));
+        if !authenticated_request {
+            return Ok(self.client.get(url).timeout(Duration::from_secs(PCCS_HTTP_TIMEOUT_SECS)));
+        }
+
+        let request = self
+            .authenticated_client
+            .as_ref()
+            .expect("subscription key client should be configured")
+            .get(url)
+            .timeout(Duration::from_secs(PCCS_HTTP_TIMEOUT_SECS));
+
+        let mut header = HeaderValue::from_bytes(subscription_key.as_bytes())?;
+        header.set_sensitive(true);
+        Ok(request.header(PCS_SUBSCRIPTION_KEY_HEADER, header))
+    }
+}
+
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme() &&
+        left.host_str() == right.host_str() &&
+        left.port_or_known_default() == right.port_or_known_default()
 }
 
 impl DcapHttpClient for SharedReqwestHttp {
     async fn get(&self, url: &str) -> anyhow::Result<HttpResponse> {
-        let resp = self
-            .client
-            .get(url)
-            .timeout(Duration::from_secs(PCCS_HTTP_TIMEOUT_SECS))
-            .send()
-            .await?;
+        let resp = self.request(url)?.send().await?;
         let status = resp.status().as_u16();
         let headers = resp
             .headers()
@@ -508,6 +687,9 @@ async fn fetch_collateral(
     fmspc: String,
     ca: &'static str,
 ) -> Result<QuoteCollateralV3, PccsError> {
+    #[cfg(test)]
+    install_test_crypto_provider();
+
     client.fetch_for_fmspc_without_pck_chain(&fmspc, ca, false).await.map_err(Into::into)
 }
 
@@ -785,6 +967,8 @@ pub enum PccsError {
     SystemTime(#[from] std::time::SystemTimeError),
     #[error("HTTP client: {0}")]
     Reqwest(#[from] reqwest::Error),
+    #[error("Invalid Intel PCS subscription key: {0}")]
+    InvalidSubscriptionKey(#[from] InvalidHeaderValue),
     #[error(
         "no process-level rustls crypto provider is installed; install one at application \
          startup, e.g. `rustls::crypto::aws_lc_rs::default_provider().install_default()` — \
@@ -805,13 +989,25 @@ pub enum PccsError {
     TimeStampExceedsI64,
     #[error("PCCS cache lock poisoned")]
     CachePoisoned,
+    #[error("PCCS cache is disabled; synchronous collateral lookup is unavailable")]
+    CacheDisabled,
     #[error("No collateral in cache for FMSPC {0}")]
     NoCollateralForFmspc(String),
 }
 
 #[cfg(test)]
 mod tests {
-    use mock_tdx::{MockPcsConfig, mock_collateral, spawn_mock_pcs_server};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        thread,
+    };
+
+    use mock_tdx::{MockPcsConfig, MockPcsServer, mock_collateral, spawn_mock_pcs_server};
     use tokio::time::Duration;
 
     use super::*;
@@ -820,6 +1016,148 @@ mod tests {
         let collateral = mock_collateral();
         let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).unwrap();
         tcb_info.fmspc
+    }
+
+    fn assert_observed_subscription_keys(mock: &MockPcsServer, expected: Option<&str>) {
+        let observed = mock.subscription_keys();
+        assert!(!observed.is_empty(), "expected the mock PCS to receive requests");
+        assert!(
+            observed.iter().all(|key| key.as_deref() == expected),
+            "observed keys: {observed:?}"
+        );
+    }
+
+    #[test]
+    fn intel_pcs_source_uses_canonical_url_and_redacts_key() {
+        let source =
+            CollateralSource::IntelPcs { subscription_key: Some("super-secret-key".to_string()) };
+        let debug = format!("{source:?}");
+        assert!(debug.contains("subscription_key_configured: true"));
+        assert!(!debug.contains("super-secret-key"));
+
+        let pccs = Pccs::new(source, CachePolicy::Passthrough);
+        assert_eq!(pccs.url, PCS_URL);
+        assert_eq!(pccs.http_client.subscription_key.as_deref(), Some("super-secret-key"));
+    }
+
+    #[test]
+    fn subscription_key_is_scoped_to_the_configured_origin() {
+        let pccs = Pccs::new(
+            CollateralSource::IntelPcs { subscription_key: Some("origin-key".to_string()) },
+            CachePolicy::Passthrough,
+        );
+
+        let pcs_request = pccs
+            .http_client
+            .request(&format!("{PCS_URL}/tdx/certification/v4/tcb"))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(pcs_request.headers().get(PCS_SUBSCRIPTION_KEY_HEADER).unwrap(), "origin-key");
+
+        for url in [
+            "https://certificates.trustedservices.intel.com/IntelSGXRootCA.der",
+            "https://api.trustedservices.intel.com.attacker.example/",
+            "http://api.trustedservices.intel.com/",
+            "https://api.trustedservices.intel.com:444/",
+        ] {
+            let request = pccs.http_client.request(url).unwrap().build().unwrap();
+            assert!(
+                request.headers().get(PCS_SUBSCRIPTION_KEY_HEADER).is_none(),
+                "subscription key attached to off-origin URL: {url}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_client_does_not_follow_cross_origin_redirects() {
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        let redirect_task = thread::spawn(move || {
+            let (mut stream, _) = redirect_listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let bytes_read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes_read]).to_ascii_lowercase();
+            assert!(request.contains("ocp-apim-subscription-key: redirect-key"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 307 Temporary Redirect\r\n\
+                      Location: http://127.0.0.1:1/\r\n\
+                      Content-Length: 0\r\n\
+                      Connection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let base_url = format!("http://{redirect_addr}");
+        let client = SharedReqwestHttp::new(&base_url, Some("redirect-key".to_string()));
+        let response = client.request(&base_url).unwrap().send().await.unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        redirect_task.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticated_client_limits_same_origin_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stop_server = stop.clone();
+        let requests_server = requests.clone();
+        let server = thread::spawn(move || {
+            while !stop_server.load(Ordering::SeqCst) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                };
+                requests_server.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0; 4096];
+                stream.read(&mut request).unwrap();
+                stream
+                    .write_all(
+                        b"HTTP/1.1 307 Temporary Redirect\r\n\
+                          Location: /\r\n\
+                          Content-Length: 0\r\n\
+                          Connection: close\r\n\r\n",
+                    )
+                    .unwrap();
+            }
+        });
+
+        let base_url = format!("http://{addr}");
+        let client = SharedReqwestHttp::new(&base_url, Some("redirect-key".to_string()));
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), client.request(&base_url).unwrap().send())
+                .await;
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+
+        let error = result.expect("redirect loop should terminate promptly").unwrap_err();
+        assert!(error.is_redirect());
+        assert_eq!(requests.load(Ordering::SeqCst), 11);
+    }
+
+    #[test]
+    fn pccs_source_never_configures_an_intel_subscription_key() {
+        let pccs = Pccs::new(
+            CollateralSource::Pccs { url: "https://pccs.example/".to_string() },
+            CachePolicy::Passthrough,
+        );
+        assert_eq!(pccs.url, "https://pccs.example");
+        assert!(pccs.http_client.subscription_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_subscription_key_is_rejected_without_panicking_or_leaking() {
+        let pccs = Pccs::new(
+            CollateralSource::IntelPcs { subscription_key: Some("invalid\nkey".to_string()) },
+            CachePolicy::Passthrough,
+        );
+        let error =
+            pccs.get_collateral("000000000000".to_string(), "processor", 0).await.unwrap_err();
+        assert!(!error.to_string().contains("invalid\nkey"));
     }
 
     #[tokio::test]
@@ -835,10 +1173,45 @@ mod tests {
         .await
         .unwrap();
 
-        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let pccs =
+            Pccs::new(CollateralSource::Pccs { url: mock.base_url.clone() }, CachePolicy::OnDemand);
         let now = 1_700_000_000_u64;
         let (_, is_fresh) = pccs.get_collateral(fmspc, "processor", now).await.unwrap();
         assert!(is_fresh);
+        assert_observed_subscription_keys(&mock, None);
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_policy_fetches_collateral_every_time() {
+        let fmspc = mock_tdx_fmspc();
+        let mock = spawn_mock_pcs_server(MockPcsConfig {
+            include_fmspcs_listing: false,
+            tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
+            qe_next_update: "2999-01-01T00:00:00Z".to_string(),
+            refreshed_tcb_next_update: None,
+            refreshed_qe_next_update: None,
+        })
+        .await
+        .unwrap();
+        let pccs = Pccs::new(
+            CollateralSource::Pccs { url: mock.base_url.clone() },
+            CachePolicy::Passthrough,
+        );
+
+        let (_, first_is_fresh) =
+            pccs.get_collateral(fmspc.clone(), "processor", 1_700_000_000).await.unwrap();
+        let (_, second_is_fresh) =
+            pccs.get_collateral(fmspc.clone(), "processor", 1_700_000_000).await.unwrap();
+
+        assert!(pccs.inner.is_none());
+        assert!(first_is_fresh);
+        assert!(second_is_fresh);
+        assert_eq!(mock.tcb_call_count(), 2);
+        assert_eq!(mock.qe_call_count(), 2);
+        assert!(matches!(
+            pccs.get_collateral_sync(fmspc, "processor", 1_700_000_000),
+            Err(PccsError::CacheDisabled)
+        ));
     }
 
     #[test]
@@ -862,7 +1235,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_proactive_refresh_updates_cached_entry() {
+    async fn test_authenticated_proactive_refresh_updates_cached_entry() {
         let initial_now = unix_now().unwrap();
         let initial_next_update =
             OffsetDateTime::from_unix_timestamp(initial_now + 2).unwrap().format(&Rfc3339).unwrap();
@@ -882,7 +1255,11 @@ mod tests {
         .await
         .unwrap();
 
-        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let pccs = Pccs::new_with_endpoint(
+            mock.base_url.clone(),
+            Some("refresh-key".to_string()),
+            CachePolicy::OnDemand,
+        );
         let (_, is_fresh) =
             pccs.get_collateral(fmspc.clone(), "processor", initial_now as u64).await.unwrap();
         assert!(is_fresh);
@@ -911,10 +1288,11 @@ mod tests {
             pccs.get_collateral(fmspc, "processor", now_after_background as u64).await.unwrap();
         assert!(!is_fresh_again);
         assert_eq!(mock.tcb_call_count(), before_check_calls);
+        assert_observed_subscription_keys(&mock, Some("refresh-key"));
     }
 
     #[tokio::test]
-    async fn test_ready_waits_for_startup_prewarm() {
+    async fn test_authenticated_ready_waits_for_startup_prewarm() {
         let mock = spawn_mock_pcs_server(MockPcsConfig {
             include_fmspcs_listing: true,
             tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
@@ -924,16 +1302,21 @@ mod tests {
         })
         .await
         .unwrap();
-        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let pccs = Pccs::new_with_endpoint(
+            mock.base_url.clone(),
+            Some("prewarm-key".to_string()),
+            CachePolicy::Prewarmed,
+        );
         let summary =
             tokio::time::timeout(Duration::from_secs(5), pccs.ready()).await.unwrap().unwrap();
         assert_eq!(summary.discovered_fmspcs, 1);
         assert_eq!(summary.attempted, 2);
         assert_eq!(summary.successes, 2);
         assert_eq!(summary.failures, 0);
+        assert_observed_subscription_keys(&mock, Some("prewarm-key"));
 
         let (total_entries, fmspc, ca) = {
-            let cache_guard = pccs.cache.read().unwrap();
+            let cache_guard = pccs.inner.as_ref().unwrap().cache.read().unwrap();
             let total_entries = cache_guard.len();
             let (fmspc, ca) = cache_guard
                 .keys()
@@ -960,7 +1343,10 @@ mod tests {
         })
         .await
         .unwrap();
-        let pccs = Pccs::new(Some(mock.base_url.clone()));
+        let pccs = Pccs::new(
+            CollateralSource::Pccs { url: mock.base_url.clone() },
+            CachePolicy::Prewarmed,
+        );
         let pccs_clone = pccs.clone();
 
         let (first, second) = tokio::join!(pccs.ready(), pccs_clone.ready());
@@ -972,7 +1358,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_ready_returns_error_when_prewarm_bootstrap_fails() {
-        let pccs = Pccs::new(Some("http://127.0.0.1:1".to_string()));
+        let pccs = Pccs::new(
+            CollateralSource::Pccs { url: "http://127.0.0.1:1".to_string() },
+            CachePolicy::Prewarmed,
+        );
         let ready_result =
             tokio::time::timeout(Duration::from_secs(2), pccs.ready()).await.unwrap();
         assert!(matches!(ready_result, Err(PccsError::PrewarmFailed(_))));
@@ -980,7 +1369,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_ready_returns_error_when_prewarm_disabled() {
-        let pccs = Pccs::new_without_prewarm(None);
+        let pccs =
+            Pccs::new(CollateralSource::IntelPcs { subscription_key: None }, CachePolicy::OnDemand);
         let ready_result = pccs.ready().await;
         assert!(matches!(ready_result, Err(PccsError::PrewarmDisabled)));
     }
@@ -998,7 +1388,8 @@ mod tests {
         .await
         .unwrap();
 
-        let pccs = Pccs::new_without_prewarm(Some(mock.base_url.clone()));
+        let pccs =
+            Pccs::new(CollateralSource::Pccs { url: mock.base_url.clone() }, CachePolicy::OnDemand);
         let now = unix_now().unwrap() as u64;
 
         let err = pccs.get_collateral_sync(fmspc.clone(), "processor", now);
@@ -1038,13 +1429,14 @@ mod tests {
         .await
         .unwrap();
 
-        let pccs = Pccs::new_without_prewarm(Some(mock.base_url.clone()));
+        let pccs =
+            Pccs::new(CollateralSource::Pccs { url: mock.base_url.clone() }, CachePolicy::OnDemand);
         let (_, is_fresh) =
             pccs.get_collateral(fmspc.clone(), "processor", initial_now as u64).await.unwrap();
         assert!(is_fresh);
 
         {
-            let mut cache = pccs.cache.write().unwrap();
+            let mut cache = pccs.inner.as_ref().unwrap().cache.write().unwrap();
             let entry = cache
                 .get_mut(&PccsInput::new(fmspc.clone(), "processor"))
                 .expect("expected cached collateral entry");

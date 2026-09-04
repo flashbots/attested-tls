@@ -7,13 +7,14 @@
 //! it.
 use dcap_qvl::{
     QuoteCollateralV3,
-    collateral::CollateralClient,
     intel::{quote_ca, quote_fmspc},
     quote::{Quote, Report},
     tcb_info::TcbInfo,
 };
 #[cfg(any(test, feature = "mock"))]
 use mock_tdx::generate_mock_tdx_quote;
+#[cfg(test)]
+use pccs::{CachePolicy, CollateralSource};
 use pccs::{Pccs, PccsError};
 use thiserror::Error;
 
@@ -28,9 +29,6 @@ use crate::{
 /// or other platforms)
 const AZURE_BAD_FMSPC: &str = "90C06F000000";
 
-/// For fetching collateral directly from Intel, if no PCCS is specified
-pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
-
 /// Generate a TDX quote
 pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
     let quote = generate_quote(input_data)?;
@@ -43,7 +41,7 @@ pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, Attestat
 pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs: Option<Pccs>,
+    pccs: Pccs,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let override_azure_outdated_tcb = false;
@@ -61,6 +59,10 @@ pub async fn verify_dcap_attestation(
 /// Synchronous version - verify a DCAP TDX quote
 ///
 /// This relies on having DCAP collateral already present in the cache
+///
+/// [`CachePolicy::Passthrough`](pccs::CachePolicy::Passthrough) is not
+/// supported because
+/// fetching collateral requires asynchronous I/O.
 ///
 /// If possible, prefer the async version
 #[cfg(not(any(test, feature = "mock")))]
@@ -85,6 +87,9 @@ pub fn verify_dcap_attestation_sync(
 /// pre-fetched collateral
 ///
 /// This relies on having DCAP collateral already present in the cache
+///
+/// [`CachePolicy::Passthrough`](pccs::CachePolicy::Passthrough) is not
+/// supported unless `collateral` is provided.
 ///
 /// If possible, prefer the async version
 pub fn verify_dcap_attestation_with_timestamp_sync(
@@ -124,7 +129,7 @@ pub fn verify_dcap_attestation_with_timestamp_sync(
 pub async fn verify_dcap_attestation_with_given_timestamp(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs_option: Option<Pccs>,
+    pccs: Pccs,
     collateral: Option<QuoteCollateralV3>,
     now: u64,
     override_azure_outdated_tcb: bool,
@@ -136,13 +141,9 @@ pub async fn verify_dcap_attestation_with_given_timestamp(
 
     let collateral = if let Some(given_collateral) = collateral {
         given_collateral
-    } else if let Some(ref pccs) = pccs_option {
+    } else {
         let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
         collateral
-    } else {
-        CollateralClient::with_default_http(PCS_URL)?
-            .fetch_for_fmspc_without_pck_chain(&fmspc, ca, false)
-            .await?
     };
 
     verify_dcap_attestation_with_collateral_and_timestamp(
@@ -221,17 +222,18 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
 pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
-    pccs: Option<Pccs>,
+    pccs: Pccs,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
     let quote = Quote::parse(&input)?;
     let ca = quote_ca(&quote)?.as_id_str();
     let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    let collateral = if let Some(ref pccs) = pccs {
+
+    let collateral = if pccs.is_passthrough() {
+        mock_tdx::mock_collateral()
+    } else {
         let (collateral, _is_fresh) = pccs.get_collateral(fmspc, ca, now).await?;
         collateral
-    } else {
-        mock_tdx::mock_collateral()
     };
     let verifier = mock_tdx::mock_dcap_verifier();
     verifier.verify(&input, &collateral, now)?;
@@ -261,7 +263,13 @@ pub fn verify_dcap_attestation_sync(
     let ca = quote_ca(&quote)?.as_id_str();
     let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    let collateral = pccs.get_collateral_sync(fmspc, ca, now)?;
+
+    let collateral = if pccs.is_passthrough() {
+        mock_tdx::mock_collateral()
+    } else {
+        pccs.get_collateral_sync(fmspc, ca, now)?
+    };
+
     let verifier = mock_tdx::mock_dcap_verifier();
     verifier.verify(&input, &collateral, now)?;
 
@@ -365,7 +373,10 @@ mod tests {
                     161, 136, 37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85,
                     245, 114, 33, 173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
                 ],
-                None,
+                Pccs::new(
+                    CollateralSource::IntelPcs { subscription_key: None },
+                    CachePolicy::Passthrough,
+                ),
                 Some(fixture_collateral.clone()),
                 now,
                 false,
@@ -382,7 +393,10 @@ mod tests {
                     161, 136, 37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85,
                     245, 114, 33, 173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
                 ],
-                Pccs::new_without_prewarm(None),
+                Pccs::new(
+                    CollateralSource::IntelPcs { subscription_key: None },
+                    CachePolicy::OnDemand,
+                ),
                 Some(fixture_collateral.clone()),
                 now,
                 false,
@@ -426,7 +440,10 @@ mod tests {
                 248, 104, 204, 187, 101, 49, 203, 40, 218, 185, 220, 228, 119, 40, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ],
-            None,
+            Pccs::new(
+                CollateralSource::IntelPcs { subscription_key: None },
+                CachePolicy::Passthrough,
+            ),
             Some(collateral),
             now,
             true,
@@ -443,12 +460,15 @@ mod tests {
         })
         .await
         .unwrap();
-        let pccs = Pccs::new(Some(mock_pcs.base_url.clone()));
+        let pccs = Pccs::new(
+            CollateralSource::Pccs { url: mock_pcs.base_url.clone() },
+            CachePolicy::OnDemand,
+        );
         let expected_input_data = [0xA5; 64];
         let quote = create_dcap_attestation(expected_input_data).unwrap();
 
         let (verified, _) =
-            verify_dcap_attestation(quote, expected_input_data, Some(pccs)).await.unwrap();
+            verify_dcap_attestation(quote, expected_input_data, pccs).await.unwrap();
 
         assert_eq!(verified.measurements, crate::measurements::mock_dcap_measurements());
         assert_eq!(mock_pcs.tcb_call_count(), 1);
