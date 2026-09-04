@@ -14,7 +14,7 @@ use dcap_qvl::{
 #[cfg(any(test, feature = "mock"))]
 use mock_tdx::generate_mock_tdx_quote;
 #[cfg(test)]
-use pccs::PccsMode;
+use pccs::{CachePolicy, CollateralSource};
 use pccs::{Pccs, PccsError};
 use thiserror::Error;
 
@@ -60,7 +60,8 @@ pub async fn verify_dcap_attestation(
 ///
 /// This relies on having DCAP collateral already present in the cache
 ///
-/// [`PccsMode::Remote`](pccs::PccsMode::Remote) is not supported because
+/// [`CachePolicy::Passthrough`](pccs::CachePolicy::Passthrough) is not
+/// supported because
 /// fetching collateral requires asynchronous I/O.
 ///
 /// If possible, prefer the async version
@@ -87,8 +88,8 @@ pub fn verify_dcap_attestation_sync(
 ///
 /// This relies on having DCAP collateral already present in the cache
 ///
-/// [`PccsMode::Remote`](pccs::PccsMode::Remote) is not supported unless
-/// `collateral` is provided.
+/// [`CachePolicy::Passthrough`](pccs::CachePolicy::Passthrough) is not
+/// supported unless `collateral` is provided.
 ///
 /// If possible, prefer the async version
 pub fn verify_dcap_attestation_with_timestamp_sync(
@@ -228,7 +229,7 @@ pub async fn verify_dcap_attestation(
     let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
 
-    let collateral = if pccs.is_remote() {
+    let collateral = if pccs.is_passthrough() {
         mock_tdx::mock_collateral()
     } else {
         let (collateral, _is_fresh) = pccs.get_collateral(fmspc, ca, now).await?;
@@ -263,7 +264,7 @@ pub fn verify_dcap_attestation_sync(
     let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
 
-    let collateral = if pccs.is_remote() {
+    let collateral = if pccs.is_passthrough() {
         mock_tdx::mock_collateral()
     } else {
         pccs.get_collateral_sync(fmspc, ca, now)?
@@ -372,7 +373,10 @@ mod tests {
                     161, 136, 37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85,
                     245, 114, 33, 173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
                 ],
-                Pccs::new(None, PccsMode::Remote),
+                Pccs::new(
+                    CollateralSource::IntelPcs { subscription_key: None },
+                    CachePolicy::Passthrough,
+                ),
                 Some(fixture_collateral.clone()),
                 now,
                 false,
@@ -389,7 +393,10 @@ mod tests {
                     161, 136, 37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85,
                     245, 114, 33, 173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
                 ],
-                Pccs::new(None, PccsMode::Lazy),
+                Pccs::new(
+                    CollateralSource::IntelPcs { subscription_key: None },
+                    CachePolicy::OnDemand,
+                ),
                 Some(fixture_collateral.clone()),
                 now,
                 false,
@@ -433,7 +440,10 @@ mod tests {
                 248, 104, 204, 187, 101, 49, 203, 40, 218, 185, 220, 228, 119, 40, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ],
-            Pccs::new(None, PccsMode::Remote),
+            Pccs::new(
+                CollateralSource::IntelPcs { subscription_key: None },
+                CachePolicy::Passthrough,
+            ),
             Some(collateral),
             now,
             true,
@@ -450,7 +460,10 @@ mod tests {
         })
         .await
         .unwrap();
-        let pccs = Pccs::new(Some(mock_pcs.base_url.clone()), PccsMode::Lazy);
+        let pccs = Pccs::new(
+            CollateralSource::Pccs { url: mock_pcs.base_url.clone() },
+            CachePolicy::OnDemand,
+        );
         let expected_input_data = [0xA5; 64];
         let quote = create_dcap_attestation(expected_input_data).unwrap();
 

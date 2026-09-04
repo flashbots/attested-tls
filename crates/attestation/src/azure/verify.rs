@@ -62,8 +62,8 @@ pub async fn verify_azure_attestation(
 ///
 /// This relies on having DCAP collateral already present in the cache
 ///
-/// [`PccsMode::Remote`](pccs::PccsMode::Remote) is not supported because
-/// fetching collateral requires asynchronous I/O.
+/// [`CachePolicy::Passthrough`](pccs::CachePolicy::Passthrough) is not
+/// supported because fetching collateral requires asynchronous I/O.
 ///
 /// If possible, prefer the async version
 pub fn verify_azure_attestation_sync(
@@ -407,7 +407,10 @@ mod tests {
         let err = verify_azure_attestation(
             input.clone(),
             [0; 64],
-            Pccs::new(None, pccs::PccsMode::Remote),
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::Passthrough,
+            ),
             false,
         )
         .await
@@ -417,7 +420,10 @@ mod tests {
         let err = verify_azure_attestation_sync(
             input.clone(),
             [0; 64],
-            Pccs::new(None, pccs::PccsMode::Lazy),
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::OnDemand,
+            ),
             false,
         )
         .unwrap_err();
@@ -426,7 +432,10 @@ mod tests {
         let err = verify_azure_attestation_with_given_timestamp(
             input.clone(),
             [0; 64],
-            Pccs::new(None, pccs::PccsMode::Remote),
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::Passthrough,
+            ),
             None,
             0,
             false,
@@ -438,7 +447,10 @@ mod tests {
         let err = verify_azure_attestation_with_given_timestamp_sync(
             input,
             [0; 64],
-            Pccs::new(None, pccs::PccsMode::Lazy),
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::OnDemand,
+            ),
             None,
             0,
             false,
@@ -492,7 +504,10 @@ mod tests {
         } = verify_azure_attestation_with_given_timestamp(
             attestation_json.clone(),
             [0; 64],
-            Pccs::new(None, pccs::PccsMode::Remote),
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::Passthrough,
+            ),
             Some(fixture_collateral.clone()),
             now,
             false,
@@ -507,7 +522,10 @@ mod tests {
         } = verify_azure_attestation_with_given_timestamp_sync(
             attestation_json,
             [0; 64],
-            Pccs::new(None, pccs::PccsMode::Lazy),
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::OnDemand,
+            ),
             Some(fixture_collateral.clone()),
             now,
             false,
@@ -543,7 +561,10 @@ mod tests {
         let err = verify_azure_attestation_with_given_timestamp(
             attestation_json,
             expected_input_data,
-            Pccs::new(None, pccs::PccsMode::Remote),
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::Passthrough,
+            ),
             Some(collateral),
             now,
             false,

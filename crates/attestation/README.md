@@ -29,37 +29,39 @@ Matched expected measurements can be transported in an HTTP header using
 ## Runtime Requirements
 
 Verification uses the [`pccs`](../pccs) crate to fetch DCAP collateral and,
-depending on the selected mode, cache and refresh it. Asynchronous
+depending on the selected cache policy, cache and refresh it. Asynchronous
 verification requires a Tokio runtime. Constructing an `AttestationVerifier`
-in `Prewarmed` mode also requires an active runtime because pre-warming starts
-immediately; constructing it in `Remote` or `Lazy` mode does not itself spawn
-a task.
+with the `Prewarmed` policy also requires an active runtime because pre-warming
+starts immediately; constructing it with the `Passthrough` or `OnDemand`
+policy does not itself spawn a task.
 
-Synchronous verification requires a cached mode (`Lazy` or `Prewarmed`) with
-the required collateral already cached. Cache misses and expired entries may
-start Tokio-backed background refresh tasks. `Remote` mode cannot be used for
-synchronous verification because fetching collateral requires asynchronous
-I/O.
+Synchronous verification requires a cached policy (`OnDemand` or `Prewarmed`)
+with the required collateral already cached. Cache misses and expired entries
+may start Tokio-backed background refresh tasks. `Passthrough` cannot be used
+for synchronous verification because fetching collateral requires
+asynchronous I/O.
 
-## DCAP collateral modes
+## DCAP collateral configuration
 
-Every `AttestationVerifier` has a PCCS collateral source configured through
-`AttestationVerifierBuilder::with_pccs_mode`. The default is
-`PccsMode::Remote`.
+Every `AttestationVerifier` has an independent collateral source and cache
+policy configured through `AttestationVerifierBuilder::with_collateral_source`
+and `AttestationVerifierBuilder::with_cache_policy`. The default is anonymous
+Intel PCS with `CachePolicy::Passthrough`.
 
-- `Remote` keeps no internal cache and fetches collateral from the configured
-  endpoint for every asynchronous verification.
-- `Lazy` starts with an empty internal cache and fetches collateral on demand.
+- `Passthrough` keeps no internal cache and fetches collateral from the
+  configured endpoint for every asynchronous verification.
+- `OnDemand` starts with an empty internal cache and fetches collateral on
+  demand.
 - `Prewarmed` immediately starts discovering and caching available TDX
   collateral, then refreshes cached entries before expiry.
 
-Use `with_pccs_url` to select an Intel PCS or PCCS-compatible endpoint. Without
-an explicit URL, the endpoint defaults to Intel PCS.
+Use `CollateralSource::IntelPcs` with an optional subscription key, or
+`CollateralSource::Pccs` with the URL of a compatible service.
 
-`AttestationVerifier::ready()` waits for initial work only in `Prewarmed`
-mode. It returns immediately for `Remote` and `Lazy`. A successful return in
-`Remote` or `Lazy` does not mean later verification will avoid fetching
-collateral. In `Prewarmed` mode it means pre-warm bootstrap completed, but
+`AttestationVerifier::ready()` waits for initial work only with `Prewarmed`.
+It returns immediately for `Passthrough` and `OnDemand`. A successful
+return with either policy does not mean later verification will avoid fetching
+collateral. With `Prewarmed` it means pre-warm bootstrap completed, but
 individual collateral fetches can still have failed.
 
 ## Feature flags

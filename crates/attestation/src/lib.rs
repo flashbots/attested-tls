@@ -26,7 +26,7 @@ pub use attest_types::{AttestationEvidence, PlatformMetadata};
 pub use dcap_qvl::QuoteCollateralV3;
 use measurements::{ExpectedMeasurements, MultiMeasurements};
 use parity_scale_codec::{Decode, Encode};
-pub use pccs::PccsMode;
+pub use pccs::{CachePolicy, CollateralSource};
 use pccs::{Pccs, PccsError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -451,12 +451,12 @@ impl MeasurementPolicyState {
 pub struct AttestationVerifierBuilder {
     /// The measurement policy with accepted values and attestation types
     measurement_policy: MeasurementPolicy,
-    /// How DCAP collateral is fetched and cached
-    pccs_mode: PccsMode,
+    /// Service from which DCAP collateral is fetched
+    collateral_source: CollateralSource,
+    /// Whether and how DCAP collateral is cached in process
+    cache_policy: CachePolicy,
     /// A dynamic measurement policy file or URL
     dynamic_measurement_policy: Option<String>,
-    /// Collateral endpoint; defaults to Intel PCS
-    pccs_url: Option<String>,
     dump_dcap_quotes: bool,
     /// Whether to override outdated TCB when on Azure
     override_azure_outdated_tcb: bool,
@@ -470,7 +470,7 @@ impl AttestationVerifierBuilder {
             ))),
             dump_dcap_quotes: self.dump_dcap_quotes,
             override_azure_outdated_tcb: self.override_azure_outdated_tcb,
-            internal_pccs: Pccs::new(self.pccs_url, self.pccs_mode),
+            internal_pccs: Pccs::new(self.collateral_source, self.cache_policy),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
             dynamic_measurement_policy: self.dynamic_measurement_policy,
@@ -496,17 +496,19 @@ impl AttestationVerifierBuilder {
         self
     }
 
-    /// Configures how DCAP collateral is fetched and cached.
+    /// Configures the service from which DCAP collateral is fetched.
     ///
-    /// The default is [`PccsMode::Remote`].
-    pub fn with_pccs_mode(mut self, pccs_mode: PccsMode) -> Self {
-        self.pccs_mode = pccs_mode;
+    /// The default is anonymous Intel PCS.
+    pub fn with_collateral_source(mut self, collateral_source: CollateralSource) -> Self {
+        self.collateral_source = collateral_source;
         self
     }
 
-    /// Sets the Intel PCS or PCCS endpoint used to fetch collateral.
-    pub fn with_pccs_url(mut self, pccs_url: String) -> Self {
-        self.pccs_url = Some(pccs_url);
+    /// Configures whether and how DCAP collateral is cached in process.
+    ///
+    /// The default is [`CachePolicy::Passthrough`].
+    pub fn with_cache_policy(mut self, cache_policy: CachePolicy) -> Self {
+        self.cache_policy = cache_policy;
         self
     }
 
@@ -526,8 +528,8 @@ impl AttestationVerifier {
     pub fn builder(measurement_policy: MeasurementPolicy) -> AttestationVerifierBuilder {
         AttestationVerifierBuilder {
             measurement_policy,
-            pccs_mode: PccsMode::Remote,
-            pccs_url: None,
+            collateral_source: CollateralSource::IntelPcs { subscription_key: None },
+            cache_policy: CachePolicy::Passthrough,
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             dynamic_measurement_policy: None,
@@ -543,7 +545,10 @@ impl AttestationVerifier {
             ))),
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
-            internal_pccs: Pccs::new(None, PccsMode::Remote),
+            internal_pccs: Pccs::new(
+                CollateralSource::IntelPcs { subscription_key: None },
+                CachePolicy::Passthrough,
+            ),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
             dynamic_measurement_policy: None,
@@ -559,7 +564,10 @@ impl AttestationVerifier {
             ))),
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
-            internal_pccs: Pccs::new(None, PccsMode::Remote),
+            internal_pccs: Pccs::new(
+                CollateralSource::IntelPcs { subscription_key: None },
+                CachePolicy::Passthrough,
+            ),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
             dynamic_measurement_policy: None,
@@ -578,7 +586,10 @@ impl AttestationVerifier {
             ))),
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
-            internal_pccs: Pccs::new(Some(pccs_url), PccsMode::Prewarmed),
+            internal_pccs: Pccs::new(
+                CollateralSource::Pccs { url: pccs_url },
+                CachePolicy::Prewarmed,
+            ),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
             dynamic_measurement_policy: None,
@@ -587,15 +598,15 @@ impl AttestationVerifier {
 
     /// Waits for initial PCCS pre-warming when configured.
     ///
-    /// In [`PccsMode::Prewarmed`], this waits for the initial pre-warm and
-    /// returns an error if pre-warm bootstrap failed. In
-    /// [`PccsMode::Remote`] and [`PccsMode::Lazy`], there is no initial
-    /// pre-warm to await, so this returns immediately.
+    /// With [`CachePolicy::Prewarmed`], this waits for the initial pre-warm
+    /// and returns an error if pre-warm bootstrap failed. With
+    /// [`CachePolicy::Passthrough`] and [`CachePolicy::OnDemand`], there is
+    /// no initial pre-warm to await, so this returns immediately.
     ///
-    /// Only `Prewarmed` mode is intended to avoid on-demand collateral
-    /// fetches during verification. Initial pre-warming can complete even
-    /// if individual collateral fetches failed, so it is not an
-    /// absolute guarantee that verification will avoid a fetch.
+    /// Only the `Prewarmed` policy is intended to avoid on-demand
+    /// collateral fetches during verification. Initial pre-warming can
+    /// complete even if individual collateral fetches failed, so it is
+    /// not an absolute guarantee that verification will avoid a fetch.
     pub async fn ready(&self) -> Result<(), AttestationError> {
         // If pre-warm is disabled we are ready
         match self.internal_pccs.ready().await {
@@ -1229,7 +1240,7 @@ mod tests {
     #[test]
     fn measurement_policy_can_be_updated_between_verification_attempts() {
         let verifier = AttestationVerifier::builder(MeasurementPolicy::tdx())
-            .with_pccs_mode(PccsMode::Remote)
+            .with_cache_policy(CachePolicy::Passthrough)
             .build();
         let verifier_clone = verifier.clone();
         let message = AttestationExchangeMessage::without_attestation();
@@ -1267,7 +1278,7 @@ mod tests {
 
         let initial_policy = MeasurementPolicy::from_file(policy_path.clone()).await.unwrap();
         let verifier = AttestationVerifier::builder(initial_policy)
-            .with_pccs_mode(PccsMode::Remote)
+            .with_cache_policy(CachePolicy::Passthrough)
             .with_dynamic_measurements_file_or_url(policy_path.to_string_lossy().into_owned())
             .build();
 
@@ -1303,7 +1314,7 @@ mod tests {
         let policy_source = policy_path.to_string_lossy().into_owned();
         let initial_policy = MeasurementPolicy::from_file(policy_path.clone()).await.unwrap();
         let verifier = AttestationVerifier::builder(initial_policy)
-            .with_pccs_mode(PccsMode::Remote)
+            .with_cache_policy(CachePolicy::Passthrough)
             .with_dynamic_measurements_file_or_url(policy_source.clone())
             .build();
         let measurements = measurements::mock_dcap_measurements();
@@ -1339,7 +1350,7 @@ mod tests {
         let initial_policy =
             MeasurementPolicy::from_file_or_url_sync(policy_source.clone()).unwrap();
         let verifier = AttestationVerifier::builder(initial_policy)
-            .with_pccs_mode(PccsMode::Remote)
+            .with_cache_policy(CachePolicy::Passthrough)
             .with_dynamic_measurements_file_or_url(policy_source.clone())
             .build();
         let measurements = measurements::mock_dcap_measurements();
@@ -1374,8 +1385,10 @@ mod tests {
             MeasurementPolicy::from_file_or_url_sync(policy_source.clone()).unwrap();
         let mock_pcs_server = spawn_mock_pcs_server(MockPcsConfig::default()).await.unwrap();
         let verifier = AttestationVerifier::builder(initial_policy)
-            .with_pccs_mode(PccsMode::Prewarmed)
-            .with_pccs_url(mock_pcs_server.base_url.clone())
+            .with_collateral_source(CollateralSource::Pccs {
+                url: mock_pcs_server.base_url.clone(),
+            })
+            .with_cache_policy(CachePolicy::Prewarmed)
             .with_dynamic_measurements_file_or_url(policy_source)
             .build();
         verifier.ready().await.unwrap();
