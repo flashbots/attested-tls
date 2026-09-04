@@ -51,6 +51,7 @@ More details in the individual READMEs of the provided crates:
 
 The included `shell.nix` file can be used with `nix-shell`, `direnv`, or `nix
 develop` to add the dependencies needed by the optional `azure-attester`
-feature of the `attestation` crate on Linux. The `azure-verifier` feature
-needs no extra system dependencies and builds on any platform.  See the
+feature of the `attestation` crate on x86_64 Linux, the only target its
+generation code is compiled for. The `azure-verifier` feature needs no extra
+system dependencies and builds on any platform.  See the
 [`attestation` crate readme](./crates/attestation) for details.

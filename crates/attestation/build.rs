@@ -8,6 +8,22 @@ const FIRMWARE_DIR: &str = "assets/ovmf";
 const GENERATED_FIRMWARE: &str = "trusted-firmware.json";
 
 fn main() {
+    // Gate for the Azure evidence generation code. It takes a cfg rather
+    // than the `azure-attester` feature alone because it only compiles
+    // where az-tdx-vtpm and tss-esapi resolve, so this condition has to
+    // stay identical to their target table in Cargo.toml. The
+    // CARGO_CFG_TARGET_* vars describe the target rather than the build
+    // host, which keeps the two in agreement when cross-compiling. The
+    // check-cfg goes outside the branch: the name is expected on every
+    // target, including those where the code it gates is switched off.
+    println!("cargo::rustc-check-cfg=cfg(azure_attester_x86_64_linux)");
+    if env::var_os("CARGO_FEATURE_AZURE_ATTESTER").is_some() &&
+        env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") &&
+        env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
+    {
+        println!("cargo::rustc-cfg=azure_attester_x86_64_linux");
+    }
+
     println!("cargo:rerun-if-changed={FIRMWARE_DIR}");
 
     let mut paths = fs::read_dir(FIRMWARE_DIR)

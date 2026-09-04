@@ -1,12 +1,12 @@
 //! Microsoft Azure vTPM attestation evidence generation and verification
 mod ak_certificate;
-#[cfg(feature = "azure-attester")]
+#[cfg(azure_attester_x86_64_linux)]
 mod attester;
 mod tpm_quote;
 mod tpms_attest;
 mod verify;
 
-#[cfg(feature = "azure-attester")]
+#[cfg(azure_attester_x86_64_linux)]
 pub use attester::{create_azure_attestation, detect_azure_cvm};
 use az_cvm_vtpm::hcl;
 use openssl::error::ErrorStack;
@@ -165,39 +165,39 @@ pub enum MaaError {
     DcapVerification(#[from] crate::dcap::DcapVerificationError),
 
     // Errors that can only occur during evidence generation on an Azure CVM
-    #[cfg(feature = "azure-attester")]
+    #[cfg(azure_attester_x86_64_linux)]
     #[error("Report: {0}")]
     Report(#[from] az_tdx_vtpm::report::ReportError),
-    #[cfg(feature = "azure-attester")]
+    #[cfg(azure_attester_x86_64_linux)]
     #[error("IMDS: {0}")]
     Imds(#[from] az_tdx_vtpm::imds::ImdsError),
-    #[cfg(feature = "azure-attester")]
+    #[cfg(azure_attester_x86_64_linux)]
     #[error("vTPM report: {0}")]
     VtpmReport(#[from] az_tdx_vtpm::vtpm::ReportError),
-    #[cfg(feature = "azure-attester")]
+    #[cfg(azure_attester_x86_64_linux)]
     #[error("vTPM quote: {0}")]
     VtpmQuote(#[from] az_tdx_vtpm::vtpm::QuoteError),
-    #[cfg(feature = "azure-attester")]
+    #[cfg(azure_attester_x86_64_linux)]
     #[error("vTPM read: {0}")]
     TssEsapi(#[from] tss_esapi::Error),
-    #[cfg(feature = "azure-attester")]
+    #[cfg(azure_attester_x86_64_linux)]
     #[error("IO: {0}")]
     Io(#[from] std::io::Error),
-    #[cfg(feature = "azure-attester")]
+    #[cfg(azure_attester_x86_64_linux)]
     #[error("AIA URL is not HTTP(S): {url}")]
     UnsupportedAiaUrl { url: String },
-    #[cfg(feature = "azure-attester")]
+    #[cfg(azure_attester_x86_64_linux)]
     #[error("Failed to fetch AIA issuer certificate from {url}: {source}")]
     AiaFetch { url: String, source: Box<ureq::Error> },
-    #[cfg(feature = "azure-attester")]
+    #[cfg(azure_attester_x86_64_linux)]
     #[error(
         "Azure vTPM AK issuer chain exceeded maximum intermediate certificate count: {max_depth}"
     )]
     AkIssuerChainTooDeep { max_depth: usize },
-    #[cfg(feature = "azure-attester")]
+    #[cfg(azure_attester_x86_64_linux)]
     #[error("Azure vTPM AK issuer chain could not be built to a pinned Azure root certificate")]
     AkIssuerChainIncomplete,
-    #[cfg(feature = "azure-attester")]
+    #[cfg(azure_attester_x86_64_linux)]
     #[error(
         "Azure metadata API returned a successful response with non-JSON content-type: {content_type:?}"
     )]

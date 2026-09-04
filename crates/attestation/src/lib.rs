@@ -2,7 +2,8 @@
 
 // `azure-verifier` is the base Azure feature: it gates the whole module,
 // and `azure-attester` (which implies it) additionally enables the
-// generation code inside.
+// generation code inside, on the x86_64 linux targets where the vTPM it
+// reads exists.
 #[cfg(feature = "azure-verifier")]
 pub mod azure;
 pub mod dcap;
@@ -171,7 +172,7 @@ impl AttestationType {
     /// Detect what platform we are on by attempting an attestation
     pub fn detect() -> Result<Self, AttestationError> {
         // First attempt azure, if the feature is present
-        #[cfg(feature = "azure-attester")]
+        #[cfg(azure_attester_x86_64_linux)]
         {
             if azure::detect_azure_cvm()? {
                 return Ok(AttestationType::AzureTdx);
@@ -282,7 +283,7 @@ impl AttestationGenerator {
             match self.attestation_type {
                 AttestationType::None => Ok(AttestationExchangeMessage::without_attestation()),
                 AttestationType::AzureTdx => {
-                    #[cfg(feature = "azure-attester")]
+                    #[cfg(azure_attester_x86_64_linux)]
                     {
                         let platform = attest_measure::platform::metadata_for(
                             self.attestation_type.try_into()?,
@@ -294,10 +295,10 @@ impl AttestationGenerator {
                             }),
                         })
                     }
-                    #[cfg(not(feature = "azure-attester"))]
+                    #[cfg(not(azure_attester_x86_64_linux))]
                     {
                         tracing::error!(
-                            "Attempted to generate an azure attestation but the `azure-attester` feature not enabled"
+                            "Azure attestation generation requires the `azure-attester` feature on an x86_64 linux host"
                         );
                         Err(AttestationError::AttestationTypeNotSupported)
                     }

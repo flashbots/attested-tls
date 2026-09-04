@@ -48,9 +48,19 @@ attestation support.
 This feature requires [tpm2](https://tpm2-software.github.io) and `openssl` to
 be installed. On Debian-based systems tpm2 is provided by
 [`libtss2-dev`](https://packages.debian.org/trixie/libtss2-dev), and on nix
-`tpm2-tss`. This dependency is currently not packaged for MacOS, meaning
-currently it is not possible to compile or run with the `azure-attester`
-feature on MacOS.
+`tpm2-tss`.
+
+The generation code is compiled on x86_64 Linux targets only — the platform
+an Azure TDX CVM actually runs on, and the only one where the vTPM and the
+native TPM stack exist. **On every other target, including MacOS and
+aarch64 Linux, `azure-attester` stays enabled but contributes nothing.**
+Cargo still reports the feature as on; what changes is that its generation
+dependencies are target-gated out of the dependency graph and the
+generation code is not compiled, leaving the same compiled surface as
+`azure-verifier` on its own. So the crate builds (`--all-features` works
+everywhere), but `AttestationType::detect` will not report `AzureTdx` and
+generating Azure evidence fails with `AttestationTypeNotSupported`. Verifying
+Azure evidence is unaffected. If you need generation, build on x86_64 Linux.
 
 **Note:** Azure support is currently **not actively maintained** as we do not
 have production CVMs deployed on Azure and so are unlikely to notice when this
