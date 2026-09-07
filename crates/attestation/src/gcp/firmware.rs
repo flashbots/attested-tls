@@ -160,7 +160,10 @@ mod tests {
             verify_dcap_attestation_with_given_timestamp(
                 attestation_bytes.to_vec(),
                 expected_input_data,
-                None,
+                pccs::Pccs::new(
+                    pccs::CollateralSource::IntelPcs { subscription_key: None },
+                    pccs::CachePolicy::Passthrough,
+                ),
                 Some(collateral),
                 GCP_TDX_PORTABLE_FIXTURE_TIMESTAMP,
                 false,

@@ -1,7 +1,7 @@
 # pccs
 
-An internal Provisioning Certificate Caching Service implementation for DCAP
-collateral fetching and caching.
+A DCAP collateral client with optional in-process caching and proactive
+refresh.
 
 This crate is used by attestation verification code that needs Intel TDX/SGX
 collateral such as TCB info, QE identity, and certificate revocation lists.
@@ -9,20 +9,71 @@ collateral such as TCB info, QE identity, and certificate revocation lists.
 It can:
 
 - Fetch collateral from Intel PCS or a configured PCCS endpoint
-- Cache collateral in-process
-- Pre-warm the cache at startup
-- Refresh cached collateral in the background before expiry
+- Operate as a remote pass-through without caching
+- Cache collateral lazily on demand
+- Pre-warm and proactively refresh an in-process cache
 
-This is an alternative to Intel's reference PCCS server implementation which
-can be embedded in Rust services that verify quotes.
+The caching modes provide an embeddable alternative to deploying Intel's
+reference PCCS server alongside services that verify quotes.
 
 For Intel's terminology and architecture, see the Intel documentation for the
 [Provisioning Certificate Caching Service (PCCS)](https://cc-enabling.trustedservices.intel.com/intel-sgx-tdx-pccs/01/introduction/).
 
+## Collateral source and cache policy
+
+Every `Pccs` has a [`CollateralSource`](src/lib.rs) and an independent
+[`CachePolicy`](src/lib.rs). `CollateralSource::IntelPcs` uses Intel's canonical
+endpoint and accepts an optional subscription key to lift anonymous rate
+limits. `CollateralSource::Pccs` accepts the URL of any compatible service.
+
+The cache policies are:
+
+- `Passthrough` keeps no internal cache. Every `get_collateral()` call fetches
+  from the configured endpoint. `get_collateral_sync()` returns
+  `CacheDisabled` because it cannot perform asynchronous network I/O.
+- `OnDemand` starts with an empty cache. Asynchronous cache misses are fetched
+  immediately; synchronous misses return an error and start a background
+  fetch for a later attempt.
+- `Prewarmed` starts the same cache and immediately begins pre-warming it with
+  discovered TDX collateral. Call `ready()` to wait for that initial work.
+
+```rust,no_run
+use pccs::{CachePolicy, CollateralSource, Pccs};
+
+#[tokio::main]
+async fn main() -> Result<(), pccs::PccsError> {
+    let subscription_key = std::env::var("INTEL_PCS_SUBSCRIPTION_KEY").ok();
+    let _passthrough = Pccs::new(
+        CollateralSource::IntelPcs { subscription_key },
+        CachePolicy::Passthrough,
+    );
+    let _on_demand = Pccs::new(
+        CollateralSource::Pccs { url: "https://pccs.example".into() },
+        CachePolicy::OnDemand,
+    );
+    let prewarmed = Pccs::new(
+        CollateralSource::IntelPcs { subscription_key: None },
+        CachePolicy::Prewarmed,
+    );
+    let _summary = prewarmed.ready().await?;
+
+    Ok(())
+}
+```
+
+`ready()` only waits for the `Prewarmed` policy. It returns `PrewarmDisabled`
+for `Passthrough` and `OnDemand`. A successful pre-warm result includes failure
+counters; it does not guarantee that every possible collateral item was
+cached.
+
 ## Runtime Requirements
 
-This crate expects to be used from within a Tokio runtime.
+Asynchronous collateral fetching requires a Tokio runtime. Constructing a
+`Prewarmed` instance also requires an active runtime because it immediately
+spawns the initial pre-warm task. Constructing `Passthrough` or `OnDemand`
+does not itself spawn a task.
 
-The above applies even when calling synchronous-looking APIs such as
-`get_collateral_sync()` because cache miss repair, proactive refresh, and
-startup pre-warm are all driven by Tokio background tasks.
+`get_collateral_sync()` is available only with a cache (`OnDemand` or
+`Prewarmed`). A cache miss or expired entry may spawn a Tokio background task,
+so applications that can encounter either condition must have an active
+runtime.
