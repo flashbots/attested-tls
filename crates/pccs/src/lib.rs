@@ -248,12 +248,13 @@ impl Pccs {
         ca: &'static str,
         now: u64,
     ) -> Result<(QuoteCollateralV3, bool), PccsError> {
+        let now = i64::try_from(now).map_err(|_| PccsError::TimeStampExceedsI64)?;
         let Some(inner) = &self.inner else {
             let collateral = fetch_collateral(&self.collateral_client, fmspc, ca).await?;
+            extract_next_update(&collateral, now)?;
             return Ok((collateral, true));
         };
 
-        let now = i64::try_from(now).map_err(|_| PccsError::TimeStampExceedsI64)?;
         let cache_key = PccsInput::new(fmspc.clone(), ca);
 
         {
@@ -1212,6 +1213,34 @@ mod tests {
             pccs.get_collateral_sync(fmspc, "processor", 1_700_000_000),
             Err(PccsError::CacheDisabled)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_policy_rejects_expired_crl() {
+        let collateral = mock_collateral();
+        let crl_expiry = parse_crl_next_update("root_ca_crl.nextUpdate", &collateral.root_ca_crl)
+            .unwrap()
+            .min(parse_crl_next_update("pck_crl.nextUpdate", &collateral.pck_crl).unwrap());
+        let mock = spawn_mock_pcs_server(MockPcsConfig {
+            include_fmspcs_listing: false,
+            tcb_next_update: "2999-01-01T00:00:00Z".to_string(),
+            qe_next_update: "2999-01-01T00:00:00Z".to_string(),
+            refreshed_tcb_next_update: None,
+            refreshed_qe_next_update: None,
+        })
+        .await
+        .unwrap();
+        let pccs = Pccs::new(
+            CollateralSource::Pccs { url: mock.base_url.clone() },
+            CachePolicy::Passthrough,
+        );
+
+        let error = pccs
+            .get_collateral(mock_tdx_fmspc(), "processor", u64::try_from(crl_expiry).unwrap())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, PccsError::PccsCollateralExpired(_)));
     }
 
     #[test]
