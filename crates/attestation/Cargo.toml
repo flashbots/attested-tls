@@ -43,14 +43,12 @@ az-cvm-vtpm = { version = "0.7.4", default-features = false, optional = true }
 openssl = { version = "0.10.79", optional = true }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-# Needed for generation of azure vTPM evidence, which reads the vTPM through tss-esapi and
-# attests Intel TDX. An Azure TDX CVM is x86_64 linux, so the generation code is only
-# meaningful there, and neither of these builds elsewhere in any case.
-# Declaring them per-target rather than gating on the feature alone keeps `azure-attester`
-# (and so --all-features) resolvable on every platform; off this target the feature stays
-# enabled but contributes nothing, as the crate readme describes. build.rs derives the matching
-# `azure_attester_x86_64_linux` cfg, and must keep the same condition as this table.
-# See https://github.com/virtee/sev/issues/369
+# Azure vTPM evidence generation: reads the vTPM through tss-esapi, attests Intel TDX.
+# An Azure TDX CVM is x86_64 linux, and tss-esapi-sys has no bindings for most other
+# tuples in any case. Keeping these per-target rather than behind the feature alone
+# leaves `azure-attester` (and --all-features) buildable everywhere: elsewhere the
+# feature stays on but pulls in neither dep, so nothing extra compiles. build.rs
+# mirrors the condition as the `azure_attester_x86_64_linux` cfg; keep the two in sync.
 az-tdx-vtpm = { version = "0.7.4", optional = true }
 tss-esapi = { version = "7.6.0", optional = true }
 

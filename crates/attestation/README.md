@@ -50,17 +50,18 @@ be installed. On Debian-based systems tpm2 is provided by
 [`libtss2-dev`](https://packages.debian.org/trixie/libtss2-dev), and on nix
 `tpm2-tss`.
 
-The generation code is compiled on x86_64 Linux targets only — the platform
-an Azure TDX CVM actually runs on, and the only one where the vTPM and the
-native TPM stack exist. **On every other target, including MacOS and
-aarch64 Linux, `azure-attester` stays enabled but contributes nothing.**
-Cargo still reports the feature as on; what changes is that its generation
-dependencies are target-gated out of the dependency graph and the
-generation code is not compiled, leaving the same compiled surface as
-`azure-verifier` on its own. So the crate builds (`--all-features` works
-everywhere), but `AttestationType::detect` will not report `AzureTdx` and
-generating Azure evidence fails with `AttestationTypeNotSupported`. Verifying
-Azure evidence is unaffected. If you need generation, build on x86_64 Linux.
+The generation code is compiled for x86_64 Linux targets only — where an Azure
+TDX CVM actually runs. **Elsewhere, MacOS and aarch64 Linux included,
+`azure-attester` stays enabled but contributes nothing:** its generation
+dependencies are target-gated out, so the crate behaves as if only
+`azure-verifier` were enabled. `--all-features` still builds everywhere, but
+`AttestationType::detect` will never report `AzureTdx` and generation will fail
+with `AttestationTypeNotSupported`. Verification is unaffected. `build.rs` emits
+a `cargo::warning` when this happens.
+
+The condition is on the target, not the build host, so any machine can produce a
+build with generation in it via `--target x86_64-unknown-linux-gnu`, given a
+cross toolchain and tpm2-tss and openssl for that target.
 
 **Note:** Azure support is currently **not actively maintained** as we do not
 have production CVMs deployed on Azure and so are unlikely to notice when this

@@ -13,15 +13,30 @@ fn main() {
     // where az-tdx-vtpm and tss-esapi resolve, so this condition has to
     // stay identical to their target table in Cargo.toml. The
     // CARGO_CFG_TARGET_* vars describe the target rather than the build
-    // host, which keeps the two in agreement when cross-compiling. The
+    // host, which keeps the two in agreement when cross-compiling: any
+    // host targeting x86_64 linux gets the generation code. The
     // check-cfg goes outside the branch: the name is expected on every
     // target, including those where the code it gates is switched off.
     println!("cargo::rustc-check-cfg=cfg(azure_attester_x86_64_linux)");
-    if env::var_os("CARGO_FEATURE_AZURE_ATTESTER").is_some() &&
-        env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") &&
-        env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
-    {
-        println!("cargo::rustc-cfg=azure_attester_x86_64_linux");
+    if env::var_os("CARGO_FEATURE_AZURE_ATTESTER").is_some() {
+        let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+        let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        if os == "linux" && arch == "x86_64" {
+            println!("cargo::rustc-cfg=azure_attester_x86_64_linux");
+        } else {
+            // Warn rather than fail: --all-features has to stay usable
+            // everywhere, so the feature is a no-op off this
+            // target instead of an error.
+            println!(
+                "cargo::warning=`azure-attester` is enabled but the target is {arch}-{os}. \
+                 The Azure evidence generation code is only compiled for x86_64 linux, so this \
+                 build will behave as if only `azure-verifier` were enabled: `detect` will \
+                 never return `AzureTdx`, and `generate_attestation` for `AzureTdx` will fail \
+                 with `AttestationTypeNotSupported`. Verifying Azure evidence still works. If \
+                 you need generation, target x86_64 linux — any host can, with \
+                 `--target x86_64-unknown-linux-gnu` and a cross toolchain."
+            );
+        }
     }
 
     println!("cargo:rerun-if-changed={FIRMWARE_DIR}");
