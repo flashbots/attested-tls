@@ -21,6 +21,14 @@ returns `ExpectedMeasurements::Image`, while an allow-any DCAP policy returns
 `ExpectedMeasurements::Dcap` with an empty register map. Successful
 verification without attestation returns `None`.
 
+`VerifiedAttestation` also carries an `EndorsementSnapshot`: the DCAP
+collateral bundle the verification consumed and the instant its freshness
+checks were evaluated at. Archived beside the evidence, it lets
+`AttestationVerifier::verify_attestation_archived` reproduce the verdict later,
+against that bundle and at that instant, without fetching anything whose answer
+could have changed since. This is for re-verifying archived evidence, not for
+verifying live evidence with collateral obtained out of band.
+
 Matched expected measurements can be transported in an HTTP header using
 `ExpectedMeasurements::to_header_format` and reconstructed with
 `ExpectedMeasurements::from_header_format`. See

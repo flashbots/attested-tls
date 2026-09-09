@@ -22,9 +22,8 @@ use std::{
 
 use attest_measure::platform::PlatformError;
 pub use attest_types::{AttestationEvidence, PlatformMetadata};
-/// Re-exported so callers can archive [EndorsementSnapshot::dcap] and
-/// replay it through [VerifyMode::Archived] without depending on `dcap-qvl`
-/// directly
+/// Re-exported so callers can archive [EndorsementSnapshot::dcap] without
+/// depending on `dcap-qvl` directly
 pub use dcap_qvl::QuoteCollateralV3;
 use measurements::{ExpectedMeasurements, MultiMeasurements};
 use parity_scale_codec::{Decode, Encode};
@@ -362,6 +361,10 @@ impl AttestationGenerator {
 /// instead. Hence a struct that grows fields rather than an enum keyed by
 /// platform, and `#[non_exhaustive]` to keep that growth additive.
 ///
+/// Handed back by every verification and accepted back by
+/// [`AttestationVerifier::verify_attestation_archived`], which re-verifies
+/// the evidence against it with nothing fetched.
+///
 /// Two caveats. Trust anchors are compiled in rather than captured here, so
 /// a replay needs a build carrying the same ones — under `mock`, the mock
 /// root. And "endorsements" is loose: in [RFC 9334] terms a DCAP bundle
@@ -385,29 +388,6 @@ impl EndorsementSnapshot {
     pub fn dcap(collateral: QuoteCollateralV3, at: u64) -> Self {
         Self { at, dcap: Some(collateral) }
     }
-}
-
-/// Where one verification gets its endorsements, and the instant it
-/// evaluates freshness at
-///
-/// This is a per-verification fact rather than verifier configuration: a
-/// relying party re-checking archived evidence pins both to when that
-/// evidence was collected, while a live handshake through the same verifier
-/// does not.
-// The snapshot makes `Archived` far larger than an empty `Live`. A mode is
-// built once, passed once and dropped; boxing it would cost a `Box::new` at
-// every call site for a value that is never stored.
-#[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum VerifyMode {
-    /// Fetch whatever endorsements the evidence needs, and evaluate every
-    /// freshness check at the wall clock
-    Live,
-    /// Verify against a pinned [EndorsementSnapshot]: the endorsements as
-    /// of the instant they were held to, with nothing fetched. A leg the
-    /// snapshot carries no endorsements for is refused rather than
-    /// completed by a fetch
-    Archived(EndorsementSnapshot),
 }
 
 /// Evidence whose authenticity a Verifier established, with what it was
@@ -656,20 +636,14 @@ impl AttestationVerifier {
     /// Verify an attestation, and return the expected measurements from the
     /// matching policy record.
     ///
-    /// [VerifyMode::Live] fetches endorsements and evaluates every
-    /// freshness check at the wall clock. [VerifyMode::Archived]
-    /// verifies the DCAP quote, and on Azure the AK certificate chain,
-    /// as of a given instant with nothing fetched. Two GCP checks stay
-    /// live in either mode, since neither rests on signed material a
-    /// replay could re-verify:
-    ///
-    /// - the host provenance lookup against Google's PPID registry
-    /// - the firmware fetch for the quote's MRTD, on a cache miss
+    /// Endorsements are fetched and every freshness check is evaluated at
+    /// the wall clock. To re-verify archived evidence against the
+    /// endorsements it was originally verified with, see
+    /// [`Self::verify_attestation_archived`].
     pub async fn verify_attestation(
         &self,
         attestation_exchange_message: AttestationExchangeMessage,
         expected_input_data: [u8; 64],
-        mode: VerifyMode,
     ) -> Result<Option<VerifiedAttestation>, AttestationError> {
         let attestation_type = attestation_exchange_message.attestation_type();
         tracing::debug!("Verifying {attestation_type} attestation");
@@ -699,7 +673,6 @@ impl AttestationVerifier {
                     azure::verify_azure_attestation(
                         attestation_evidence.quote.clone(),
                         expected_input_data,
-                        mode,
                         self.internal_pccs.clone(),
                         self.override_azure_outdated_tcb,
                     )
@@ -718,7 +691,6 @@ impl AttestationVerifier {
                 let (verified, quote) = dcap::verify_dcap_attestation(
                     attestation_evidence.quote.clone(),
                     expected_input_data,
-                    mode,
                     self.internal_pccs.clone(),
                 )
                 .await?;
@@ -779,7 +751,59 @@ impl AttestationVerifier {
         &self,
         attestation_exchange_message: AttestationExchangeMessage,
         expected_input_data: [u8; 64],
-        mode: VerifyMode,
+    ) -> Result<Option<VerifiedAttestation>, AttestationError> {
+        self.verify_attestation_blocking(attestation_exchange_message, expected_input_data, None)
+    }
+
+    /// Re-verifies archived evidence against the endorsements a previous
+    /// verification reported, then checks the configured policy.
+    ///
+    /// `endorsements` is the [`EndorsementSnapshot`] that verification
+    /// handed back in its [`VerifiedAttestation`]. The DCAP quote is
+    /// checked against that snapshot's collateral bundle, and on Azure
+    /// the AK certificate chain is checked as well, both at the
+    /// snapshot's instant rather than the wall clock. Same evidence,
+    /// same snapshot, same verdict, however long after the fact.
+    ///
+    /// Nothing whose answer can change over time is fetched. On GCP that
+    /// means the provenance lookup against Google's PPID registry is
+    /// skipped: the registry is unsigned and mutable, so a replay could
+    /// only learn what it says today, and the original verification
+    /// already consulted it. Firmware for a portable-image policy is
+    /// still fetched on a cache miss, since it is signed and
+    /// content-addressed by the quote's MRTD, so the fetch cannot
+    /// change the verdict. Recording the provenance outcome and the
+    /// firmware in the snapshot would remove these caveats and is left
+    /// for a later change.
+    ///
+    /// This is not a way to verify live evidence with collateral obtained
+    /// out of band: the snapshot pins the instant along with the bundle,
+    /// and a live verification belongs on [`Self::verify_attestation`].
+    /// A snapshot with no DCAP bundle fails with
+    /// [`DcapVerificationError::ArchivedWithoutDcapCollateral`] rather than
+    /// being completed by a fetch.
+    pub fn verify_attestation_archived(
+        &self,
+        attestation_exchange_message: AttestationExchangeMessage,
+        expected_input_data: [u8; 64],
+        endorsements: &EndorsementSnapshot,
+    ) -> Result<Option<VerifiedAttestation>, AttestationError> {
+        self.verify_attestation_blocking(
+            attestation_exchange_message,
+            expected_input_data,
+            Some(endorsements),
+        )
+    }
+
+    /// The body shared by [`Self::verify_attestation_sync`] and
+    /// [`Self::verify_attestation_archived`], which differ only in where
+    /// the DCAP leg gets its endorsements and whether the GCP provenance
+    /// lookup runs
+    fn verify_attestation_blocking(
+        &self,
+        attestation_exchange_message: AttestationExchangeMessage,
+        expected_input_data: [u8; 64],
+        archived: Option<&EndorsementSnapshot>,
     ) -> Result<Option<VerifiedAttestation>, AttestationError> {
         let attestation_type = attestation_exchange_message.attestation_type();
         tracing::debug!("Verifying {attestation_type} attestation");
@@ -806,13 +830,20 @@ impl AttestationVerifier {
                         .attestation_evidence
                         .as_ref()
                         .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                    azure::verify_azure_attestation_sync(
-                        attestation_evidence.quote.clone(),
-                        expected_input_data,
-                        mode,
-                        self.internal_pccs.clone(),
-                        self.override_azure_outdated_tcb,
-                    )?
+                    match archived {
+                        None => azure::verify_azure_attestation_sync(
+                            attestation_evidence.quote.clone(),
+                            expected_input_data,
+                            self.internal_pccs.clone(),
+                            self.override_azure_outdated_tcb,
+                        )?,
+                        Some(endorsements) => azure::verify_azure_attestation_archived(
+                            attestation_evidence.quote.clone(),
+                            expected_input_data,
+                            endorsements,
+                            self.override_azure_outdated_tcb,
+                        )?,
+                    }
                 }
                 #[cfg(not(feature = "azure-verifier"))]
                 {
@@ -824,15 +855,21 @@ impl AttestationVerifier {
                     .attestation_evidence
                     .as_ref()
                     .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                let pccs = self.internal_pccs.clone();
-
-                let (verified, quote) = dcap::verify_dcap_attestation_sync(
-                    attestation_evidence.quote.clone(),
-                    expected_input_data,
-                    mode,
-                    pccs,
-                )?;
-                if attestation_type == AttestationType::GcpTdx {
+                let (verified, quote) = match archived {
+                    None => dcap::verify_dcap_attestation_sync(
+                        attestation_evidence.quote.clone(),
+                        expected_input_data,
+                        self.internal_pccs.clone(),
+                    )?,
+                    Some(endorsements) => dcap::verify_dcap_attestation_archived(
+                        attestation_evidence.quote.clone(),
+                        expected_input_data,
+                        endorsements,
+                    )?,
+                };
+                // The registry is unsigned and mutable: a replay could only
+                // learn what it says now, so only a live verification asks
+                if attestation_type == AttestationType::GcpTdx && archived.is_none() {
                     self.gcp_provenance_checker.verify_provenance_sync(&quote)?;
                 }
                 verified
@@ -1234,18 +1271,9 @@ mod tests {
         let input_data = [0u8; 64];
 
         assert!(
-            verifier
-                .verify_attestation(attestation.clone(), input_data, VerifyMode::Live)
-                .await
-                .unwrap()
-                .is_none()
+            verifier.verify_attestation(attestation.clone(), input_data).await.unwrap().is_none()
         );
-        assert!(
-            verifier
-                .verify_attestation_sync(attestation, input_data, VerifyMode::Live)
-                .unwrap()
-                .is_none()
-        );
+        assert!(verifier.verify_attestation_sync(attestation, input_data).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1260,9 +1288,8 @@ mod tests {
         let verifier = AttestationVerifier::mock();
         let message: AttestationExchangeMessage = attestation_evidence.into();
 
-        let async_result =
-            verifier.verify_attestation(message.clone(), input_data, VerifyMode::Live).await;
-        let sync_result = verifier.verify_attestation_sync(message, input_data, VerifyMode::Live);
+        let async_result = verifier.verify_attestation(message.clone(), input_data).await;
+        let sync_result = verifier.verify_attestation_sync(message, input_data);
 
         assert!(
             matches!(
@@ -1286,6 +1313,67 @@ mod tests {
         );
     }
 
+    /// What a live verification reports is enough to reproduce its verdict
+    /// later, policy check included, with nothing fetched
+    #[tokio::test]
+    async fn archived_replay_reproduces_the_live_verdict() {
+        let input_data = [7u8; 64];
+        let quote = dcap::create_dcap_attestation(input_data).unwrap();
+        let attestation_evidence = AttestationEvidence {
+            quote,
+            platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
+        };
+        let verifier = AttestationVerifier::mock();
+        let message: AttestationExchangeMessage = attestation_evidence.into();
+
+        let live = verifier
+            .verify_attestation(message.clone(), input_data)
+            .await
+            .unwrap()
+            .expect("mock evidence carries an attestation");
+        let replayed = verifier
+            .verify_attestation_archived(message, input_data, &live.endorsements)
+            .unwrap()
+            .expect("mock evidence carries an attestation");
+
+        assert_eq!(replayed.measurements, live.measurements);
+        assert_eq!(replayed.expected_measurements, live.expected_measurements);
+        assert_eq!(replayed.endorsements, live.endorsements);
+    }
+
+    /// A replay of GCP evidence does not consult the provenance registry.
+    /// A mock PPID is not in Google's registry, so were the lookup to run
+    /// it would fail closed
+    #[test]
+    fn archived_gcp_replay_skips_the_provenance_lookup() {
+        let input_data = [7u8; 64];
+        let quote = dcap::create_dcap_attestation(input_data).unwrap();
+        let attestation_evidence = AttestationEvidence {
+            quote,
+            platform: mock_platform_metadata(AttestationType::GcpTdx).unwrap(),
+        };
+        let verifier = AttestationVerifier::mock();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let endorsements = EndorsementSnapshot::dcap(mock_tdx::mock_collateral(), now);
+
+        let replayed = verifier.verify_attestation_archived(
+            attestation_evidence.into(),
+            input_data,
+            &endorsements,
+        );
+
+        assert!(
+            matches!(
+                replayed,
+                Ok(Some(VerifiedAttestation {
+                    expected_measurements: Some(ExpectedMeasurements::Dcap(_)),
+                    ..
+                }))
+            ),
+            "expected archived GCP replay to pass the policy check: {replayed:?}"
+        );
+    }
+
     /// On the fetching path, the reported bundle is the one the fetch
     /// produced — the property that makes archiving it provenance rather
     /// than a second, possibly different, copy.
@@ -1305,7 +1393,7 @@ mod tests {
         let verifier = AttestationVerifier::mock_with_pccs(mock_pcs_server.base_url.clone());
 
         let verified = verifier
-            .verify_attestation(attestation_evidence.into(), input_data, VerifyMode::Live)
+            .verify_attestation(attestation_evidence.into(), input_data)
             .await
             .unwrap()
             .expect("mock evidence carries an attestation");
@@ -1338,17 +1426,14 @@ mod tests {
         let input_data = [0; 64];
 
         assert!(matches!(
-            verifier.verify_attestation_sync(message.clone(), input_data, VerifyMode::Live),
+            verifier.verify_attestation_sync(message.clone(), input_data),
             Err(AttestationError::AttestationTypeNotAccepted)
         ));
 
         let generation = verifier_clone.measurement_policy_read().generation;
         verifier_clone.set_measurement_policy(MeasurementPolicy::expect_none(), generation);
 
-        assert!(matches!(
-            verifier.verify_attestation_sync(message, input_data, VerifyMode::Live),
-            Ok(None)
-        ));
+        assert!(matches!(verifier.verify_attestation_sync(message, input_data), Ok(None)));
     }
 
     #[test]
@@ -1389,7 +1474,7 @@ mod tests {
         tokio::fs::write(&policy_path, br#"[{"attestation_type":"dcap-tdx"}]"#).await.unwrap();
 
         let verified = verifier
-            .verify_attestation(attestation.into(), input_data, VerifyMode::Live)
+            .verify_attestation(attestation.into(), input_data)
             .await
             .unwrap()
             .expect("mock evidence carries an attestation");
@@ -1497,7 +1582,7 @@ mod tests {
         std::fs::write(&policy_path, br#"[{"attestation_type":"dcap-tdx"}]"#).unwrap();
 
         let verified = verifier
-            .verify_attestation_sync(attestation.into(), input_data, VerifyMode::Live)
+            .verify_attestation_sync(attestation.into(), input_data)
             .unwrap()
             .expect("mock evidence carries an attestation");
 

@@ -80,8 +80,7 @@ mod tests {
         EndorsementSnapshot,
         PlatformMetadata,
         VerifiedAttestation,
-        VerifyMode,
-        dcap::{get_quote_input_data, verify_quote},
+        dcap::{get_quote_input_data, verify_quote_archived},
         measurements::{ExpectedMeasurements, MeasurementPolicy, MeasurementRecord},
     };
 
@@ -142,8 +141,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_gcp_tdx_portable_policy_with_stored_collateral() {
+    #[test]
+    fn test_gcp_tdx_portable_policy_with_stored_collateral() {
         let attestation_bytes: &'static [u8] =
             include_bytes!("../../test-assets/gcp-tdx-1782809233226668671");
         let collateral_bytes: &'static [u8] =
@@ -158,22 +157,15 @@ mod tests {
 
         let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
         let firmware = serde_saphyr::from_slice(firmware_bytes).unwrap();
-        let (VerifiedAttestation { measurements, .. }, _) = verify_quote(
+        // A real GCP quote, so it is checked against Intel's root whatever
+        // the build
+        let (VerifiedAttestation { measurements, .. }, _) = verify_quote_archived(
             attestation_bytes.to_vec(),
             expected_input_data,
-            VerifyMode::Archived(EndorsementSnapshot::dcap(
-                collateral,
-                GCP_TDX_PORTABLE_FIXTURE_TIMESTAMP,
-            )),
-            pccs::Pccs::new(
-                pccs::CollateralSource::IntelPcs { subscription_key: None },
-                pccs::CachePolicy::Passthrough,
-            ),
+            &EndorsementSnapshot::dcap(collateral, GCP_TDX_PORTABLE_FIXTURE_TIMESTAMP),
             false,
             &QuoteVerifier::new_prod(),
-            None,
         )
-        .await
         .unwrap();
 
         let measurement_policy = MeasurementPolicy {

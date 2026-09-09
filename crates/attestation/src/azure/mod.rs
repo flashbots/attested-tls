@@ -15,7 +15,12 @@ use thiserror::Error;
 use tpm_quote::TpmQuote;
 pub use tpm_quote::TpmQuoteError;
 pub use tpms_attest::AttestError;
-pub use verify::{get_measurements, verify_azure_attestation, verify_azure_attestation_sync};
+pub use verify::{
+    get_measurements,
+    verify_azure_attestation,
+    verify_azure_attestation_archived,
+    verify_azure_attestation_sync,
+};
 
 /// The attestation evidence payload that gets sent over the channel
 #[derive(Debug, Serialize, Deserialize)]
