@@ -73,5 +73,12 @@ jobs:
     - name: Check azure-verifier builds without the TPM stack
       run: cargo check -p attestation --no-default-features --features azure-verifier
 
+    # `azure-attester` carries its generation dependencies per-target, so off
+    # x86_64 linux it has to stay enabled and contribute nothing rather than
+    # fail to build. macos-latest is aarch64-darwin, the target
+    # tss-esapi-sys has no bindings for.
+    - name: Check azure-attester builds off x86_64 linux
+      run: cargo check -p attestation --all-features
+
     - name: Test azure-verifier
       run: cargo test -p attestation --no-default-features --features azure-verifier

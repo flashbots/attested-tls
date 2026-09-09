@@ -14,9 +14,11 @@
 //! extraction done by the `tpms_attest` parser instead of tss-esapi. It is
 //! vendored because az-cvm-vtpm's verifier feature currently requires its
 //! TPM device support (tss-esapi links the native tpm2-tss libraries,
-//! making such builds Linux-only). If upstream decouples verification
-//! from the TPM stack, this module can be retired in favour of depending
-//! on az-cvm-vtpm's verifier again.
+//! making such builds Linux-only). Tracked upstream as
+//! <https://github.com/kinvolk/azure-cvm-tooling/issues/95>; if upstream
+//! decouples verification from the TPM stack, this module and
+//! [`super::tpms_attest`] can be retired in favour of depending on
+//! az-cvm-vtpm's verifier again.
 
 use openssl::{
     hash::MessageDigest,
