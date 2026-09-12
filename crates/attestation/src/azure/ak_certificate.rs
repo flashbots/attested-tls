@@ -20,15 +20,21 @@ const MICROSOFT_RSA_DEVICES_ROOT_2021: &str =
 pub(super) const AZURE_VIRTUAL_TPM_ROOT_2023: &str =
     include_str!("../../assets/azure-virtual-tpm-root-2023.pem");
 
+/// The root CAs an AK certificate chain is verified against, as compiled
+/// in: each asset's file stem and its PEM text, in anchor order
+///
+/// Compiled in rather than fetched, so they are the one verification input
+/// a relying party cannot archive beside the evidence. Exported so such a
+/// party can record which anchors a verdict rested on — a replay needs a
+/// build carrying the same ones.
+pub const AZURE_ROOT_CA_PEMS: [(&str, &str); 2] = [
+    ("microsoft-rsa-devices-root-ca-2021", MICROSOFT_RSA_DEVICES_ROOT_2021),
+    ("azure-virtual-tpm-root-2023", AZURE_VIRTUAL_TPM_ROOT_2023),
+];
+
 /// The root anchors for azure
-static AZURE_ROOT_ANCHORS: Lazy<Vec<TrustAnchor<'static>>> = Lazy::new(|| {
-    vec![
-        // Microsoft RSA Devices Root CA 2021 (older VMs)
-        pem_to_trust_anchor(MICROSOFT_RSA_DEVICES_ROOT_2021),
-        // Azure Virtual TPM Root CA 2023 (TDX + newer trusted launch)
-        pem_to_trust_anchor(AZURE_VIRTUAL_TPM_ROOT_2023),
-    ]
-});
+static AZURE_ROOT_ANCHORS: Lazy<Vec<TrustAnchor<'static>>> =
+    Lazy::new(|| AZURE_ROOT_CA_PEMS.iter().map(|(_, pem)| pem_to_trust_anchor(pem)).collect());
 
 /// Verify an AK certificate against pinned Azure root CAs.
 ///

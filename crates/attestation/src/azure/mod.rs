@@ -6,6 +6,7 @@ mod tpm_quote;
 mod tpms_attest;
 mod verify;
 
+pub use ak_certificate::AZURE_ROOT_CA_PEMS;
 #[cfg(azure_attester_x86_64_linux)]
 pub use attester::{create_azure_attestation, detect_azure_cvm};
 use az_cvm_vtpm::hcl;
