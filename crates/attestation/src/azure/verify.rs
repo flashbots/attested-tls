@@ -117,7 +117,7 @@ async fn verify_azure_attestation_with_given_timestamp(
 
     // The vTPM leg fetches nothing — AK chain in the evidence, roots
     // compiled in — so it adds no endorsements of its own
-    let measurements = finish_azure_attestation_verification(
+    let (measurements, ak_expires_at) = finish_azure_attestation_verification(
         hcl_report,
         var_data_hash,
         tpm_attestation,
@@ -127,6 +127,7 @@ async fn verify_azure_attestation_with_given_timestamp(
     Ok(VerifiedAttestation {
         measurements,
         expected_measurements: None,
+        cache_expires_at: dcap.cache_expires_at.min(ak_expires_at),
         endorsements: dcap.endorsements,
     })
 }
@@ -157,7 +158,7 @@ fn verify_azure_attestation_with_given_timestamp_sync(
         override_azure_outdated_tcb,
     )?;
 
-    let measurements = finish_azure_attestation_verification(
+    let (measurements, ak_expires_at) = finish_azure_attestation_verification(
         hcl_report,
         var_data_hash,
         tpm_attestation,
@@ -167,6 +168,7 @@ fn verify_azure_attestation_with_given_timestamp_sync(
     Ok(VerifiedAttestation {
         measurements,
         expected_measurements: None,
+        cache_expires_at: dcap.cache_expires_at.min(ak_expires_at),
         endorsements: dcap.endorsements,
     })
 }
@@ -206,7 +208,7 @@ fn finish_azure_attestation_verification(
     tpm_attestation: TpmAttest,
     expected_input_data: [u8; 64],
     now: u64,
-) -> Result<MultiMeasurements, MaaError> {
+) -> Result<(MultiMeasurements, u64), MaaError> {
     let hcl_ak_pub = hcl_report.ak_pub()?;
 
     // Get attestation key from runtime claims
@@ -273,7 +275,11 @@ fn finish_azure_attestation_verification(
         now,
     )?;
 
-    Ok(MultiMeasurements::from_indexed_pcrs(pcrs))
+    let mut ak_expires_at = crate::cache_expiry::certificate_not_after(ak_leaf_certificate_der)?;
+    for certificate in &ak_intermediate_certificate_ders {
+        ak_expires_at = ak_expires_at.min(crate::cache_expiry::certificate_not_after(certificate)?);
+    }
+    Ok((MultiMeasurements::from_indexed_pcrs(pcrs), ak_expires_at))
 }
 
 /// Extract the measurements from the attestation, but do not verify
@@ -500,6 +506,7 @@ mod tests {
         let VerifiedAttestation {
             measurements: async_measurements,
             endorsements: async_endorsements,
+            cache_expires_at: async_expiry,
             ..
         } = verify_azure_attestation_with_given_timestamp(
             attestation_json.clone(),
@@ -518,6 +525,7 @@ mod tests {
         let VerifiedAttestation {
             measurements: sync_measurements,
             endorsements: sync_endorsements,
+            cache_expires_at: sync_expiry,
             ..
         } = verify_azure_attestation_with_given_timestamp_sync(
             attestation_json,
@@ -533,12 +541,46 @@ mod tests {
         .unwrap();
 
         assert_eq!(async_measurements, sync_measurements);
+        assert_eq!(async_expiry, sync_expiry);
+        assert!(now < async_expiry);
         // The bundle handed back is the one the DCAP leg consumed, which is
         // what makes archiving it provenance rather than a second copy, and
         // it arrives paired with the instant both legs were held to
         let expected = EndorsementSnapshot::dcap(fixture_collateral, now);
         assert_eq!(async_endorsements, expected);
         assert_eq!(sync_endorsements, expected);
+    }
+
+    #[tokio::test]
+    async fn expired_extra_ak_certificate_disables_caching_without_changing_trust() {
+        let mut document: AttestationDocument = serde_saphyr::from_slice(include_bytes!(
+            "../../test-assets/azure-tdx-with-ak-intermediates-1780922561.yaml"
+        ))
+        .unwrap();
+        let collateral: QuoteCollateralV3 = serde_saphyr::from_slice(include_bytes!(
+            "../../test-assets/azure-collateral-with-ak-intermediates-1780922561.yaml"
+        ))
+        .unwrap();
+        let now = 1_780_922_561;
+        let mut params = rcgen::CertificateParams::new(vec!["unused".into()]).unwrap();
+        params.not_before = ::time::OffsetDateTime::from_unix_timestamp(0).unwrap();
+        params.not_after = ::time::OffsetDateTime::from_unix_timestamp(1000).unwrap();
+        let certificate = params.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+        document.tpm_attestation.ak_intermediate_certificates_pem.push(certificate.pem());
+        let verified = verify_azure_attestation_with_given_timestamp(
+            serde_json::to_vec(&document).unwrap(),
+            [0; 64],
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::Passthrough,
+            ),
+            Some(collateral),
+            now,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verified.cache_expires_at, 1000);
     }
 
     #[tokio::test]

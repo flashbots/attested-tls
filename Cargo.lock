@@ -400,6 +400,7 @@ dependencies = [
  "pccs",
  "pem-rfc7468",
  "rand_core 0.6.4",
+ "rcgen 0.14.7",
  "reqwest 0.13.4",
  "rustls",
  "rustls-webpki",

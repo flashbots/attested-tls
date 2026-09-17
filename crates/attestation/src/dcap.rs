@@ -212,6 +212,7 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
         VerifiedAttestation {
             measurements,
             expected_measurements: None,
+            cache_expires_at: crate::cache_expiry::dcap_cache_expires_at(&collateral, &quote)?,
             endorsements: EndorsementSnapshot::dcap(collateral, now),
         },
         quote,
@@ -247,6 +248,7 @@ pub async fn verify_dcap_attestation(
         VerifiedAttestation {
             measurements,
             expected_measurements: None,
+            cache_expires_at: crate::cache_expiry::dcap_cache_expires_at(&collateral, &quote)?,
             endorsements: EndorsementSnapshot::dcap(collateral, now),
         },
         quote,
@@ -281,6 +283,7 @@ pub fn verify_dcap_attestation_sync(
         VerifiedAttestation {
             measurements,
             expected_measurements: None,
+            cache_expires_at: crate::cache_expiry::dcap_cache_expires_at(&collateral, &quote)?,
             endorsements: EndorsementSnapshot::dcap(collateral, now),
         },
         quote,
@@ -311,6 +314,14 @@ pub fn get_quote_input_data(report: &Report) -> [u8; 64] {
 /// An error when verifying a DCAP attestation
 #[derive(Error, Debug)]
 pub enum DcapVerificationError {
+    #[error("Cannot parse cache dependency certificate: {0}")]
+    X509Parse(#[from] x509_parser::asn1_rs::Err<x509_parser::error::X509Error>),
+    #[error("Cannot parse cache dependency PEM: {0}")]
+    Pem(#[from] x509_parser::error::PEMError),
+    #[error("Expected certificate PEM, found {0}")]
+    UnexpectedPemLabel(String),
+    #[error("Empty cache dependency certificate chain")]
+    EmptyCertificateChain,
     #[error("Quote input is not as expected")]
     InputMismatch,
     #[error("SGX quote given when TDX quote expected")]
@@ -364,46 +375,58 @@ mod tests {
         let fixture_collateral: QuoteCollateralV3 =
             serde_saphyr::from_slice(collateral_bytes).unwrap();
 
-        let (VerifiedAttestation { measurements: async_measurements, endorsements, .. }, _) =
-            verify_dcap_attestation_with_given_timestamp(
-                attestation_bytes.to_vec(),
-                [
-                    116, 39, 106, 100, 143, 31, 212, 145, 244, 116, 162, 213, 44, 114, 216, 80,
-                    227, 118, 129, 87, 180, 62, 194, 151, 169, 145, 116, 130, 189, 119, 39, 139,
-                    161, 136, 37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85,
-                    245, 114, 33, 173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
-                ],
-                Pccs::new(
-                    CollateralSource::IntelPcs { subscription_key: None },
-                    CachePolicy::Passthrough,
-                ),
-                Some(fixture_collateral.clone()),
-                now,
-                false,
-            )
-            .await
-            .unwrap();
+        let (
+            VerifiedAttestation {
+                measurements: async_measurements,
+                endorsements,
+                cache_expires_at: async_expiry,
+                ..
+            },
+            _,
+        ) = verify_dcap_attestation_with_given_timestamp(
+            attestation_bytes.to_vec(),
+            [
+                116, 39, 106, 100, 143, 31, 212, 145, 244, 116, 162, 213, 44, 114, 216, 80, 227,
+                118, 129, 87, 180, 62, 194, 151, 169, 145, 116, 130, 189, 119, 39, 139, 161, 136,
+                37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85, 245, 114, 33,
+                173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
+            ],
+            Pccs::new(
+                CollateralSource::IntelPcs { subscription_key: None },
+                CachePolicy::Passthrough,
+            ),
+            Some(fixture_collateral.clone()),
+            now,
+            false,
+        )
+        .await
+        .unwrap();
 
-        let (VerifiedAttestation { measurements: sync_measurements, .. }, _) =
-            verify_dcap_attestation_with_timestamp_sync(
-                attestation_bytes.to_vec(),
-                [
-                    116, 39, 106, 100, 143, 31, 212, 145, 244, 116, 162, 213, 44, 114, 216, 80,
-                    227, 118, 129, 87, 180, 62, 194, 151, 169, 145, 116, 130, 189, 119, 39, 139,
-                    161, 136, 37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85,
-                    245, 114, 33, 173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
-                ],
-                Pccs::new(
-                    CollateralSource::IntelPcs { subscription_key: None },
-                    CachePolicy::OnDemand,
-                ),
-                Some(fixture_collateral.clone()),
-                now,
-                false,
-            )
-            .unwrap();
+        let (
+            VerifiedAttestation {
+                measurements: sync_measurements,
+                cache_expires_at: sync_expiry,
+                ..
+            },
+            _,
+        ) = verify_dcap_attestation_with_timestamp_sync(
+            attestation_bytes.to_vec(),
+            [
+                116, 39, 106, 100, 143, 31, 212, 145, 244, 116, 162, 213, 44, 114, 216, 80, 227,
+                118, 129, 87, 180, 62, 194, 151, 169, 145, 116, 130, 189, 119, 39, 139, 161, 136,
+                37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85, 245, 114, 33,
+                173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
+            ],
+            Pccs::new(CollateralSource::IntelPcs { subscription_key: None }, CachePolicy::OnDemand),
+            Some(fixture_collateral.clone()),
+            now,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(async_measurements, sync_measurements);
+        assert_eq!(async_expiry, sync_expiry);
+        assert!(now < async_expiry);
         // A caller archiving provenance gets back the bundle the
         // verification consumed, not a second copy of it
         assert_eq!(endorsements.dcap, Some(fixture_collateral));

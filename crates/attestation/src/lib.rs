@@ -6,6 +6,7 @@
 // reads exists.
 #[cfg(feature = "azure-verifier")]
 pub mod azure;
+mod cache_expiry;
 pub mod dcap;
 mod gcp;
 pub mod measurements;
@@ -397,6 +398,13 @@ impl EndorsementSnapshot {
 /// [RFC 9334]: https://www.rfc-editor.org/rfc/rfc9334.html
 #[derive(Clone, Debug)]
 pub struct VerifiedAttestation {
+    /// Exclusive Unix-seconds deadline for reusing this verification
+    /// result, based on collateral and certificate expiry. This excludes
+    /// the local GCP provenance cache lifetime. Consumers must also apply
+    /// their own freshness limits and TLS certificate expiry. An elapsed
+    /// deadline permits no caching, even if verification at
+    /// `endorsements.at` succeeded.
+    pub cache_expires_at: u64,
     /// MRTD and RTMR0–3 from the quote on DCAP and GCP. On Azure the vTPM
     /// PCRs, which measure the guest boot rather than the launched TD and
     /// chain to the TD quote: its report data commits to the HCL var data
