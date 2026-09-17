@@ -50,6 +50,16 @@ struct TpmAttest {
     instance_info: Option<Vec<u8>>,
 }
 
+/// The DCAP quote and AK certificate material used by Azure verification.
+#[derive(Clone, Debug)]
+pub struct AzureVerifiedEvidence {
+    pub quote: dcap_qvl::quote::Quote,
+    // Read from the already-parsed leaf; retain decoded intermediates for
+    // lazy expiry calculation without copying or parsing them again here.
+    pub(crate) ak_not_after: u64,
+    pub(crate) ak_intermediates: Vec<Vec<u8>>,
+}
+
 /// Maximum serialized Azure attestation evidence payload size produced
 /// during generation and accepted during verification.
 ///

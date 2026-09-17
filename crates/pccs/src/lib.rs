@@ -16,7 +16,6 @@ use dcap_qvl::{
     collateral::CollateralClient,
     configs::DefaultConfig,
     http::{HttpClient as DcapHttpClient, HttpResponse},
-    tcb_info::TcbInfo,
 };
 use reqwest::{
     Url,
@@ -704,10 +703,11 @@ async fn fetch_collateral(
 /// - The root CA certificate revocation list
 /// - The PCK certificate revocation list
 pub fn collateral_next_update(collateral: &QuoteCollateralV3) -> Result<u64, PccsError> {
-    let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).map_err(|e| {
-        PccsError::PccsCollateralParse(format!("Failed to parse TCB info JSON: {e}"))
-    })?;
-    let qe_identity: QeIdentityNextUpdate =
+    let tcb_info: CollateralNextUpdate =
+        serde_json::from_str(&collateral.tcb_info).map_err(|e| {
+            PccsError::PccsCollateralParse(format!("Failed to parse TCB info JSON: {e}"))
+        })?;
+    let qe_identity: CollateralNextUpdate =
         serde_json::from_str(&collateral.qe_identity).map_err(|e| {
             PccsError::PccsCollateralParse(format!("Failed to parse QE identity JSON: {e}"))
         })?;
@@ -927,10 +927,10 @@ struct CacheEntry {
     refresh_task: Option<JoinHandle<()>>,
 }
 
-/// Minimal QE identity shape needed to read nextUpdate
+/// Minimal TCB info / QE identity shape needed to read nextUpdate
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct QeIdentityNextUpdate {
+struct CollateralNextUpdate {
     next_update: String,
 }
 
@@ -1020,7 +1020,8 @@ mod tests {
 
     fn mock_tdx_fmspc() -> String {
         let collateral = mock_collateral();
-        let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).unwrap();
+        let tcb_info: dcap_qvl::tcb_info::TcbInfo =
+            serde_json::from_str(&collateral.tcb_info).unwrap();
         tcb_info.fmspc
     }
 

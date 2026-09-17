@@ -689,9 +689,15 @@ impl AttestedCertificateVerifier {
         // Bound reuse by the exact collateral/evidence used to verify this
         // certificate. A background PCCS refresh cannot extend this
         // verdict.
-        let expiry = verified.map_or(expiry, |verified| {
-            expiry.min(UnixTime::since_unix_epoch(Duration::from_secs(verified.cache_expires_at)))
-        });
+        let expiry = if let Some(verified) = verified {
+            let deadline = verified.cache_expires_at().map_err(|err| {
+                tracing::warn!("Cannot determine attestation cache expiry: {err}");
+                InvalidCertificate(CertificateError::ApplicationVerificationFailure)
+            })?;
+            expiry.min(UnixTime::since_unix_epoch(Duration::from_secs(deadline)))
+        } else {
+            expiry
+        };
 
         let mut trusted_certs = self.trusted_certs.write().map_err(|_| {
             rustls::Error::General("Trusted certificate cache lock poisoned".into())
@@ -1772,7 +1778,8 @@ mod tests {
             .verify_attestation_sync(evidence, binding)
             .unwrap()
             .unwrap();
-        let deadline = UnixTime::since_unix_epoch(Duration::from_secs(verified.cache_expires_at));
+        let deadline =
+            UnixTime::since_unix_epoch(Duration::from_secs(verified.cache_expires_at().unwrap()));
         assert!(deadline < cert_expiry);
         let now = UnixTime::now();
         let name = ServerName::try_from("foo").unwrap();

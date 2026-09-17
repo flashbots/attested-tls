@@ -156,7 +156,7 @@ mod tests {
 
         let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
         let firmware = serde_saphyr::from_slice(firmware_bytes).unwrap();
-        let (VerifiedAttestation { measurements, .. }, _) =
+        let VerifiedAttestation { measurements, .. } =
             verify_dcap_attestation_with_given_timestamp(
                 attestation_bytes.to_vec(),
                 expected_input_data,

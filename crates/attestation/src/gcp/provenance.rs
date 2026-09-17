@@ -43,23 +43,24 @@ impl GcpProvenanceChecker {
     ///
     /// If a tokio runtime is available the blocking check is offloaded to
     /// its blocking pool; otherwise it runs inline on the current thread
-    pub(crate) async fn verify_provenance(&self, quote: Quote) -> Result<(), GcpProvenanceError> {
+    pub(crate) async fn verify_provenance(&self, quote: &Quote) -> Result<(), GcpProvenanceError> {
         self.verify_provenance_with_registry_url(quote, GCP_PROVENANCE_REGISTRY_URL.to_string())
             .await
     }
 
     async fn verify_provenance_with_registry_url(
         &self,
-        quote: Quote,
+        quote: &Quote,
         registry_url: String,
     ) -> Result<(), GcpProvenanceError> {
+        let ppid = extract_ppid_from_quote(quote)?;
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let checker = self.clone();
                 handle
                     .spawn_blocking(move || {
-                        checker.verify_provenance_with_registry_url_blocking_at(
-                            &quote,
+                        checker.verify_ppid_with_registry_url_blocking_at(
+                            ppid,
                             &registry_url,
                             Instant::now(),
                         )
@@ -67,11 +68,9 @@ impl GcpProvenanceChecker {
                     .await
                     .map_err(|err| GcpProvenanceError::TaskJoin(err.to_string()))?
             }
-            Err(_) => self.verify_provenance_with_registry_url_blocking_at(
-                &quote,
-                &registry_url,
-                Instant::now(),
-            ),
+            Err(_) => {
+                self.verify_ppid_with_registry_url_blocking_at(ppid, &registry_url, Instant::now())
+            }
         }
     }
 
@@ -117,6 +116,15 @@ impl GcpProvenanceChecker {
         now: Instant,
     ) -> Result<(), GcpProvenanceError> {
         let ppid = extract_ppid_from_quote(quote)?;
+        self.verify_ppid_with_registry_url_blocking_at(ppid, registry_url, now)
+    }
+
+    fn verify_ppid_with_registry_url_blocking_at(
+        &self,
+        ppid: [u8; GCP_PPID_BYTES],
+        registry_url: &str,
+        now: Instant,
+    ) -> Result<(), GcpProvenanceError> {
         let stale_entry = {
             let known_gcp_ppids = self
                 .known_gcp_ppids
@@ -369,7 +377,7 @@ mod tests {
         let checker = GcpProvenanceChecker::new();
 
         let task = tokio::spawn(async move {
-            checker.verify_provenance_with_registry_url(quote, format!("http://{addr}")).await
+            checker.verify_provenance_with_registry_url(&quote, format!("http://{addr}")).await
         });
         request_started.recv_timeout(Duration::from_secs(1)).unwrap();
 
