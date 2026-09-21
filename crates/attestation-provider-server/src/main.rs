@@ -35,7 +35,7 @@ struct Cli {
 enum CliCommand {
     Server {
         /// Socket address to listen on
-        #[arg(short, long, default_value = "0.0.0.0:0", env = "LISTEN_ADDR")]
+        #[arg(short, long, default_value = "127.0.0.1:0", env = "LISTEN_ADDR")]
         listen_addr: SocketAddr,
         /// Type of attestation to present (will attempt to detect if not
         /// given)
