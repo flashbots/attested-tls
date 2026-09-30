@@ -406,7 +406,7 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
- "tdx-attest 0.5.8",
+ "tdx-attest 0.6.0",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -874,8 +874,8 @@ dependencies = [
 
 [[package]]
 name = "cc-eventlog"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
  "digest",
@@ -891,17 +891,20 @@ dependencies = [
 
 [[package]]
 name = "cc-eventlog"
-version = "0.5.11"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
+version = "0.6.0"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4699c48ea3a7e568dff4f8792421299f27d50758#4699c48ea3a7e568dff4f8792421299f27d50758"
 dependencies = [
  "anyhow",
  "digest",
+ "dstack-types 0.6.0",
  "ez-hash",
  "fs-err",
  "hex",
+ "or-panic",
  "parity-scale-codec",
  "serde",
  "serde-human-bytes",
+ "serde_jcs",
  "serde_json",
  "sha2",
 ]
@@ -1575,7 +1578,7 @@ dependencies = [
  "anyhow",
  "cc-eventlog 0.5.11",
  "dcap-qvl 0.3.12",
- "dstack-types",
+ "dstack-types 0.5.11",
  "errify",
  "ez-hash",
  "fs-err",
@@ -1603,7 +1606,26 @@ dependencies = [
  "serde",
  "serde-human-bytes",
  "sha3",
- "size-parser",
+ "size-parser 0.5.11",
+]
+
+[[package]]
+name = "dstack-types"
+version = "0.6.0"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4699c48ea3a7e568dff4f8792421299f27d50758#4699c48ea3a7e568dff4f8792421299f27d50758"
+dependencies = [
+ "ciborium",
+ "hex",
+ "or-panic",
+ "parity-scale-codec",
+ "serde",
+ "serde-human-bytes",
+ "serde_jcs",
+ "serde_json",
+ "serde_with",
+ "sha2",
+ "sha3",
+ "size-parser 0.6.0",
 ]
 
 [[package]]
@@ -3629,7 +3651,7 @@ dependencies = [
  "cc-eventlog 0.5.11",
  "dcap-qvl 0.3.12",
  "dstack-attest",
- "dstack-types",
+ "dstack-types 0.5.11",
  "elliptic-curve",
  "errify",
  "ez-hash",
@@ -4143,6 +4165,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "ryu-js"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6518fc26bced4d53678a22d6e423e9d8716377def84545fe328236e3af070e7f"
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4350,6 +4378,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_jcs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3a60f3fda61525e439ef6d67422118f11e986566997d9021c56867ad814a0aa"
+dependencies = [
+ "ryu-js",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "serde_json"
 version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4550,6 +4589,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "size-parser"
+version = "0.6.0"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4699c48ea3a7e568dff4f8792421299f27d50758#4699c48ea3a7e568dff4f8792421299f27d50758"
+dependencies = [
+ "anyhow",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4704,11 +4753,11 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tdx-attest"
-version = "0.5.8"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4f602dddc0542cd34da031c90ac0b3a560f316ed#4f602dddc0542cd34da031c90ac0b3a560f316ed"
+version = "0.5.11"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
 dependencies = [
  "anyhow",
- "cc-eventlog 0.5.8",
+ "cc-eventlog 0.5.11",
  "fs-err",
  "hex",
  "libc",
@@ -4723,11 +4772,11 @@ dependencies = [
 
 [[package]]
 name = "tdx-attest"
-version = "0.5.11"
-source = "git+https://github.com/Dstack-TEE/dstack.git?rev=07d2cf6bd376a3c56f855aa47c8de003bb427e48#07d2cf6bd376a3c56f855aa47c8de003bb427e48"
+version = "0.6.0"
+source = "git+https://github.com/Dstack-TEE/dstack.git?rev=4699c48ea3a7e568dff4f8792421299f27d50758#4699c48ea3a7e568dff4f8792421299f27d50758"
 dependencies = [
  "anyhow",
- "cc-eventlog 0.5.11",
+ "cc-eventlog 0.6.0",
  "fs-err",
  "hex",
  "libc",
