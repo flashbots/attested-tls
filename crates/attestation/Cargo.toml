@@ -18,7 +18,7 @@ attest-measure = { git = "https://github.com/easy-tee/attest.git", rev = "12f1e2
 
 anyhow = "1.0.100"
 pem-rfc7468 = { version = "0.7.0", features = ["std"] }
-tdx-attest = { git = "https://github.com/Dstack-TEE/dstack.git", rev = "4f602dddc0542cd34da031c90ac0b3a560f316ed" }
+tdx-attest = { git = "https://github.com/Dstack-TEE/dstack.git", rev = "4699c48ea3a7e568dff4f8792421299f27d50758" }
 base64 = "0.22.1"
 hex = "0.4.3"
 http = "1.3.1"
