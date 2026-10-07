@@ -13,6 +13,7 @@ use x509_parser::prelude::*;
 
 use super::{
     AttestationDocument,
+    AzureVerifiedEvidence,
     MaaError,
     TpmAttest,
     ak_certificate::verify_ak_cert_with_azure_roots,
@@ -21,6 +22,7 @@ use super::{
 };
 use crate::{
     VerifiedAttestation,
+    VerifiedEvidence,
     dcap::{
         verify_dcap_attestation_with_given_timestamp,
         verify_dcap_attestation_with_timestamp_sync,
@@ -103,9 +105,9 @@ async fn verify_azure_attestation_with_given_timestamp(
         tpm_attestation,
     } = prepare_azure_attestation(input)?;
 
-    // Only the endorsements travel upward: this platform is judged on the
-    // vTPM PCRs, not the TD quote
-    let (dcap, _) = verify_dcap_attestation_with_given_timestamp(
+    // Retain the DCAP evidence and endorsements, but use vTPM PCRs for
+    // this platform's measurement policy.
+    let dcap = verify_dcap_attestation_with_given_timestamp(
         tdx_quote_bytes,
         expected_tdx_input_data,
         pccs,
@@ -117,16 +119,22 @@ async fn verify_azure_attestation_with_given_timestamp(
 
     // The vTPM leg fetches nothing — AK chain in the evidence, roots
     // compiled in — so it adds no endorsements of its own
-    let measurements = finish_azure_attestation_verification(
+    let quote = match dcap.evidence {
+        VerifiedEvidence::Dcap(quote) => quote,
+        VerifiedEvidence::Azure(_) => unreachable!("DCAP verification returns DCAP evidence"),
+    };
+    let (measurements, evidence) = finish_azure_attestation_verification(
         hcl_report,
         var_data_hash,
         tpm_attestation,
         expected_input_data,
         now,
+        quote,
     )?;
     Ok(VerifiedAttestation {
         measurements,
         expected_measurements: None,
+        evidence: VerifiedEvidence::Azure(evidence),
         endorsements: dcap.endorsements,
     })
 }
@@ -148,7 +156,7 @@ fn verify_azure_attestation_with_given_timestamp_sync(
         tpm_attestation,
     } = prepare_azure_attestation(input)?;
 
-    let (dcap, _) = verify_dcap_attestation_with_timestamp_sync(
+    let dcap = verify_dcap_attestation_with_timestamp_sync(
         tdx_quote_bytes,
         expected_tdx_input_data,
         pccs,
@@ -157,16 +165,22 @@ fn verify_azure_attestation_with_given_timestamp_sync(
         override_azure_outdated_tcb,
     )?;
 
-    let measurements = finish_azure_attestation_verification(
+    let quote = match dcap.evidence {
+        VerifiedEvidence::Dcap(quote) => quote,
+        VerifiedEvidence::Azure(_) => unreachable!("DCAP verification returns DCAP evidence"),
+    };
+    let (measurements, evidence) = finish_azure_attestation_verification(
         hcl_report,
         var_data_hash,
         tpm_attestation,
         expected_input_data,
         now,
+        quote,
     )?;
     Ok(VerifiedAttestation {
         measurements,
         expected_measurements: None,
+        evidence: VerifiedEvidence::Azure(evidence),
         endorsements: dcap.endorsements,
     })
 }
@@ -206,7 +220,8 @@ fn finish_azure_attestation_verification(
     tpm_attestation: TpmAttest,
     expected_input_data: [u8; 64],
     now: u64,
-) -> Result<MultiMeasurements, MaaError> {
+    quote: dcap_qvl::quote::Quote,
+) -> Result<(MultiMeasurements, AzureVerifiedEvidence), MaaError> {
     let hcl_ak_pub = hcl_report.ak_pub()?;
 
     // Get attestation key from runtime claims
@@ -273,7 +288,15 @@ fn finish_azure_attestation_verification(
         now,
     )?;
 
-    Ok(MultiMeasurements::from_indexed_pcrs(pcrs))
+    let ak_not_after = u64::try_from(ak_certificate.validity().not_after.timestamp()).unwrap_or(0);
+    Ok((
+        MultiMeasurements::from_indexed_pcrs(pcrs),
+        AzureVerifiedEvidence {
+            quote,
+            ak_not_after,
+            ak_intermediates: ak_intermediate_certificate_ders,
+        },
+    ))
 }
 
 /// Extract the measurements from the attestation, but do not verify
@@ -497,11 +520,7 @@ mod tests {
         let fixture_collateral: QuoteCollateralV3 =
             serde_saphyr::from_slice(collateral_bytes).unwrap();
 
-        let VerifiedAttestation {
-            measurements: async_measurements,
-            endorsements: async_endorsements,
-            ..
-        } = verify_azure_attestation_with_given_timestamp(
+        let async_verified = verify_azure_attestation_with_given_timestamp(
             attestation_json.clone(),
             [0; 64],
             Pccs::new(
@@ -515,11 +534,7 @@ mod tests {
         .await
         .unwrap();
 
-        let VerifiedAttestation {
-            measurements: sync_measurements,
-            endorsements: sync_endorsements,
-            ..
-        } = verify_azure_attestation_with_given_timestamp_sync(
+        let sync_verified = verify_azure_attestation_with_given_timestamp_sync(
             attestation_json,
             [0; 64],
             Pccs::new(
@@ -532,13 +547,59 @@ mod tests {
         )
         .unwrap();
 
+        let async_expiry = async_verified.cache_expires_at().unwrap();
+        let sync_expiry = sync_verified.cache_expires_at().unwrap();
+        let VerifiedAttestation {
+            measurements: async_measurements,
+            endorsements: async_endorsements,
+            ..
+        } = async_verified;
+        let VerifiedAttestation {
+            measurements: sync_measurements,
+            endorsements: sync_endorsements,
+            ..
+        } = sync_verified;
         assert_eq!(async_measurements, sync_measurements);
+        assert_eq!(async_expiry, sync_expiry);
+        assert!(now < async_expiry);
         // The bundle handed back is the one the DCAP leg consumed, which is
         // what makes archiving it provenance rather than a second copy, and
         // it arrives paired with the instant both legs were held to
         let expected = EndorsementSnapshot::dcap(fixture_collateral, now);
         assert_eq!(async_endorsements, expected);
         assert_eq!(sync_endorsements, expected);
+    }
+
+    #[tokio::test]
+    async fn expired_extra_ak_certificate_disables_caching_without_changing_trust() {
+        let mut document: AttestationDocument = serde_saphyr::from_slice(include_bytes!(
+            "../../test-assets/azure-tdx-with-ak-intermediates-1780922561.yaml"
+        ))
+        .unwrap();
+        let collateral: QuoteCollateralV3 = serde_saphyr::from_slice(include_bytes!(
+            "../../test-assets/azure-collateral-with-ak-intermediates-1780922561.yaml"
+        ))
+        .unwrap();
+        let now = 1_780_922_561;
+        let mut params = rcgen::CertificateParams::new(vec!["unused".into()]).unwrap();
+        params.not_before = ::time::OffsetDateTime::from_unix_timestamp(0).unwrap();
+        params.not_after = ::time::OffsetDateTime::from_unix_timestamp(1000).unwrap();
+        let certificate = params.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+        document.tpm_attestation.ak_intermediate_certificates_pem.push(certificate.pem());
+        let verified = verify_azure_attestation_with_given_timestamp(
+            serde_json::to_vec(&document).unwrap(),
+            [0; 64],
+            Pccs::new(
+                pccs::CollateralSource::IntelPcs { subscription_key: None },
+                pccs::CachePolicy::Passthrough,
+            ),
+            Some(collateral),
+            now,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verified.cache_expires_at().unwrap(), 1000);
     }
 
     #[tokio::test]

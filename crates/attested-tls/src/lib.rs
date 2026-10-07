@@ -468,7 +468,8 @@ pub struct AttestedCertificateVerifier {
     crypto_provider: Arc<CryptoProvider>,
     /// Configured for verifying attestations
     attestation_verifier: AttestationVerifier,
-    /// Report data of pre-trusted certificates with cache expiry time
+    /// Report data of verified certificates, cached until the earlier of
+    /// certificate expiry and the attestation's dependency deadlines.
     trusted_certs: Arc<RwLock<HashMap<[u8; 64], UnixTime>>>,
     /// Whether self-signed certificates should be accepted
     accept_self_signed_certs: bool,
@@ -667,7 +668,7 @@ impl AttestedCertificateVerifier {
             let trusted_certs = self.trusted_certs.read().map_err(|_| {
                 rustls::Error::General("Trusted certificate cache lock poisoned".into())
             })?;
-            if trusted_certs.get(&expected_input_data).is_some_and(|expiry| *expiry >= now) {
+            if trusted_certs.get(&expected_input_data).is_some_and(|expiry| now < *expiry) {
                 tracing::debug!("Skipping attestation verification for trusted certificate");
                 return Ok(());
             }
@@ -675,7 +676,8 @@ impl AttestedCertificateVerifier {
 
         let attestation = Self::extract_custom_attestation_from_cert(cert)?;
 
-        self.attestation_verifier
+        let verified = self
+            .attestation_verifier
             .verify_attestation_sync(attestation, expected_input_data)
             .map_err(|err| {
                 tracing::warn!(
@@ -684,14 +686,29 @@ impl AttestedCertificateVerifier {
                 InvalidCertificate(CertificateError::ApplicationVerificationFailure)
             })?;
 
+        // Bound reuse by the exact collateral/evidence used to verify this
+        // certificate. A background PCCS refresh cannot extend this
+        // verdict.
+        let expiry = if let Some(verified) = verified {
+            let deadline = verified.cache_expires_at().map_err(|err| {
+                tracing::warn!("Cannot determine attestation cache expiry: {err}");
+                InvalidCertificate(CertificateError::ApplicationVerificationFailure)
+            })?;
+            expiry.min(UnixTime::since_unix_epoch(Duration::from_secs(deadline)))
+        } else {
+            expiry
+        };
+
         let mut trusted_certs = self.trusted_certs.write().map_err(|_| {
             rustls::Error::General("Trusted certificate cache lock poisoned".into())
         })?;
 
         // Remove any expired entries
-        trusted_certs.retain(|_, cached_expiry| *cached_expiry >= now);
+        trusted_certs.retain(|_, cached_expiry| now < *cached_expiry);
         // Write trusted certificate details to cache
-        trusted_certs.insert(expected_input_data, expiry);
+        if now < expiry {
+            trusted_certs.insert(expected_input_data, expiry);
+        }
 
         Ok(())
     }
@@ -1735,6 +1752,100 @@ mod tests {
             UnixTime::now(),
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn attestation_deadline_limits_long_lived_certificates() {
+        install_test_crypto_provider();
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let resolver = AttestedCertificateResolver::build(
+            "foo",
+            AttestationGenerator::new(AttestationType::DcapTdx, None).unwrap(),
+        )
+        .with_crypto_provider(provider.clone())
+        .with_certificate_validity(Duration::from_secs(100 * 365 * 24 * 60 * 60))
+        .finish()
+        .unwrap();
+        let mut verifier = ready_mock_attested_verifier(None, provider).await;
+        let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
+        let parsed = AttestedCertificateVerifier::parse_x509_certificate(&cert).unwrap();
+        let (binding, cert_expiry) =
+            AttestedCertificateVerifier::cert_binding_data(&parsed).unwrap();
+        let evidence =
+            AttestedCertificateVerifier::extract_custom_attestation_from_cert(&parsed).unwrap();
+        let verified = verifier
+            .attestation_verifier
+            .verify_attestation_sync(evidence, binding)
+            .unwrap()
+            .unwrap();
+        let deadline =
+            UnixTime::since_unix_epoch(Duration::from_secs(verified.cache_expires_at().unwrap()));
+        assert!(deadline < cert_expiry);
+        let now = UnixTime::now();
+        let name = ServerName::try_from("foo").unwrap();
+        verify_server_cert_direct(&verifier, &cert, &name, now).unwrap();
+        assert_eq!(verifier.trusted_certs.read().unwrap().get(&binding), Some(&deadline));
+
+        // At the exact boundary, a fresh successful verification with the
+        // same deadline must not put the elapsed verdict back in the cache.
+        verify_server_cert_direct(&verifier, &cert, &name, deadline).unwrap();
+        assert!(!verifier.trusted_certs.read().unwrap().contains_key(&binding));
+
+        // Simulate an old verdict reaching its deadline while valid
+        // replacement collateral is available to a fresh verification.
+        verifier.trusted_certs.write().unwrap().insert(binding, now);
+        verify_client_cert_direct(&verifier, &cert, now).unwrap();
+        assert_eq!(verifier.trusted_certs.read().unwrap().get(&binding), Some(&deadline));
+
+        // A replacement PCCS bundle with invalid signatures must reject
+        // once the old verdict expires, for both server and client auth.
+        let bad_pcs = spawn_mock_pcs_server(MockPcsConfig {
+            tcb_next_update: "2999-01-01T00:00:00Z".into(),
+            ..MockPcsConfig::default()
+        })
+        .await
+        .unwrap();
+        let bad_verifier = AttestationVerifier::mock_with_pccs(bad_pcs.base_url.clone());
+        bad_verifier.ready().await.unwrap();
+        verifier.attestation_verifier = bad_verifier;
+        let before = UnixTime::since_unix_epoch(Duration::from_secs(deadline.as_secs() - 1));
+        verify_server_cert_direct(&verifier, &cert, &name, before).unwrap();
+        for at in
+            [deadline, UnixTime::since_unix_epoch(Duration::from_secs(deadline.as_secs() + 1))]
+        {
+            assert_eq!(
+                verify_server_cert_direct(&verifier, &cert, &name, at).unwrap_err(),
+                InvalidCertificate(CertificateError::ApplicationVerificationFailure)
+            );
+            assert_eq!(
+                verify_client_cert_direct(&verifier, &cert, at).unwrap_err(),
+                InvalidCertificate(CertificateError::ApplicationVerificationFailure)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn no_attestation_cache_uses_certificate_expiry() {
+        install_test_crypto_provider();
+        let provider: Arc<CryptoProvider> = aws_lc_rs::default_provider().into();
+        let resolver =
+            AttestedCertificateResolver::build("foo", AttestationGenerator::with_no_attestation())
+                .with_crypto_provider(provider.clone())
+                .finish()
+                .unwrap();
+        let verifier = AttestedCertificateVerifier::build(AttestationVerifier::expect_none())
+            .with_crypto_provider(provider)
+            .finish()
+            .unwrap();
+        let cert = resolver.state.certificate.read().unwrap().first().unwrap().clone();
+        let (binding, expiry) = AttestedCertificateVerifier::cert_binding_data(
+            &AttestedCertificateVerifier::parse_x509_certificate(&cert).unwrap(),
+        )
+        .unwrap();
+        verify_client_cert_direct(&verifier, &cert, UnixTime::now()).unwrap();
+        assert_eq!(verifier.trusted_certs.read().unwrap().get(&binding), Some(&expiry));
+        let after = UnixTime::since_unix_epoch(Duration::from_secs(expiry.as_secs() + 1));
+        assert!(verify_client_cert_direct(&verifier, &cert, after).is_err());
     }
 
     #[test]

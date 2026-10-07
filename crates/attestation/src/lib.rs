@@ -6,6 +6,7 @@
 // reads exists.
 #[cfg(feature = "azure-verifier")]
 pub mod azure;
+mod cache_expiry;
 pub mod dcap;
 mod gcp;
 pub mod measurements;
@@ -397,6 +398,9 @@ impl EndorsementSnapshot {
 /// [RFC 9334]: https://www.rfc-editor.org/rfc/rfc9334.html
 #[derive(Clone, Debug)]
 pub struct VerifiedAttestation {
+    /// Parsed evidence retained for inspection and optional expiry
+    /// calculation.
+    pub evidence: VerifiedEvidence,
     /// MRTD and RTMR0–3 from the quote on DCAP and GCP. On Azure the vTPM
     /// PCRs, which measure the guest boot rather than the launched TD and
     /// chain to the TD quote: its report data commits to the HCL var data
@@ -409,6 +413,47 @@ pub struct VerifiedAttestation {
     /// The half of a reproducible verdict that does not ride in the
     /// evidence
     pub endorsements: EndorsementSnapshot,
+}
+
+/// Platform-specific evidence retained after successful verification.
+/// DCAP and GCP both use the `Dcap` variant.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum VerifiedEvidence {
+    Dcap(dcap_qvl::quote::Quote),
+    #[cfg(feature = "azure-verifier")]
+    Azure(azure::AzureVerifiedEvidence),
+}
+
+impl VerifiedAttestation {
+    /// Computes the exclusive Unix-seconds deadline for reusing this
+    /// result. Parses retained collateral and certificates only when
+    /// called; the result is not memoized. An elapsed deadline permits
+    /// no caching, even if verification at `endorsements.at` succeeded.
+    ///
+    /// This excludes the local GCP provenance cache lifetime. Consumers
+    /// must also apply their own freshness limits and TLS certificate
+    /// expiry. Evidence and endorsements must remain as returned by
+    /// verification.
+    pub fn cache_expires_at(&self) -> Result<u64, dcap::DcapVerificationError> {
+        let collateral = self
+            .endorsements
+            .dcap
+            .as_ref()
+            .ok_or(dcap::DcapVerificationError::MissingCollateral)?;
+        match &self.evidence {
+            VerifiedEvidence::Dcap(quote) => cache_expiry::dcap_cache_expires_at(collateral, quote),
+            #[cfg(feature = "azure-verifier")]
+            VerifiedEvidence::Azure(evidence) => {
+                let mut expiry = cache_expiry::dcap_cache_expires_at(collateral, &evidence.quote)?
+                    .min(evidence.ak_not_after);
+                for certificate in &evidence.ak_intermediates {
+                    expiry = expiry.min(cache_expiry::certificate_not_after(certificate)?);
+                }
+                Ok(expiry)
+            }
+        }
+    }
 }
 
 /// Allows remote attestations to be verified
@@ -679,14 +724,22 @@ impl AttestationVerifier {
                     .attestation_evidence
                     .as_ref()
                     .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                let (verified, quote) = dcap::verify_dcap_attestation(
+                let verified = dcap::verify_dcap_attestation(
                     attestation_evidence.quote.clone(),
                     expected_input_data,
                     self.internal_pccs.clone(),
                 )
                 .await?;
                 if attestation_type == AttestationType::GcpTdx {
-                    self.gcp_provenance_checker.verify_provenance(quote).await?;
+                    match &verified.evidence {
+                        VerifiedEvidence::Dcap(quote) => {
+                            self.gcp_provenance_checker.verify_provenance(quote).await?;
+                        }
+                        #[cfg(feature = "azure-verifier")]
+                        VerifiedEvidence::Azure(_) => {
+                            unreachable!("DCAP verification returns DCAP evidence")
+                        }
+                    }
                 }
                 verified
             }
@@ -787,13 +840,21 @@ impl AttestationVerifier {
                     .ok_or(AttestationError::AttestationTypeNotAccepted)?;
                 let pccs = self.internal_pccs.clone();
 
-                let (verified, quote) = dcap::verify_dcap_attestation_sync(
+                let verified = dcap::verify_dcap_attestation_sync(
                     attestation_evidence.quote.clone(),
                     expected_input_data,
                     pccs,
                 )?;
                 if attestation_type == AttestationType::GcpTdx {
-                    self.gcp_provenance_checker.verify_provenance_sync(&quote)?;
+                    match &verified.evidence {
+                        VerifiedEvidence::Dcap(quote) => {
+                            self.gcp_provenance_checker.verify_provenance_sync(quote)?;
+                        }
+                        #[cfg(feature = "azure-verifier")]
+                        VerifiedEvidence::Azure(_) => {
+                            unreachable!("DCAP verification returns DCAP evidence")
+                        }
+                    }
                 }
                 verified
             }
@@ -1413,6 +1474,51 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[tokio::test]
+    async fn expiry_is_computed_from_retained_evidence() {
+        let policy =
+            MeasurementPolicy::from_json_bytes(br#"[{"attestation_type":"dcap-tdx"}]"#.to_vec())
+                .unwrap();
+        let verifier = AttestationVerifier::builder(policy)
+            .with_cache_policy(CachePolicy::Passthrough)
+            .build();
+        let input_data = [7u8; 64];
+        let message: AttestationExchangeMessage = AttestationEvidence {
+            quote: dcap::create_dcap_attestation(input_data).unwrap(),
+            platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
+        }
+        .into();
+        let mut verified =
+            verifier.verify_attestation(message.clone(), input_data).await.unwrap().unwrap();
+        let sync_verified = verifier.verify_attestation_sync(message, input_data).unwrap().unwrap();
+        match &verified.evidence {
+            VerifiedEvidence::Dcap(quote) => {
+                assert_eq!(dcap::get_quote_input_data(&quote.report), input_data)
+            }
+            #[cfg(feature = "azure-verifier")]
+            _ => panic!("expected retained DCAP quote"),
+        }
+        let expiry = verified.cache_expires_at().unwrap();
+        assert!(expiry > verified.endorsements.at);
+        assert_eq!(expiry, sync_verified.cache_expires_at().unwrap());
+        assert_eq!(verified.measurements, sync_verified.measurements);
+        assert_eq!(verified.endorsements.dcap, sync_verified.endorsements.dcap);
+
+        // Deliberately damage retained material to check that the method
+        // parses it on demand and returns errors rather than an
+        // eagerly stored date.
+        verified.endorsements.dcap.as_mut().unwrap().tcb_info_issuer_chain.clear();
+        assert!(matches!(
+            verified.cache_expires_at(),
+            Err(dcap::DcapVerificationError::EmptyCertificateChain)
+        ));
+        verified.endorsements.dcap = None;
+        assert!(matches!(
+            verified.cache_expires_at(),
+            Err(dcap::DcapVerificationError::MissingCollateral)
+        ));
     }
 
     #[tokio::test]

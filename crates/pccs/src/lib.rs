@@ -16,7 +16,6 @@ use dcap_qvl::{
     collateral::CollateralClient,
     configs::DefaultConfig,
     http::{HttpClient as DcapHttpClient, HttpResponse},
-    tcb_info::TcbInfo,
 };
 use reqwest::{
     Url,
@@ -694,18 +693,21 @@ async fn fetch_collateral(
     client.fetch_for_fmspc_without_pck_chain(&fmspc, ca, false).await.map_err(Into::into)
 }
 
-/// Extracts the earliest next update timestamp from collateral metadata
+/// Extracts the earliest next update timestamp from collateral metadata,
+/// in Unix seconds. This parses dates only; it does not verify signatures
+/// or check whether the collateral is currently valid.
 ///
 /// This returns the soonest timestamp from either:
 /// - The TCB
 /// - The Quoting enclave
 /// - The root CA certificate revocation list
 /// - The PCK certificate revocation list
-fn extract_next_update(collateral: &QuoteCollateralV3, now: i64) -> Result<i64, PccsError> {
-    let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).map_err(|e| {
-        PccsError::PccsCollateralParse(format!("Failed to parse TCB info JSON: {e}"))
-    })?;
-    let qe_identity: QeIdentityNextUpdate =
+pub fn collateral_next_update(collateral: &QuoteCollateralV3) -> Result<u64, PccsError> {
+    let tcb_info: CollateralNextUpdate =
+        serde_json::from_str(&collateral.tcb_info).map_err(|e| {
+            PccsError::PccsCollateralParse(format!("Failed to parse TCB info JSON: {e}"))
+        })?;
+    let qe_identity: CollateralNextUpdate =
         serde_json::from_str(&collateral.qe_identity).map_err(|e| {
             PccsError::PccsCollateralParse(format!("Failed to parse QE identity JSON: {e}"))
         })?;
@@ -718,16 +720,19 @@ fn extract_next_update(collateral: &QuoteCollateralV3, now: i64) -> Result<i64, 
     let next_update =
         tcb_next_update.min(qe_next_update).min(root_ca_crl_next_update).min(pck_crl_next_update);
 
+    u64::try_from(next_update).map_err(|_| {
+        PccsError::PccsCollateralParse("Collateral nextUpdate is before Unix epoch".into())
+    })
+}
+
+fn extract_next_update(collateral: &QuoteCollateralV3, now: i64) -> Result<i64, PccsError> {
+    let next_update = i64::try_from(collateral_next_update(collateral)?)
+        .map_err(|_| PccsError::TimeStampExceedsI64)?;
     if now >= next_update {
         return Err(PccsError::PccsCollateralExpired(format!(
-            "Collateral expired (tcb_next_update={}, qe_next_update={}, root_ca_crl_next_update={}, pck_crl_next_update={}, now={now})",
-            tcb_info.next_update,
-            qe_identity.next_update,
-            root_ca_crl_next_update,
-            pck_crl_next_update
+            "Collateral expired (next_update={next_update}, now={now})"
         )));
     }
-
     Ok(next_update)
 }
 
@@ -922,10 +927,10 @@ struct CacheEntry {
     refresh_task: Option<JoinHandle<()>>,
 }
 
-/// Minimal QE identity shape needed to read nextUpdate
+/// Minimal TCB info / QE identity shape needed to read nextUpdate
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct QeIdentityNextUpdate {
+struct CollateralNextUpdate {
     next_update: String,
 }
 
@@ -1015,7 +1020,8 @@ mod tests {
 
     fn mock_tdx_fmspc() -> String {
         let collateral = mock_collateral();
-        let tcb_info: TcbInfo = serde_json::from_str(&collateral.tcb_info).unwrap();
+        let tcb_info: dcap_qvl::tcb_info::TcbInfo =
+            serde_json::from_str(&collateral.tcb_info).unwrap();
         tcb_info.fmspc
     }
 
@@ -1261,6 +1267,63 @@ mod tests {
             .min(parse_crl_next_update("pck_crl.nextUpdate", &collateral.pck_crl).unwrap());
 
         assert_eq!(extract_next_update(&collateral, 0).unwrap(), expected);
+    }
+
+    #[test]
+    fn every_collateral_next_update_can_be_the_earliest() {
+        use rcgen::{
+            CertificateParams,
+            CertificateRevocationListParams,
+            Issuer,
+            KeyIdMethod,
+            KeyPair,
+        };
+
+        fn crl(expires_at: i64) -> Vec<u8> {
+            let issuer = Issuer::new(CertificateParams::default(), KeyPair::generate().unwrap());
+            CertificateRevocationListParams {
+                this_update: OffsetDateTime::from_unix_timestamp(0).unwrap(),
+                next_update: OffsetDateTime::from_unix_timestamp(expires_at).unwrap(),
+                crl_number: 1.into(),
+                issuing_distribution_point: None,
+                revoked_certs: vec![],
+                key_identifier_method: KeyIdMethod::Sha256,
+            }
+            .signed_by(&issuer)
+            .unwrap()
+            .der()
+            .to_vec()
+        }
+
+        for earliest in 0..4 {
+            let deadlines =
+                std::array::from_fn::<_, 4, _>(|i| if i == earliest { 1000 } else { 2000 });
+            let mut collateral = mock_collateral();
+            let mut tcb: serde_json::Value = serde_json::from_str(&collateral.tcb_info).unwrap();
+            tcb["nextUpdate"] = OffsetDateTime::from_unix_timestamp(deadlines[0])
+                .unwrap()
+                .format(&Rfc3339)
+                .unwrap()
+                .into();
+            collateral.tcb_info = tcb.to_string();
+            let mut qe: serde_json::Value = serde_json::from_str(&collateral.qe_identity).unwrap();
+            qe["nextUpdate"] = OffsetDateTime::from_unix_timestamp(deadlines[1])
+                .unwrap()
+                .format(&Rfc3339)
+                .unwrap()
+                .into();
+            collateral.qe_identity = qe.to_string();
+            collateral.root_ca_crl = crl(deadlines[2]);
+            collateral.pck_crl = crl(deadlines[3]);
+            assert_eq!(collateral_next_update(&collateral).unwrap(), 1000);
+            assert_eq!(extract_next_update(&collateral, 999).unwrap(), 1000);
+            assert!(matches!(
+                extract_next_update(&collateral, 1000),
+                Err(PccsError::PccsCollateralExpired(_))
+            ));
+            collateral.pck_crl.clear();
+            assert!(collateral_next_update(&collateral).is_err());
+        }
     }
 
     #[tokio::test]
