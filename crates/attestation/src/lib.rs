@@ -25,8 +25,13 @@ pub use attest_types::{AttestationEvidence, PlatformMetadata};
 /// Re-exported so callers can archive [EndorsementSnapshot::dcap] without
 /// depending on `dcap-qvl` directly
 pub use dcap_qvl::QuoteCollateralV3;
-/// The root Google signs its GCP firmware endorsements under
-pub use gcp::{GCE_CC_TCB_ROOT_DER, GCE_CC_TCB_ROOT_NAME};
+/// Google's endorsement of a GCP TDX quote's firmware
+pub use gcp::{
+    GCE_CC_TCB_ROOT_DER,
+    GCE_CC_TCB_ROOT_NAME,
+    GcpEndorsementError,
+    GcpFirmwareEndorsement,
+};
 use measurements::{ExpectedMeasurements, MultiMeasurements};
 /// Re-exported to allow encoding and decoding AttestationEvidence to or
 /// from bytes
@@ -39,7 +44,7 @@ use tokio::time::sleep;
 
 use crate::{
     dcap::DcapVerificationError,
-    gcp::{GcpFirmwareCache, GcpProvenanceChecker, GcpProvenanceError},
+    gcp::{GcpEndorsementChecker, GcpFirmwareCache, GcpProvenanceChecker, GcpProvenanceError},
     measurements::{MeasurementFormatError, MeasurementPolicy},
 };
 
@@ -521,6 +526,8 @@ pub struct AttestationVerifier {
     known_gcp_firmware: GcpFirmwareCache,
     /// Cached PPIDs that have a valid GCP host-registry document
     gcp_provenance_checker: GcpProvenanceChecker,
+    /// Google's endorsements of GCP firmware, one verified copy per MRTD
+    gcp_endorsement_checker: GcpEndorsementChecker,
     /// Dynamic measurement policy to re-fetch from file or URL
     dynamic_measurement_policy: Option<String>,
 }
@@ -565,6 +572,7 @@ impl AttestationVerifierBuilder {
             internal_pccs: Pccs::new(self.collateral_source, self.cache_policy),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
+            gcp_endorsement_checker: GcpEndorsementChecker::new(),
             dynamic_measurement_policy: self.dynamic_measurement_policy,
         };
 
@@ -656,6 +664,7 @@ impl AttestationVerifier {
             ),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
+            gcp_endorsement_checker: GcpEndorsementChecker::new(),
             dynamic_measurement_policy: None,
         }
     }
@@ -675,6 +684,7 @@ impl AttestationVerifier {
             ),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
+            gcp_endorsement_checker: GcpEndorsementChecker::new(),
             dynamic_measurement_policy: None,
         }
     }
@@ -697,6 +707,7 @@ impl AttestationVerifier {
             ),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
+            gcp_endorsement_checker: GcpEndorsementChecker::new(),
             dynamic_measurement_policy: None,
         }
     }
@@ -778,6 +789,12 @@ impl AttestationVerifier {
                 .await?;
                 if attestation_type == AttestationType::GcpTdx {
                     self.gcp_provenance_checker.verify_provenance(quote).await?;
+                    self.gcp_endorsement_checker
+                        .endorsement_for(
+                            dcap_mrtd(&verified.measurements)?,
+                            verified.endorsements.at,
+                        )
+                        .await?;
                 }
                 verified
             }
@@ -955,6 +972,10 @@ impl AttestationVerifier {
                 };
                 if attestation_type == AttestationType::GcpTdx {
                     self.gcp_provenance_checker.verify_provenance_sync(&quote)?;
+                    self.gcp_endorsement_checker.endorsement_for_sync(
+                        dcap_mrtd(&verified.measurements)?,
+                        verified.endorsements.at,
+                    )?;
                 }
                 verified
             }
@@ -1263,6 +1284,14 @@ pub fn mock_platform_metadata(
     })
 }
 
+/// The MRTD a DCAP quote reports
+fn dcap_mrtd(measurements: &MultiMeasurements) -> Result<[u8; 48], AttestationError> {
+    match measurements {
+        MultiMeasurements::Dcap(dcap) => Ok(dcap.mrtd),
+        _ => Err(AttestationError::AttestationTypeNotAccepted),
+    }
+}
+
 /// An error when generating or verifying an attestation
 #[derive(Error, Debug)]
 pub enum AttestationError {
@@ -1282,6 +1311,8 @@ pub enum AttestationError {
     DcapVerification(#[from] DcapVerificationError),
     #[error("GCP provenance: {0}")]
     GcpProvenance(#[from] GcpProvenanceError),
+    #[error("GCP firmware endorsement: {0}")]
+    GcpFirmwareEndorsement(#[from] GcpEndorsementError),
     #[error("Attestation type not supported")]
     AttestationTypeNotSupported,
     #[error("Attestation type not accepted")]

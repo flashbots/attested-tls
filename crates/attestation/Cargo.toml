@@ -28,6 +28,8 @@ ureq = "3.5.0"
 # GCP firmware endorsement verification
 x509-parser = { version = "0.18.0", features = ["verify"] }
 sha2 = "0.10"
+prost = "0.14"
+rsa = "0.9"
 
 mock-tdx = { workspace = true, optional = true }
 
