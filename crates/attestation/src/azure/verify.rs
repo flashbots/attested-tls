@@ -383,7 +383,7 @@ mod tests {
         let err = verify_azure_attestation_archived(
             input,
             [0; 64],
-            &EndorsementSnapshot { at: 0, dcap: None },
+            &EndorsementSnapshot { at: 0, dcap: None, gcp_firmware: None },
             false,
         )
         .unwrap_err();

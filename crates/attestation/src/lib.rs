@@ -25,7 +25,8 @@ pub use attest_types::{AttestationEvidence, PlatformMetadata};
 /// Re-exported so callers can archive [EndorsementSnapshot::dcap] without
 /// depending on `dcap-qvl` directly
 pub use dcap_qvl::QuoteCollateralV3;
-/// Google's endorsement of a GCP TDX quote's firmware
+/// Google's endorsement of a GCP TDX quote's firmware, recorded in the
+/// snapshot
 pub use gcp::{
     GCE_CC_TCB_ROOT_DER,
     GCE_CC_TCB_ROOT_NAME,
@@ -473,12 +474,22 @@ pub struct EndorsementSnapshot {
     /// evidence carried its own or the platform has no DCAP leg. The bundle
     /// consumed, not a second copy: a cache can refresh between two fetches
     pub dcap: Option<QuoteCollateralV3>,
+    /// `Some` when the verification required Google's endorsement of the
+    /// quote's firmware, which `gcp-tdx` evidence does; `None` elsewhere
+    pub gcp_firmware: Option<GcpFirmwareEndorsement>,
 }
 
 impl EndorsementSnapshot {
     /// A verification that fetched one DCAP collateral bundle
     pub fn dcap(collateral: QuoteCollateralV3, at: u64) -> Self {
-        Self { at, dcap: Some(collateral) }
+        Self { at, dcap: Some(collateral), gcp_firmware: None }
+    }
+
+    /// The same snapshot, also recording Google's endorsement of the
+    /// firmware
+    pub fn with_gcp_firmware(mut self, endorsement: GcpFirmwareEndorsement) -> Self {
+        self.gcp_firmware = Some(endorsement);
+        self
     }
 }
 
@@ -781,7 +792,7 @@ impl AttestationVerifier {
                     .attestation_evidence
                     .as_ref()
                     .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                let (verified, quote) = dcap::verify_dcap_attestation(
+                let (mut verified, quote) = dcap::verify_dcap_attestation(
                     attestation_evidence.quote.clone(),
                     expected_input_data,
                     self.internal_pccs.clone(),
@@ -789,12 +800,14 @@ impl AttestationVerifier {
                 .await?;
                 if attestation_type == AttestationType::GcpTdx {
                     self.gcp_provenance_checker.verify_provenance(quote).await?;
-                    self.gcp_endorsement_checker
+                    let endorsement = self
+                        .gcp_endorsement_checker
                         .endorsement_for(
                             dcap_mrtd(&verified.measurements)?,
                             verified.endorsements.at,
                         )
                         .await?;
+                    verified.endorsements.gcp_firmware = Some(endorsement);
                 }
                 verified
             }
@@ -958,7 +971,7 @@ impl AttestationVerifier {
                     .attestation_evidence
                     .as_ref()
                     .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                let (verified, quote) = match archived {
+                let (mut verified, quote) = match archived {
                     None => dcap::verify_dcap_attestation_sync(
                         attestation_evidence.quote.clone(),
                         expected_input_data,
@@ -972,10 +985,11 @@ impl AttestationVerifier {
                 };
                 if attestation_type == AttestationType::GcpTdx {
                     self.gcp_provenance_checker.verify_provenance_sync(&quote)?;
-                    self.gcp_endorsement_checker.endorsement_for_sync(
+                    let endorsement = self.gcp_endorsement_checker.endorsement_for_sync(
                         dcap_mrtd(&verified.measurements)?,
                         verified.endorsements.at,
                     )?;
+                    verified.endorsements.gcp_firmware = Some(endorsement);
                 }
                 verified
             }

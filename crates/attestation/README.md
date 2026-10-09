@@ -171,6 +171,18 @@ used, the quote will fail to verify. For special cases where outdated TCB
 should be allowed, a custom override function can be passed when verifying
 which may modify collateral before it is validated against the TCB.
 
+A `gcp-tdx` verification also establishes that the quote comes from Google's
+fleet and from firmware Google built. The PCK certificate's PPID must appear in
+Google's confidential-host registry, and the quote's MRTD must be named by the
+`VMLaunchEndorsement` Google publishes for it, signed under the
+`GCE-cc-tcb-root_1` certificate compiled in from
+[`assets/GCE-cc-tcb-root_1.crt`](assets/GCE-cc-tcb-root_1.crt) (published at
+`https://pki.goog/cloud_integrity/GCE-cc-tcb-root_1.crt`, SHA-256
+`e876bc6978bf4f3da445f98a0a82363c8c0bae5a1fc033c6df65846a6cb0f18c`). The
+endorsement is fetched once per MRTD, verified at the verification instant,
+recorded in the `EndorsementSnapshot`, and re-verified at that instant when
+archived evidence is replayed.
+
 ## Measurements File
 
 Accepted measurements for the remote party can be specified in a JSON file
