@@ -366,6 +366,8 @@ pub enum GcpEndorsementError {
     NoTdx,
     #[error("endorsement does not name MRTD {0}")]
     MrtdNotEndorsed(String),
+    #[error("archived snapshot carries no firmware endorsement")]
+    NotArchived,
     #[error("endorsement cache lock: {0}")]
     CacheLock(String),
     #[error("blocking task join: {0}")]

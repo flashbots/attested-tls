@@ -30,8 +30,9 @@ a node replaying a log whose state depended on that verdict, or a third party
 re-checking published evidence without trusting whoever verified it first. It
 says whether the evidence was valid when first verified, not whether the
 platform is trustworthy now: collateral that has since expired or been revoked
-still passes. GCP evidence is not supported: its provenance registry is
-unsigned and mutable, so a replay cannot reproduce that check.
+still passes. GCP evidence is re-checked against the firmware endorsement
+recorded in the snapshot, while the provenance lookup is skipped: Google's
+registry is unsigned and mutable, and the original verification consulted it.
 
 Matched expected measurements can be transported in an HTTP header using
 `ExpectedMeasurements::to_header_format` and reconstructed with
