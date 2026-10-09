@@ -25,6 +25,8 @@ pub use attest_types::{AttestationEvidence, PlatformMetadata};
 /// Re-exported so callers can archive [EndorsementSnapshot::dcap] without
 /// depending on `dcap-qvl` directly
 pub use dcap_qvl::QuoteCollateralV3;
+/// The root Google signs its GCP firmware endorsements under
+pub use gcp::{GCE_CC_TCB_ROOT_DER, GCE_CC_TCB_ROOT_NAME};
 use measurements::{ExpectedMeasurements, MultiMeasurements};
 /// Re-exported to allow encoding and decoding AttestationEvidence to or
 /// from bytes
