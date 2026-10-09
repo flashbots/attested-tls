@@ -137,10 +137,12 @@ fn verify_endorsement_under_root(
 }
 
 /// The chain is one hop. The leaf must name the pinned root as its issuer,
-/// carry the root's signature, be valid at `at` along with the root, and
-/// carry no critical extension this check does not understand. Google
-/// publishes no revocation source for these certificates, so none is
-/// consulted.
+/// be valid at `at` along with the root, carry no critical extension this
+/// check does not understand, and carry the root's signature. An extended
+/// key usage, if present, must allow any purpose or server authentication,
+/// the same rule Google's reference verifier applies through Go's default
+/// `cert.Verify` options. Google publishes no revocation source for these
+/// certificates, so none is consulted.
 fn verify_leaf_under_root(
     leaf: &X509Certificate<'_>,
     root: &X509Certificate<'_>,
@@ -152,15 +154,17 @@ fn verify_leaf_under_root(
     if !root.validity().is_valid_at(at) || !leaf.validity().is_valid_at(at) {
         return Err(GcpEndorsementError::CertNotValidAt);
     }
-    leaf.verify_signature(Some(root.public_key())).map_err(|_| GcpEndorsementError::CertChain)?;
     for extension in leaf.extensions() {
         match extension.parsed_extension() {
             ParsedExtension::KeyUsage(usage) if !usage.digital_signature() => {
                 return Err(GcpEndorsementError::CertKeyUsage);
             }
+            ParsedExtension::ExtendedKeyUsage(usage) if !(usage.any || usage.server_auth) => {
+                return Err(GcpEndorsementError::CertExtendedKeyUsage);
+            }
             ParsedExtension::KeyUsage(_) |
-            ParsedExtension::BasicConstraints(_) |
             ParsedExtension::ExtendedKeyUsage(_) |
+            ParsedExtension::BasicConstraints(_) |
             ParsedExtension::SubjectKeyIdentifier(_) |
             ParsedExtension::AuthorityKeyIdentifier(_) |
             ParsedExtension::SubjectAlternativeName(_) => {}
@@ -170,6 +174,7 @@ fn verify_leaf_under_root(
             _ => {}
         }
     }
+    leaf.verify_signature(Some(root.public_key())).map_err(|_| GcpEndorsementError::CertChain)?;
     Ok(())
 }
 
@@ -351,6 +356,8 @@ pub enum GcpEndorsementError {
     CertCriticalExtension(String),
     #[error("endorsement certificate is not for digital signatures")]
     CertKeyUsage,
+    #[error("endorsement certificate's extended key usage excludes this use")]
+    CertExtendedKeyUsage,
     #[error("endorsement public key: {0}")]
     Key(String),
     #[error("endorsement signature does not verify")]
@@ -460,8 +467,32 @@ mod tests {
         ));
     }
 
-    /// The leaf's issuer name and signature are both checked against the
-    /// root the verifier pins, not whichever root the leaf names
+    /// A leaf issued under Google's root name, signed by a key that is not
+    /// the root's, with the given extended key usages
+    fn leaf_under_googles_name(purposes: &[rcgen::ExtendedKeyUsagePurpose]) -> Vec<u8> {
+        let signer = rcgen::KeyPair::generate().unwrap();
+        let issuer = rcgen::Issuer::from_ca_cert_der(
+            &rustls::pki_types::CertificateDer::from(GCE_CC_TCB_ROOT_DER),
+            rcgen::KeyPair::generate().unwrap(),
+        )
+        .unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.not_before =
+            ::time::OffsetDateTime::from_unix_timestamp(AT as i64 - 86_400).unwrap();
+        params.not_after = ::time::OffsetDateTime::from_unix_timestamp(AT as i64 + 86_400).unwrap();
+        params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = purposes.to_vec();
+        params.signed_by(&signer, &issuer).unwrap().der().to_vec()
+    }
+
+    fn check_leaf(leaf_der: &[u8]) -> Result<(), GcpEndorsementError> {
+        let (_, root) = X509Certificate::from_der(GCE_CC_TCB_ROOT_DER).unwrap();
+        let (_, leaf) = X509Certificate::from_der(leaf_der).unwrap();
+        assert_eq!(leaf.issuer(), root.subject(), "the test leaf must carry the root's name");
+        verify_leaf_under_root(&leaf, &root, ASN1Time::from_timestamp(AT as i64).unwrap())
+    }
+
+    /// A leaf is rejected on its issuer name before anything else
     #[test]
     fn a_certificate_under_another_root_is_rejected() {
         let (_, other_root) = x509_parser::pem::parse_x509_pem(include_bytes!(
@@ -472,12 +503,43 @@ mod tests {
             verify_endorsement_under_root(ENDORSEMENT, &other_root.contents, mrtd(), AT),
             Err(GcpEndorsementError::CertChain)
         ));
-        let endorsement = VmLaunchEndorsement::decode(ENDORSEMENT).unwrap();
-        let golden = VmGoldenMeasurement::decode(&*endorsement.serialized_uefi_golden).unwrap();
+    }
+
+    /// Google's name on the leaf is not enough: the root's key must have
+    /// signed it
+    #[test]
+    fn a_leaf_with_the_roots_name_but_another_signer_is_rejected() {
         assert!(matches!(
-            verify_endorsement_under_root(ENDORSEMENT, &golden.cert, mrtd(), AT),
+            check_leaf(&leaf_under_googles_name(&[])),
             Err(GcpEndorsementError::CertChain)
         ));
+        assert!(matches!(
+            check_leaf(&leaf_under_googles_name(&[rcgen::ExtendedKeyUsagePurpose::ServerAuth])),
+            Err(GcpEndorsementError::CertChain)
+        ));
+        assert!(matches!(
+            check_leaf(&leaf_under_googles_name(&[rcgen::ExtendedKeyUsagePurpose::Any])),
+            Err(GcpEndorsementError::CertChain)
+        ));
+    }
+
+    /// An extended key usage that excludes this use is rejected before the
+    /// signature is looked at
+    #[test]
+    fn a_leaf_restricted_to_another_purpose_is_rejected() {
+        for purposes in [
+            vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth],
+            vec![rcgen::ExtendedKeyUsagePurpose::CodeSigning],
+            vec![
+                rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+                rcgen::ExtendedKeyUsagePurpose::EmailProtection,
+            ],
+        ] {
+            assert!(matches!(
+                check_leaf(&leaf_under_googles_name(&purposes)),
+                Err(GcpEndorsementError::CertExtendedKeyUsage)
+            ));
+        }
     }
 
     #[test]
