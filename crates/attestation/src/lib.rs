@@ -30,6 +30,7 @@ pub use dcap_qvl::QuoteCollateralV3;
 pub use gcp::{
     GCE_CC_TCB_ROOT_DER,
     GCE_CC_TCB_ROOT_NAME,
+    GcpEndorsementChecker,
     GcpEndorsementError,
     GcpFirmwareEndorsement,
 };
@@ -45,7 +46,7 @@ use tokio::time::sleep;
 
 use crate::{
     dcap::DcapVerificationError,
-    gcp::{GcpEndorsementChecker, GcpFirmwareCache, GcpProvenanceChecker, GcpProvenanceError},
+    gcp::{GcpFirmwareCache, GcpProvenanceChecker, GcpProvenanceError},
     measurements::{MeasurementFormatError, MeasurementPolicy},
 };
 
@@ -570,6 +571,9 @@ pub struct AttestationVerifierBuilder {
     dump_dcap_quotes: bool,
     /// Whether to override outdated TCB when on Azure
     override_azure_outdated_tcb: bool,
+    /// A cache of Google's firmware endorsements to share with other
+    /// verifiers
+    gcp_endorsement_checker: Option<GcpEndorsementChecker>,
 }
 
 impl AttestationVerifierBuilder {
@@ -583,12 +587,19 @@ impl AttestationVerifierBuilder {
             internal_pccs: Pccs::new(self.collateral_source, self.cache_policy),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
-            gcp_endorsement_checker: GcpEndorsementChecker::new(),
+            gcp_endorsement_checker: self.gcp_endorsement_checker.unwrap_or_default(),
             dynamic_measurement_policy: self.dynamic_measurement_policy,
         };
 
         verifier.spawn_dynamic_measurement_policy_refresh();
         verifier
+    }
+
+    /// Share one cache of Google's firmware endorsements between verifiers;
+    /// entries are keyed by MRTD and re-verified at every use
+    pub fn with_gcp_endorsement_checker(mut self, checker: GcpEndorsementChecker) -> Self {
+        self.gcp_endorsement_checker = Some(checker);
+        self
     }
 
     /// Whether to write quotes to files on disk
@@ -656,6 +667,7 @@ impl AttestationVerifier {
             cache_policy: CachePolicy::Passthrough,
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
+            gcp_endorsement_checker: None,
             dynamic_measurement_policy: None,
         }
     }

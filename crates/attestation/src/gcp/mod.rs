@@ -3,10 +3,10 @@ mod endorsement;
 mod firmware;
 mod provenance;
 
-pub(crate) use endorsement::GcpEndorsementChecker;
 pub use endorsement::{
     GCE_CC_TCB_ROOT_DER,
     GCE_CC_TCB_ROOT_NAME,
+    GcpEndorsementChecker,
     GcpEndorsementError,
     GcpFirmwareEndorsement,
 };

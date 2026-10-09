@@ -180,14 +180,16 @@ fn verify_leaf_under_root(
 
 /// Fetches and verifies Google's endorsement for an MRTD, keeping one
 /// verified copy per MRTD until it stops verifying
-#[derive(Clone, Debug)]
-pub(crate) struct GcpEndorsementChecker {
+#[derive(Clone, Debug, Default)]
+pub struct GcpEndorsementChecker {
     endorsements: Arc<RwLock<HashMap<[u8; 48], Arc<GcpFirmwareEndorsement>>>>,
 }
 
 impl GcpEndorsementChecker {
-    pub(crate) fn new() -> Self {
-        Self { endorsements: Default::default() }
+    /// An empty cache; clones share it, so one checker can serve many
+    /// verifiers
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Google's endorsement of `mrtd`, verified at `at` (Unix seconds); the
