@@ -53,6 +53,8 @@ const REFRESH_MARGIN_SECS: i64 = 300;
 const REFRESH_RETRY_SECS: u64 = 60;
 /// Timeout for PCCS HTTP requests.
 const PCCS_HTTP_TIMEOUT_SECS: u64 = 180;
+/// Fail promptly when a collateral service cannot be reached.
+const PCCS_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How many collateral fetches to perform concurrently during initial
 /// pre-warm
 const STARTUP_PREWARM_CONCURRENCY: usize = 8;
@@ -581,6 +583,7 @@ impl SharedReqwestHttp {
             subscription_key.as_ref().and_then(|_| Url::parse(base_url).ok());
         let authenticated_client = subscription_key.as_ref().map(|_| {
             reqwest::Client::builder()
+                .connect_timeout(PCCS_HTTP_CONNECT_TIMEOUT)
                 .redirect(Policy::custom(|attempt| {
                     let same_origin_redirect = attempt
                         .previous()
@@ -599,7 +602,10 @@ impl SharedReqwestHttp {
         });
 
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(PCCS_HTTP_CONNECT_TIMEOUT)
+                .build()
+                .expect("failed to build HTTP client"),
             authenticated_client,
             subscription_key_origin,
             subscription_key,

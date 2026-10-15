@@ -10,6 +10,8 @@ use dcap_qvl::{intel, quote::Quote};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::HTTP_CONNECT_TIMEOUT;
+
 /// Public registry of GCP Confidential VM TDX PPIDs
 const GCP_PROVENANCE_REGISTRY_URL: &str =
     "https://storage.googleapis.com/confidential-host-registry";
@@ -20,8 +22,8 @@ const GCP_PROVENANCE_DOCUMENT_MAX_BYTES: u64 = 16 * 1024;
 const GCP_PPID_BYTES: usize = 16;
 /// How long a cached PPID remains trusted before revalidation
 const GCP_PROVENANCE_CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// Overall timeout for fetching a provenance document (covers DNS, connect,
-/// TLS handshake and read)
+/// Overall timeout for fetching a provenance document. Blocking DNS
+/// resolution in ureq cannot be interrupted by this timeout.
 /// This matches the timeout in Google's Go provenance checker tool
 const GCP_PROVENANCE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -176,7 +178,10 @@ fn extract_ppid_from_quote(quote: &Quote) -> Result<[u8; GCP_PPID_BYTES], GcpPro
 
 /// Synchronously attempt to fetch provenance document
 fn fetch_provenance_document(url: &str) -> Result<String, GcpProvenanceError> {
-    let agent = ureq::AgentBuilder::new().timeout(GCP_PROVENANCE_FETCH_TIMEOUT).build();
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(HTTP_CONNECT_TIMEOUT)
+        .timeout(GCP_PROVENANCE_FETCH_TIMEOUT)
+        .build();
     let response = match agent.get(url).call() {
         Ok(response) => response,
         Err(ureq::Error::Status(status, _)) => {

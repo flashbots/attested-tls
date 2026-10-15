@@ -26,10 +26,13 @@ use tracing::warn;
 use crate::{
     AttestationError,
     AttestationType,
+    HTTP_CONNECT_TIMEOUT,
     dcap::DcapVerificationError,
     gcp::{GcpFirmwareCache, fetch_firmware},
     trusted_firmware::firmware_for_mrtd,
 };
+
+const MEASUREMENT_POLICY_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Represents the measurement register types in a TDX quote
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -556,6 +559,8 @@ impl MeasurementPolicy {
 
             let response = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                .timeout(MEASUREMENT_POLICY_FETCH_TIMEOUT)
                 .build()?
                 .get(file_or_url)
                 .send()
@@ -587,9 +592,10 @@ impl MeasurementPolicy {
 
             let response = ureq::AgentBuilder::new()
                 .redirects(0)
+                .timeout_connect(HTTP_CONNECT_TIMEOUT)
+                .timeout(MEASUREMENT_POLICY_FETCH_TIMEOUT)
                 .build()
                 .get(&file_or_url)
-                .timeout(Duration::from_secs(10))
                 .call()
                 .map_err(|error| MeasurementFormatError::Ureq(Box::new(error)))?;
             if (300..400).contains(&response.status()) {
@@ -2042,6 +2048,52 @@ mod tests {
         let policy = MeasurementPolicy::from_file_or_url(url).await.unwrap();
         server.join().unwrap();
         assert!(!policy.has_remote_attestation());
+    }
+
+    /// Send headers and a partial body, then wait for the client to close
+    /// the connection. This checks that the deadline covers body reads.
+    fn serve_stalled_policy_body() -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/measurements.json", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Also bound the fixture if a client loses its timeout.
+            stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+            let mut request = [0u8; 4096];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[")
+                .unwrap();
+            let _ = stream.read_to_end(&mut Vec::new());
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn policy_loader_times_out_on_stalled_body() {
+        let (url, server) = serve_stalled_policy_body();
+        let result =
+            tokio::time::timeout(Duration::from_secs(15), MeasurementPolicy::from_file_or_url(url))
+                .await
+                .expect("policy fetch exceeded its request timeout");
+        tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+        assert!(
+            matches!(result, Err(MeasurementFormatError::Reqwest(ref err)) if err.is_timeout()),
+            "expected a request timeout, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn sync_policy_loader_times_out_on_stalled_body() {
+        let (url, server) = serve_stalled_policy_body();
+        let result = MeasurementPolicy::from_file_or_url_sync(url);
+        server.join().unwrap();
+        assert!(
+            matches!(result, Err(MeasurementFormatError::Io(ref err)) if err.kind() == std::io::ErrorKind::TimedOut),
+            "expected a body read timeout, got {result:?}"
+        );
     }
 
     #[test]

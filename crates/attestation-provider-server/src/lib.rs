@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 pub use attestation::AttestationGenerator;
 use attestation::{AttestationError, AttestationExchangeMessage, AttestationVerifier};
@@ -51,7 +51,12 @@ pub async fn attestation_provider_client(
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let input_data = [0; 64];
-    let response = reqwest::get(format!("http://{server_addr}/attest/{}", hex::encode(input_data)))
+    let response = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(1))
+        .timeout(Duration::from_secs(1))
+        .build()?
+        .get(format!("http://{server_addr}/attest/{}", hex::encode(input_data)))
+        .send()
         .await?
         .bytes()
         .await?;

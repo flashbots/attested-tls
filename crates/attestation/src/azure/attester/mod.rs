@@ -22,6 +22,7 @@ use super::{
     tpm_quote::TpmQuote,
     unix_time_now_secs,
 };
+use crate::HTTP_CONNECT_TIMEOUT;
 
 /// Used in attestation type detection to check if we are on Azure
 const AZURE_METADATA_API: &str = "http://169.254.169.254/metadata/instance";
@@ -264,8 +265,11 @@ fn fetch_certificate_der(url: &str) -> Result<Vec<u8>, MaaError> {
         return Err(MaaError::UnsupportedAiaUrl { url: url.to_string() });
     }
 
-    let response = ureq::get(url)
+    let response = ureq::AgentBuilder::new()
+        .timeout_connect(HTTP_CONNECT_TIMEOUT)
         .timeout(Duration::from_secs(10))
+        .build()
+        .get(url)
         .call()
         .map_err(|err| MaaError::AiaFetch { url: url.to_string(), source: Box::new(err) })?;
 

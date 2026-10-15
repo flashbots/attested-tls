@@ -98,9 +98,13 @@ mod tests {
     async fn root_should_be_fresh() {
         install_test_crypto_provider();
 
-        let response = reqwest::get(
-            "http://www.microsoft.com/pkiops/certs/Microsoft%20RSA%20Devices%20Root%20CA%202021.crt",
-        )
+        let response = reqwest::Client::builder()
+            .connect_timeout(crate::HTTP_CONNECT_TIMEOUT)
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .get("http://www.microsoft.com/pkiops/certs/Microsoft%20RSA%20Devices%20Root%20CA%202021.crt")
+            .send()
         .await
         .unwrap();
         let ca_der = response.bytes().await.unwrap();
