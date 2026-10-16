@@ -73,13 +73,14 @@ pub(crate) enum GcpFirmwareCacheError {
 mod tests {
     use attest_measure::dcap::DcapFirmware;
     use attest_types::{AcpiHashes, DcapImageHashes};
-    use dcap_qvl::quote::Quote;
+    use dcap_qvl::{quote::Quote, verify::QuoteVerifier};
 
     use super::GcpFirmwareCache;
     use crate::{
+        EndorsementSnapshot,
         PlatformMetadata,
         VerifiedAttestation,
-        dcap::{get_quote_input_data, verify_dcap_attestation_with_given_timestamp},
+        dcap::{get_quote_input_data, verify_quote_archived},
         measurements::{ExpectedMeasurements, MeasurementPolicy, MeasurementRecord},
     };
 
@@ -140,8 +141,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_gcp_tdx_portable_policy_with_stored_collateral() {
+    #[test]
+    fn test_gcp_tdx_portable_policy_with_stored_collateral() {
         let attestation_bytes: &'static [u8] =
             include_bytes!("../../test-assets/gcp-tdx-1782809233226668671");
         let collateral_bytes: &'static [u8] =
@@ -156,20 +157,16 @@ mod tests {
 
         let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
         let firmware = serde_saphyr::from_slice(firmware_bytes).unwrap();
-        let (VerifiedAttestation { measurements, .. }, _) =
-            verify_dcap_attestation_with_given_timestamp(
-                attestation_bytes.to_vec(),
-                expected_input_data,
-                pccs::Pccs::new(
-                    pccs::CollateralSource::IntelPcs { subscription_key: None },
-                    pccs::CachePolicy::Passthrough,
-                ),
-                Some(collateral),
-                GCP_TDX_PORTABLE_FIXTURE_TIMESTAMP,
-                false,
-            )
-            .await
-            .unwrap();
+        // A real GCP quote, so it is checked against Intel's root whatever
+        // the build
+        let (VerifiedAttestation { measurements, .. }, _) = verify_quote_archived(
+            attestation_bytes.to_vec(),
+            expected_input_data,
+            &EndorsementSnapshot::dcap(collateral, GCP_TDX_PORTABLE_FIXTURE_TIMESTAMP),
+            false,
+            &QuoteVerifier::new_prod(),
+        )
+        .unwrap();
 
         let measurement_policy = MeasurementPolicy {
             accepted_measurements: vec![MeasurementRecord {

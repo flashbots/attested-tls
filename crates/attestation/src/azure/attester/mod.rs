@@ -20,7 +20,6 @@ use super::{
     ak_certificate::verify_ak_cert_with_azure_roots,
     ensure_azure_attestation_payload_size,
     tpm_quote::TpmQuote,
-    unix_time_now_secs,
 };
 
 /// Used in attestation type detection to check if we are on Azure
@@ -36,6 +35,10 @@ const TPM_AK_CERT_IDX: u32 = 0x1C101D0;
 /// Defined by RFC 5280 as `{ id-ad 2 }`, where `id-ad` is
 /// `1.3.6.1.5.5.7.48`. https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.2.1
 const AIA_CA_ISSUERS_ACCESS_METHOD_OID: &str = "1.3.6.1.5.5.7.48.2";
+
+fn unix_time_now_secs() -> Result<u64, MaaError> {
+    Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs())
+}
 
 /// Generate a TDX attestation on Azure.
 ///

@@ -1,6 +1,21 @@
 //! Data Center Attestation Primitives (DCAP) evidence generation and
 //! verification
 //!
+//! Three entry points, one per situation a relying party is in:
+//!
+//! - [verify_dcap_attestation]: a live handshake. Fetches collateral and
+//!   judges freshness at the wall clock.
+//! - [verify_dcap_attestation_sync]: a live handshake in a callback that
+//!   cannot await, such as a rustls verifier. Reads only the PCCS cache.
+//! - [verify_dcap_attestation_archived]: reproduces a past verdict, for a
+//!   relying party that must reach the same answer later, such as a node
+//!   replaying a log whose state depended on that verdict, or a third party
+//!   re-checking published evidence without trusting whoever verified it
+//!   first. Checks the [EndorsementSnapshot] the original verification
+//!   reported, at its instant, and fetches nothing. It says whether the
+//!   evidence was valid then, not whether the platform is trustworthy now:
+//!   collateral that has since expired or been revoked still passes.
+//!
 //! Every verify function returns the parsed [Quote] beside the
 //! [VerifiedAttestation]: verification parses it anyway, and the GCP
 //! provenance check needs the PPID from its PCK leaf. Other callers drop
@@ -10,6 +25,7 @@ use dcap_qvl::{
     intel::{quote_ca, quote_fmspc},
     quote::{Quote, Report},
     tcb_info::TcbInfo,
+    verify::QuoteVerifier,
 };
 #[cfg(any(test, feature = "mock"))]
 use mock_tdx::generate_mock_tdx_quote;
@@ -43,17 +59,7 @@ pub async fn verify_dcap_attestation(
     expected_input_data: [u8; 64],
     pccs: Pccs,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    let override_azure_outdated_tcb = false;
-    verify_dcap_attestation_with_given_timestamp(
-        input,
-        expected_input_data,
-        pccs,
-        None,
-        now,
-        override_azure_outdated_tcb,
-    )
-    .await
+    verify_quote(input, expected_input_data, pccs, false, &QuoteVerifier::new_prod()).await
 }
 
 /// Synchronous version - verify a DCAP TDX quote
@@ -61,8 +67,7 @@ pub async fn verify_dcap_attestation(
 /// This relies on having DCAP collateral already present in the cache
 ///
 /// [`CachePolicy::Passthrough`](pccs::CachePolicy::Passthrough) is not
-/// supported because
-/// fetching collateral requires asynchronous I/O.
+/// supported because fetching collateral requires asynchronous I/O.
 ///
 /// If possible, prefer the async version
 #[cfg(not(any(test, feature = "mock")))]
@@ -71,98 +76,184 @@ pub fn verify_dcap_attestation_sync(
     expected_input_data: [u8; 64],
     pccs: Pccs,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    let override_azure_outdated_tcb = false;
-    verify_dcap_attestation_with_timestamp_sync(
+    verify_quote_sync(input, expected_input_data, pccs, false, &QuoteVerifier::new_prod())
+}
+
+/// Re-verify a DCAP TDX quote against the endorsements a previous
+/// verification reported
+///
+/// Reproduces a past verdict rather than judging the platform now; see
+/// [crate::dcap] for when that is useful. Nothing is fetched, and a
+/// snapshot with no DCAP bundle is refused.
+#[cfg(not(any(test, feature = "mock")))]
+pub fn verify_dcap_attestation_archived(
+    input: Vec<u8>,
+    expected_input_data: [u8; 64],
+    endorsements: &EndorsementSnapshot,
+) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
+    verify_quote_archived(
         input,
         expected_input_data,
-        pccs,
-        None,
-        now,
-        override_azure_outdated_tcb,
+        endorsements,
+        false,
+        &QuoteVerifier::new_prod(),
     )
 }
 
-/// Verify a DCAP TDX quote, providing a timestamp and an optional
-/// pre-fetched collateral
+/// Verify a quote minted by [mock_tdx], which chains to the mock root CA
 ///
-/// This relies on having DCAP collateral already present in the cache
-///
-/// [`CachePolicy::Passthrough`](pccs::CachePolicy::Passthrough) is not
-/// supported unless `collateral` is provided.
-///
-/// If possible, prefer the async version
-pub fn verify_dcap_attestation_with_timestamp_sync(
+/// With a passthrough PCCS this verifies against the embedded mock
+/// collateral, which is what lets a mock build run with no network at all.
+#[cfg(any(test, feature = "mock"))]
+pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
     pccs: Pccs,
-    collateral: Option<QuoteCollateralV3>,
-    now: u64,
-    override_azure_outdated_tcb: bool,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
-    let quote = Quote::parse(&input)?;
+    if pccs.is_passthrough() {
+        return verify_quote_archived(
+            input,
+            expected_input_data,
+            &mock_endorsements_now()?,
+            false,
+            &mock_tdx::mock_dcap_verifier(),
+        );
+    }
+    verify_quote(input, expected_input_data, pccs, false, &mock_tdx::mock_dcap_verifier()).await
+}
 
+/// Synchronous version - verify a quote minted by [mock_tdx]
+#[cfg(any(test, feature = "mock"))]
+pub fn verify_dcap_attestation_sync(
+    input: Vec<u8>,
+    expected_input_data: [u8; 64],
+    pccs: Pccs,
+) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
+    if pccs.is_passthrough() {
+        return verify_quote_archived(
+            input,
+            expected_input_data,
+            &mock_endorsements_now()?,
+            false,
+            &mock_tdx::mock_dcap_verifier(),
+        );
+    }
+    verify_quote_sync(input, expected_input_data, pccs, false, &mock_tdx::mock_dcap_verifier())
+}
+
+/// Re-verify a quote minted by [mock_tdx] against a reported snapshot
+#[cfg(any(test, feature = "mock"))]
+pub fn verify_dcap_attestation_archived(
+    input: Vec<u8>,
+    expected_input_data: [u8; 64],
+    endorsements: &EndorsementSnapshot,
+) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
+    verify_quote_archived(
+        input,
+        expected_input_data,
+        endorsements,
+        false,
+        &mock_tdx::mock_dcap_verifier(),
+    )
+}
+
+/// The embedded mock collateral, held to the wall clock
+#[cfg(any(test, feature = "mock"))]
+fn mock_endorsements_now() -> Result<EndorsementSnapshot, DcapVerificationError> {
+    Ok(EndorsementSnapshot::dcap(mock_tdx::mock_collateral(), unix_time_now_secs()?))
+}
+
+fn unix_time_now_secs() -> Result<u64, DcapVerificationError> {
+    Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs())
+}
+
+/// Fetch collateral through the PCCS and verify at the wall clock
+pub(crate) async fn verify_quote(
+    raw_quote: Vec<u8>,
+    expected_input_data: [u8; 64],
+    pccs: Pccs,
+    override_azure_outdated_tcb: bool,
+    verifier: &QuoteVerifier,
+) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
+    let now = unix_time_now_secs()?;
+    let quote = Quote::parse(&raw_quote)?;
     let ca = quote_ca(&quote)?.as_id_str();
     let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
 
-    let collateral = if let Some(given_collateral) = collateral {
-        given_collateral
-    } else {
-        pccs.get_collateral_sync(fmspc.clone(), ca, now)?
-    };
+    let (collateral, _is_fresh) = pccs.get_collateral(fmspc, ca, now).await?;
 
-    verify_dcap_attestation_with_collateral_and_timestamp(
-        input,
+    verify_quote_with_collateral(
+        raw_quote,
         quote,
         expected_input_data,
         collateral,
         now,
         override_azure_outdated_tcb,
+        verifier,
     )
 }
 
-/// Allows the timestamp to be given, making it possible to test with
-/// existing attestations
+/// [verify_quote], for a caller with no async runtime
 ///
-/// If collateral is given, it is used instead of contacting PCCS (used in
-/// tests)
-pub async fn verify_dcap_attestation_with_given_timestamp(
-    input: Vec<u8>,
+/// The collateral has to be in the PCCS cache already.
+pub(crate) fn verify_quote_sync(
+    raw_quote: Vec<u8>,
     expected_input_data: [u8; 64],
     pccs: Pccs,
-    collateral: Option<QuoteCollateralV3>,
-    now: u64,
     override_azure_outdated_tcb: bool,
+    verifier: &QuoteVerifier,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
-    let quote = Quote::parse(&input)?;
-
+    let now = unix_time_now_secs()?;
+    let quote = Quote::parse(&raw_quote)?;
     let ca = quote_ca(&quote)?.as_id_str();
     let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
 
-    let collateral = if let Some(given_collateral) = collateral {
-        given_collateral
-    } else {
-        let (collateral, _is_fresh) = pccs.get_collateral(fmspc.clone(), ca, now).await?;
-        collateral
-    };
+    let collateral = pccs.get_collateral_sync(fmspc, ca, now)?;
 
-    verify_dcap_attestation_with_collateral_and_timestamp(
-        input,
+    verify_quote_with_collateral(
+        raw_quote,
         quote,
         expected_input_data,
         collateral,
         now,
         override_azure_outdated_tcb,
+        verifier,
     )
 }
 
-fn verify_dcap_attestation_with_collateral_and_timestamp(
+/// Verify against a reported snapshot: its bundle, at its instant, with
+/// nothing fetched
+pub(crate) fn verify_quote_archived(
+    raw_quote: Vec<u8>,
+    expected_input_data: [u8; 64],
+    endorsements: &EndorsementSnapshot,
+    override_azure_outdated_tcb: bool,
+    verifier: &QuoteVerifier,
+) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
+    let collateral =
+        endorsements.dcap.clone().ok_or(DcapVerificationError::ArchivedWithoutDcapCollateral)?;
+    let quote = Quote::parse(&raw_quote)?;
+
+    verify_quote_with_collateral(
+        raw_quote,
+        quote,
+        expected_input_data,
+        collateral,
+        endorsements.at,
+        override_azure_outdated_tcb,
+        verifier,
+    )
+}
+
+/// Verify a quote against collateral already in hand, at a given instant
+fn verify_quote_with_collateral(
     raw_quote: Vec<u8>,
     quote: Quote,
     expected_input_data: [u8; 64],
     collateral: QuoteCollateralV3,
     now: u64,
     override_azure_outdated_tcb: bool,
+    verifier: &QuoteVerifier,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
     tracing::info!("Verifying DCAP attestation: {quote:?}");
 
@@ -186,7 +277,7 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
         |tcb_info: TcbInfo| tcb_info
     };
 
-    let verified_report = dcap_qvl::verify::dangerous_verify_with_tcb_override(
+    let verified_report = verifier.dangerous_verify_with_tcb_override(
         &raw_quote,
         &collateral,
         now,
@@ -208,75 +299,6 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
         return Err(DcapVerificationError::InputMismatch);
     }
 
-    Ok((
-        VerifiedAttestation {
-            measurements,
-            expected_measurements: None,
-            endorsements: EndorsementSnapshot::dcap(collateral, now),
-        },
-        quote,
-    ))
-}
-
-#[cfg(any(test, feature = "mock"))]
-pub async fn verify_dcap_attestation(
-    input: Vec<u8>,
-    expected_input_data: [u8; 64],
-    pccs: Pccs,
-) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
-    let quote = Quote::parse(&input)?;
-    let ca = quote_ca(&quote)?.as_id_str();
-    let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-
-    let collateral = if pccs.is_passthrough() {
-        mock_tdx::mock_collateral()
-    } else {
-        let (collateral, _is_fresh) = pccs.get_collateral(fmspc, ca, now).await?;
-        collateral
-    };
-    let verifier = mock_tdx::mock_dcap_verifier();
-    verifier.verify(&input, &collateral, now)?;
-
-    let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
-    if get_quote_input_data(&quote.report) != expected_input_data {
-        return Err(DcapVerificationError::InputMismatch);
-    }
-
-    Ok((
-        VerifiedAttestation {
-            measurements,
-            expected_measurements: None,
-            endorsements: EndorsementSnapshot::dcap(collateral, now),
-        },
-        quote,
-    ))
-}
-
-#[cfg(any(test, feature = "mock"))]
-pub fn verify_dcap_attestation_sync(
-    input: Vec<u8>,
-    expected_input_data: [u8; 64],
-    pccs: Pccs,
-) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
-    let quote = Quote::parse(&input)?;
-    let ca = quote_ca(&quote)?.as_id_str();
-    let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-
-    let collateral = if pccs.is_passthrough() {
-        mock_tdx::mock_collateral()
-    } else {
-        pccs.get_collateral_sync(fmspc, ca, now)?
-    };
-
-    let verifier = mock_tdx::mock_dcap_verifier();
-    verifier.verify(&input, &collateral, now)?;
-
-    let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
-    if get_quote_input_data(&quote.report) != expected_input_data {
-        return Err(DcapVerificationError::InputMismatch);
-    }
     Ok((
         VerifiedAttestation {
             measurements,
@@ -323,6 +345,8 @@ pub enum DcapVerificationError {
     Pccs(#[from] PccsError),
     #[error("Timestamp exceeds i64 range")]
     TimeStampExceedsI64,
+    #[error("Archived snapshot carries no DCAP collateral to replay the quote against")]
+    ArchivedWithoutDcapCollateral,
 }
 
 #[cfg(test)]
@@ -332,8 +356,8 @@ mod tests {
     use super::*;
     use crate::measurements::MeasurementPolicy;
 
-    #[tokio::test]
-    async fn test_dcap_verify() {
+    #[test]
+    fn test_dcap_verify() {
         let attestation_bytes: &'static [u8] =
             include_bytes!("../test-assets/dcap-tdx-1766059550570652607");
 
@@ -364,63 +388,44 @@ mod tests {
         let fixture_collateral: QuoteCollateralV3 =
             serde_saphyr::from_slice(collateral_bytes).unwrap();
 
-        let (VerifiedAttestation { measurements: async_measurements, endorsements, .. }, _) =
-            verify_dcap_attestation_with_given_timestamp(
-                attestation_bytes.to_vec(),
-                [
-                    116, 39, 106, 100, 143, 31, 212, 145, 244, 116, 162, 213, 44, 114, 216, 80,
-                    227, 118, 129, 87, 180, 62, 194, 151, 169, 145, 116, 130, 189, 119, 39, 139,
-                    161, 136, 37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85,
-                    245, 114, 33, 173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
-                ],
-                Pccs::new(
-                    CollateralSource::IntelPcs { subscription_key: None },
-                    CachePolicy::Passthrough,
-                ),
-                Some(fixture_collateral.clone()),
-                now,
-                false,
-            )
-            .await
-            .unwrap();
+        // A real Intel quote, which the public entry point would check
+        // against the mock root under `test`
+        let (VerifiedAttestation { measurements, endorsements, .. }, _) = verify_quote_archived(
+            attestation_bytes.to_vec(),
+            [
+                116, 39, 106, 100, 143, 31, 212, 145, 244, 116, 162, 213, 44, 114, 216, 80, 227,
+                118, 129, 87, 180, 62, 194, 151, 169, 145, 116, 130, 189, 119, 39, 139, 161, 136,
+                37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85, 245, 114, 33,
+                173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
+            ],
+            &EndorsementSnapshot::dcap(fixture_collateral.clone(), now),
+            false,
+            &QuoteVerifier::new_prod(),
+        )
+        .unwrap();
 
-        let (VerifiedAttestation { measurements: sync_measurements, .. }, _) =
-            verify_dcap_attestation_with_timestamp_sync(
-                attestation_bytes.to_vec(),
-                [
-                    116, 39, 106, 100, 143, 31, 212, 145, 244, 116, 162, 213, 44, 114, 216, 80,
-                    227, 118, 129, 87, 180, 62, 194, 151, 169, 145, 116, 130, 189, 119, 39, 139,
-                    161, 136, 37, 136, 57, 29, 25, 86, 182, 246, 70, 106, 216, 184, 220, 205, 85,
-                    245, 114, 33, 173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
-                ],
-                Pccs::new(
-                    CollateralSource::IntelPcs { subscription_key: None },
-                    CachePolicy::OnDemand,
-                ),
-                Some(fixture_collateral.clone()),
-                now,
-                false,
-            )
-            .unwrap();
-
-        assert_eq!(async_measurements, sync_measurements);
-        // A caller archiving provenance gets back the bundle the
-        // verification consumed, not a second copy of it
-        assert_eq!(endorsements.dcap, Some(fixture_collateral));
-        // ... and the instant it was held to, which is the other half of
-        // what makes the verification reproducible
-        assert_eq!(endorsements.at, now);
+        // The snapshot handed back is the one the verification ran against
+        assert_eq!(endorsements, EndorsementSnapshot::dcap(fixture_collateral, now));
         let platform_metadata =
             crate::mock_platform_metadata(crate::AttestationType::DcapTdx).unwrap();
-        measurement_policy
-            .check_measurement(&async_measurements, Some(&platform_metadata))
-            .unwrap();
+        measurement_policy.check_measurement(&measurements, Some(&platform_metadata)).unwrap();
+    }
+
+    /// An archived snapshot without a bundle is refused, not completed by a
+    /// fetch
+    #[test]
+    fn archived_without_collateral_is_refused() {
+        let endorsements = EndorsementSnapshot { at: 0, dcap: None };
+
+        let err = verify_dcap_attestation_archived(Vec::new(), [0; 64], &endorsements).unwrap_err();
+
+        assert!(matches!(err, DcapVerificationError::ArchivedWithoutDcapCollateral), "{err:?}");
     }
 
     // This specifically tests a quote which has outdated TCB level from
     // Azure
-    #[tokio::test]
-    async fn test_dcap_verify_azure_override() {
+    #[test]
+    fn test_dcap_verify_azure_override() {
         let attestation_bytes: &'static [u8] =
             include_bytes!("../test-assets/azure_failed_dcap_quote_10.bin");
 
@@ -433,22 +438,17 @@ mod tests {
 
         let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
 
-        verify_dcap_attestation_with_given_timestamp(
+        verify_quote_archived(
             attestation_bytes.to_vec(),
             [
                 210, 20, 43, 100, 53, 152, 235, 95, 174, 43, 200, 82, 157, 215, 154, 85, 139, 41,
                 248, 104, 204, 187, 101, 49, 203, 40, 218, 185, 220, 228, 119, 40, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ],
-            Pccs::new(
-                CollateralSource::IntelPcs { subscription_key: None },
-                CachePolicy::Passthrough,
-            ),
-            Some(collateral),
-            now,
+            &EndorsementSnapshot::dcap(collateral, now),
             true,
+            &QuoteVerifier::new_prod(),
         )
-        .await
         .unwrap();
     }
 
