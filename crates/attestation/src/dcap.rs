@@ -5,11 +5,12 @@
 //! [VerifiedAttestation]: verification parses it anyway, and the GCP
 //! provenance check needs the PPID from its PCK leaf. Other callers drop
 //! it.
+#[cfg(feature = "azure-verifier")]
+use dcap_qvl::tcb_info::TcbInfo;
 use dcap_qvl::{
     QuoteCollateralV3,
     intel::{quote_ca, quote_fmspc},
     quote::{Quote, Report},
-    tcb_info::TcbInfo,
 };
 #[cfg(any(test, feature = "mock"))]
 use mock_tdx::generate_mock_tdx_quote;
@@ -27,6 +28,7 @@ use crate::{
 
 /// FMSPC with which to override TCB level checks on Azure (not used for GCP
 /// or other platforms)
+#[cfg(feature = "azure-verifier")]
 const AZURE_BAD_FMSPC: &str = "90C06F000000";
 
 /// Generate a TDX quote
@@ -92,6 +94,8 @@ pub fn verify_dcap_attestation_sync(
 /// supported unless `collateral` is provided.
 ///
 /// If possible, prefer the async version
+///
+/// `override_azure_outdated_tcb` has no effect without `azure-verifier`.
 pub fn verify_dcap_attestation_with_timestamp_sync(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
@@ -126,6 +130,8 @@ pub fn verify_dcap_attestation_with_timestamp_sync(
 ///
 /// If collateral is given, it is used instead of contacting PCCS (used in
 /// tests)
+///
+/// `override_azure_outdated_tcb` has no effect without `azure-verifier`.
 pub async fn verify_dcap_attestation_with_given_timestamp(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
@@ -168,30 +174,34 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
 
     let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
 
-    // Override outdated TCB only if we are on Azure and the FMSPC is known
-    // to be outdated
-    let override_outdated_tcb = if override_azure_outdated_tcb {
-        |mut tcb_info: TcbInfo| {
-            // This is a workaround for a known outdated FMSPC used by azure
-            if tcb_info.fmspc == AZURE_BAD_FMSPC {
-                for tcb_level in &mut tcb_info.tcb_levels {
-                    if tcb_level.tcb.sgx_components[7].svn > 3 {
-                        tcb_level.tcb.sgx_components[7].svn = 3
+    #[cfg(feature = "azure-verifier")]
+    let verified_report = if override_azure_outdated_tcb {
+        dcap_qvl::verify::dangerous_verify_with_tcb_override(
+            &raw_quote,
+            &collateral,
+            now,
+            |mut tcb_info: TcbInfo| {
+                // Work around a known outdated Azure FMSPC only when
+                // explicitly enabled.
+                if tcb_info.fmspc == AZURE_BAD_FMSPC {
+                    for tcb_level in &mut tcb_info.tcb_levels {
+                        if tcb_level.tcb.sgx_components[7].svn > 3 {
+                            tcb_level.tcb.sgx_components[7].svn = 3
+                        }
                     }
                 }
-            }
-            tcb_info
-        }
+                tcb_info
+            },
+        )?
     } else {
-        |tcb_info: TcbInfo| tcb_info
+        dcap_qvl::verify::verify(&raw_quote, &collateral, now)?
     };
 
-    let verified_report = dcap_qvl::verify::dangerous_verify_with_tcb_override(
-        &raw_quote,
-        &collateral,
-        now,
-        override_outdated_tcb,
-    )?;
+    #[cfg(not(feature = "azure-verifier"))]
+    let verified_report = {
+        let _ = override_azure_outdated_tcb;
+        dcap_qvl::verify::verify(&raw_quote, &collateral, now)?
+    };
 
     if verified_report.status != "UpToDate" {
         tracing::warn!(
@@ -433,7 +443,7 @@ mod tests {
 
         let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
 
-        verify_dcap_attestation_with_given_timestamp(
+        let result = verify_dcap_attestation_with_given_timestamp(
             attestation_bytes.to_vec(),
             [
                 210, 20, 43, 100, 53, 152, 235, 95, 174, 43, 200, 82, 157, 215, 154, 85, 139, 41,
@@ -448,8 +458,12 @@ mod tests {
             now,
             true,
         )
-        .await
-        .unwrap();
+        .await;
+
+        #[cfg(feature = "azure-verifier")]
+        result.unwrap();
+        #[cfg(not(feature = "azure-verifier"))]
+        assert!(result.is_err());
     }
 
     #[tokio::test]

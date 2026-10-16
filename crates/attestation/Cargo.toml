@@ -8,7 +8,7 @@ repository = "https://github.com/flashbots/attested-tls"
 keywords = ["attestation", "CVM", "TDX"]
 
 [dependencies]
-dcap-qvl = { workspace = true, features = ["danger-allow-tcb-override"] }
+dcap-qvl = { workspace = true }
 pccs = { workspace = true }
 mock-tdx = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["fs", "rt", "rt-multi-thread", "time"] }
@@ -75,7 +75,7 @@ azure-attester = ["azure-verifier", "dep:az-tdx-vtpm", "dep:tss-esapi"]
 
 # Verification of Microsoft Azure attestation evidence. Pure computation
 # over bytes; builds and runs on any platform, including macOS.
-azure-verifier = ["dep:az-cvm-vtpm", "dep:openssl"]
+azure-verifier = ["dep:az-cvm-vtpm", "dep:openssl", "dcap-qvl/danger-allow-tcb-override"]
 
 # Deprecated alias for `azure-attester`, kept only for backwards
 # compatibility. Use `azure-attester` or `azure-verifier` instead.
