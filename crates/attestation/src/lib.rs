@@ -1101,8 +1101,10 @@ pub fn mock_platform_metadata(
 pub enum AttestationError {
     #[error("Certificate chain is empty")]
     NoCertificate,
+    #[cfg(feature = "azure-verifier")]
     #[error("X509 parse: {0}")]
     X509Parse(#[from] x509_parser::asn1_rs::Err<x509_parser::error::X509Error>),
+    #[cfg(feature = "azure-verifier")]
     #[error("X509: {0}")]
     X509(#[from] x509_parser::error::X509Error),
     #[error("Configuration mismatch - expected no remote attestation")]

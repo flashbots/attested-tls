@@ -2,7 +2,7 @@
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
-use tokio_rustls::rustls::pki_types::{CertificateDer, TrustAnchor, UnixTime};
+use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use webpki::EndEntityCert;
 
 use crate::azure::MaaError;
