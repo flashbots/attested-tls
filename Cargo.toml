@@ -26,5 +26,5 @@ reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no
 rustls = { version = "0.23.37", default-features = false, features = ["brotli"] }
 tokio = { version = "1.50.0", features = ["default"] }
 tokio-rustls = { version = "0.26.4", default-features = false }
-dcap-qvl = "0.5.2"
+dcap-qvl = "0.6.3"
 pccs = { path = "crates/pccs" }

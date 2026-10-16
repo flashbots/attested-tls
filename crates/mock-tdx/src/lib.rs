@@ -228,7 +228,7 @@ fn build_qe_report(
 /// Encode the raw uncompressed P-256 public key without the SEC1 prefix
 /// byte
 fn raw_public_key(signing_key: &SigningKey) -> [u8; ECDSA_PUBKEY_BYTE_LEN] {
-    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let encoded = signing_key.verifying_key().to_sec1_point(false);
     encoded.as_bytes()[1..].try_into().expect("uncompressed p256 public key")
 }
 
