@@ -230,6 +230,8 @@ fn validate_provenance_document(document: &str) -> Result<(), GcpProvenanceError
 
 #[derive(Error, Debug)]
 pub enum GcpProvenanceError {
+    #[error("MR_OWNER does not match an allowed GCP instance: {actual}")]
+    InstanceIdentityMismatch { actual: String },
     #[error("quote parse: {0}")]
     Quote(String),
     #[error("PCK certificate chain is empty")]
@@ -340,6 +342,24 @@ mod tests {
 
         assert_eq!(ppid.len(), 16);
         assert!(!ppid.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn observed_gcp_instance_fixture_matches_stored_host_registry_document() {
+        let quote =
+            Quote::parse(include_bytes!("../../test-assets/gcp-tdx-1793093343786079228")).unwrap();
+        let metadata: Value = serde_json::from_slice(include_bytes!(
+            "../../test-assets/gcp-tdx-identity-1793093343786079228.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            hex::encode(extract_ppid_from_quote(&quote).unwrap()),
+            metadata["ppid"].as_str().unwrap()
+        );
+        validate_provenance_document(include_str!(
+            "../../test-assets/gcp-tdx-host-registry-1793093343786079228.json"
+        ))
+        .unwrap();
     }
 
     #[test]
@@ -524,5 +544,210 @@ mod tests {
 
         request_handle.join().unwrap();
         assert!(matches!(err, GcpProvenanceError::DocumentTooLarge));
+    }
+
+    fn instance() -> crate::GcpInstanceIdentity {
+        crate::GcpInstanceIdentity::new(123456789012, "us-central1-a", 112233445566778899).unwrap()
+    }
+
+    fn message(owner: [u8; 48], kind: crate::AttestationType) -> crate::AttestationExchangeMessage {
+        crate::AttestationEvidence {
+            quote: mock_tdx::generate_mock_tdx_quote_with_mr_owner([7; 64], owner).unwrap(),
+            platform: crate::mock_platform_metadata(kind).unwrap(),
+        }
+        .into()
+    }
+
+    fn verifier_with_cached_host(
+        identities: Option<Vec<crate::GcpInstanceIdentity>>,
+    ) -> crate::AttestationVerifier {
+        let mut builder = crate::AttestationVerifier::builder(
+            crate::measurements::MeasurementPolicy::accept_anything(),
+        );
+        if let Some(identities) = identities {
+            builder = builder.with_allowed_gcp_instances(identities);
+        }
+        let verifier = builder.build();
+        let quote = Quote::parse(&dcap::create_dcap_attestation([7; 64]).unwrap()).unwrap();
+        let (addr, request) = spawn_test_registry_server(
+            200,
+            r#"{"zone":"projects/test/zones/us-central1-a","timestamp":"2026-06-11T00:00:00Z"}"#,
+        );
+        verifier
+            .gcp_provenance_checker
+            .verify_provenance_with_registry_url_sync_at(
+                &quote,
+                &format!("http://{addr}"),
+                Instant::now(),
+            )
+            .unwrap();
+        request.join().unwrap();
+        verifier
+    }
+
+    #[tokio::test]
+    async fn instance_allowlist_enforced_by_async_and_sync_verifiers_with_cached_host() {
+        use crate::{AttestationError, AttestationType};
+        let expected = instance();
+        let wrong = crate::GcpInstanceIdentity::new(1, "us-central1-a", 2).unwrap();
+        let evidence = message(expected.digest(), AttestationType::GcpTdx);
+        for identities in
+            [None, Some(vec![expected.clone()]), Some(vec![wrong.clone(), expected.clone()])]
+        {
+            let verifier = verifier_with_cached_host(identities);
+            verifier.verify_attestation(evidence.clone(), [7; 64]).await.unwrap();
+            verifier.verify_attestation_sync(evidence.clone(), [7; 64]).unwrap();
+        }
+        for identities in [vec![], vec![wrong]] {
+            let verifier = verifier_with_cached_host(Some(identities));
+            assert!(verifier.has_remote_attestation());
+            let async_error =
+                verifier.verify_attestation(evidence.clone(), [7; 64]).await.unwrap_err();
+            let sync_error =
+                verifier.verify_attestation_sync(evidence.clone(), [7; 64]).unwrap_err();
+            for error in [async_error, sync_error] {
+                assert!(matches!(
+                    error,
+                    AttestationError::GcpProvenance(
+                        GcpProvenanceError::InstanceIdentityMismatch { .. }
+                    )
+                ));
+            }
+        }
+        // A cache populated by a successful check for one VM must not trust
+        // another VM.
+        let verifier = verifier_with_cached_host(Some(vec![expected]));
+        verifier.verify_attestation(evidence.clone(), [7; 64]).await.unwrap();
+        let other_vm = message([0; 48], AttestationType::GcpTdx);
+        assert!(matches!(
+            verifier.verify_attestation(other_vm.clone(), [7; 64]).await,
+            Err(AttestationError::GcpProvenance(
+                GcpProvenanceError::InstanceIdentityMismatch { .. }
+            ))
+        ));
+        assert!(matches!(
+            verifier.verify_attestation_sync(other_vm, [7; 64]),
+            Err(AttestationError::GcpProvenance(
+                GcpProvenanceError::InstanceIdentityMismatch { .. }
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn instance_allowlist_requires_gcp_even_with_permissive_measurement_policy() {
+        use crate::{AttestationError, AttestationExchangeMessage, AttestationType};
+        let expected = instance();
+        let verifier = verifier_with_cached_host(Some(vec![expected.clone()]));
+        let messages = [
+            AttestationExchangeMessage::without_attestation(),
+            message(expected.digest(), AttestationType::DcapTdx),
+            message(expected.digest(), AttestationType::AzureTdx),
+        ];
+        for evidence in messages {
+            assert!(matches!(
+                verifier.verify_attestation(evidence.clone(), [7; 64]).await,
+                Err(AttestationError::AttestationTypeNotAccepted)
+            ));
+            assert!(matches!(
+                verifier.verify_attestation_sync(evidence, [7; 64]),
+                Err(AttestationError::AttestationTypeNotAccepted)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn replacing_allowlist_and_refreshing_measurements_preserves_instance_restrictions() {
+        use crate::{AttestationError, AttestationType, measurements::MeasurementPolicy};
+        let removed = crate::GcpInstanceIdentity::new(1, "us-central1-a", 2).unwrap();
+        let mut verifier = crate::AttestationVerifier::builder(MeasurementPolicy::expect_none())
+            .with_allowed_gcp_instances([removed.clone()])
+            .with_allowed_gcp_instances([instance()])
+            .build();
+        verifier.gcp_provenance_checker = verifier_with_cached_host(None).gcp_provenance_checker;
+        // The same state update used by dynamic policy refresh must not
+        // alter the allowlist.
+        verifier.set_measurement_policy(MeasurementPolicy::accept_anything(), 0);
+        let verifier = verifier.clone();
+        assert!(verifier.has_remote_attestation());
+        let accepted = message(instance().digest(), AttestationType::GcpTdx);
+        verifier.verify_attestation(accepted.clone(), [7; 64]).await.unwrap().unwrap();
+        verifier.verify_attestation_sync(accepted, [7; 64]).unwrap().unwrap();
+        let rejected = message(removed.digest(), AttestationType::GcpTdx);
+        assert!(matches!(
+            verifier.verify_attestation(rejected.clone(), [7; 64]).await,
+            Err(AttestationError::GcpProvenance(
+                GcpProvenanceError::InstanceIdentityMismatch { .. }
+            ))
+        ));
+        assert!(matches!(
+            verifier.verify_attestation_sync(rejected, [7; 64]),
+            Err(AttestationError::GcpProvenance(
+                GcpProvenanceError::InstanceIdentityMismatch { .. }
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn instance_match_cannot_accept_an_unsigned_change_to_mr_owner() {
+        use parity_scale_codec::Encode;
+
+        use crate::{AttestationError, AttestationType};
+        let verifier = verifier_with_cached_host(Some(vec![instance()]));
+        let mut evidence = message([0; 48], AttestationType::GcpTdx);
+        let raw = &mut evidence.attestation_evidence.as_mut().unwrap().quote;
+        let mut quote = Quote::parse(raw).unwrap();
+        let dcap_qvl::quote::Report::TD10(ref mut report) = quote.report else {
+            panic!("expected TD10");
+        };
+        report.mr_owner = instance().digest();
+        *raw = quote.encode();
+        assert!(matches!(
+            verifier.verify_attestation(evidence.clone(), [7; 64]).await,
+            Err(AttestationError::DcapVerification(_))
+        ));
+        assert!(matches!(
+            verifier.verify_attestation_sync(evidence, [7; 64]),
+            Err(AttestationError::DcapVerification(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn matching_instance_still_requires_report_data_measurements_and_host_provenance() {
+        use crate::{AttestationError, AttestationType, measurements::MeasurementPolicy};
+        let verifier = verifier_with_cached_host(Some(vec![instance()]));
+        let evidence = message(instance().digest(), AttestationType::GcpTdx);
+        assert!(matches!(
+            verifier.verify_attestation(evidence.clone(), [8; 64]).await,
+            Err(AttestationError::DcapVerification(_))
+        ));
+        assert!(matches!(
+            verifier.verify_attestation_sync(evidence.clone(), [8; 64]),
+            Err(AttestationError::DcapVerification(_))
+        ));
+        verifier.measurement_policy.write().unwrap().policy = MeasurementPolicy::expect_none();
+        assert!(matches!(
+            verifier.verify_attestation(evidence.clone(), [7; 64]).await,
+            Err(AttestationError::MeasurementsNotAccepted)
+        ));
+        assert!(matches!(
+            verifier.verify_attestation_sync(evidence.clone(), [7; 64]),
+            Err(AttestationError::MeasurementsNotAccepted)
+        ));
+        // Force a host checker failure without contacting Google's live
+        // registry.
+        let cache = verifier.gcp_provenance_checker.known_gcp_ppids.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = cache.write().unwrap();
+            panic!("poison host cache for test");
+        })
+        .join();
+        assert!(matches!(
+            verifier.verify_attestation(evidence.clone(), [7; 64]).await,
+            Err(AttestationError::GcpProvenance(GcpProvenanceError::CacheLock(_)))
+        ));
+        assert!(matches!(
+            verifier.verify_attestation_sync(evidence, [7; 64]),
+            Err(AttestationError::GcpProvenance(GcpProvenanceError::CacheLock(_)))
+        ));
     }
 }
