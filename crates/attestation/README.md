@@ -104,9 +104,6 @@ clones retain the restriction, and refreshing measurement policies cannot
 remove it. This option is configured through the Rust API; it does not change
 measurement policy JSON or the evidence wire format.
 
-See [capturing a real GCP instance fixture](test-assets/GCP-INSTANCE-FIXTURE.md)
-for the real-quote regression test, capture procedure, and legacy quote's limitations.
-
 ## Feature flags
 
 ### `azure-attester`
