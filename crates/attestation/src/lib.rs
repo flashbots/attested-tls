@@ -25,6 +25,7 @@ pub use attest_types::{AttestationEvidence, PlatformMetadata};
 /// Re-exported so callers can archive [EndorsementSnapshot::dcap] without
 /// depending on `dcap-qvl` directly
 pub use dcap_qvl::QuoteCollateralV3;
+pub use gcp::{GcpInstanceIdentity, GcpInstanceIdentityError};
 use measurements::{ExpectedMeasurements, MultiMeasurements};
 /// Re-exported to allow encoding and decoding AttestationEvidence to or
 /// from bytes
@@ -441,6 +442,8 @@ pub struct AttestationVerifier {
     known_gcp_firmware: GcpFirmwareCache,
     /// Cached PPIDs that have a valid GCP host-registry document
     gcp_provenance_checker: GcpProvenanceChecker,
+    /// Precomputed MR_OWNER values; None disables instance restrictions.
+    allowed_gcp_instances: Option<Vec<[u8; 48]>>,
     /// Dynamic measurement policy to re-fetch from file or URL
     dynamic_measurement_policy: Option<String>,
 }
@@ -472,6 +475,8 @@ pub struct AttestationVerifierBuilder {
     dump_dcap_quotes: bool,
     /// Whether to override outdated TCB when on Azure
     override_azure_outdated_tcb: bool,
+    /// Precomputed allowed instance digests; None disables the restriction.
+    allowed_gcp_instances: Option<Vec<[u8; 48]>>,
 }
 
 impl AttestationVerifierBuilder {
@@ -486,6 +491,7 @@ impl AttestationVerifierBuilder {
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
             dynamic_measurement_policy: self.dynamic_measurement_policy,
+            allowed_gcp_instances: self.allowed_gcp_instances,
         };
 
         verifier.spawn_dynamic_measurement_policy_refresh();
@@ -547,6 +553,19 @@ impl AttestationVerifierBuilder {
         self.dynamic_measurement_policy = Some(file_or_url);
         self
     }
+
+    /// Require GCP evidence from one of these complete instance identities.
+    ///
+    /// This restriction applies alongside the measurement policy. An empty
+    /// list rejects all evidence. Repeated calls replace the list;
+    /// omitting this option leaves instance identity unrestricted.
+    pub fn with_allowed_gcp_instances(
+        mut self,
+        instances: impl IntoIterator<Item = GcpInstanceIdentity>,
+    ) -> Self {
+        self.allowed_gcp_instances = Some(instances.into_iter().map(|i| i.digest()).collect());
+        self
+    }
 }
 
 impl AttestationVerifier {
@@ -558,6 +577,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             dynamic_measurement_policy: None,
+            allowed_gcp_instances: None,
         }
     }
 
@@ -577,6 +597,7 @@ impl AttestationVerifier {
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
             dynamic_measurement_policy: None,
+            allowed_gcp_instances: None,
         }
     }
 
@@ -595,6 +616,7 @@ impl AttestationVerifier {
             ),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
+            allowed_gcp_instances: None,
             dynamic_measurement_policy: None,
         }
     }
@@ -617,6 +639,7 @@ impl AttestationVerifier {
             ),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
+            allowed_gcp_instances: None,
             dynamic_measurement_policy: None,
         }
     }
@@ -649,6 +672,9 @@ impl AttestationVerifier {
     ) -> Result<Option<VerifiedAttestation>, AttestationError> {
         let attestation_type = attestation_exchange_message.attestation_type();
         tracing::debug!("Verifying {attestation_type} attestation");
+        if self.allowed_gcp_instances.is_some() && attestation_type != AttestationType::GcpTdx {
+            return Err(AttestationError::AttestationTypeNotAccepted);
+        }
 
         if self.dump_dcap_quotes {
             log_attestation(&attestation_exchange_message);
@@ -696,6 +722,9 @@ impl AttestationVerifier {
                     self.internal_pccs.clone(),
                 )
                 .await?;
+                if let Some(allowed) = &self.allowed_gcp_instances {
+                    gcp::verify_instance(&quote, allowed)?;
+                }
                 if attestation_type == AttestationType::GcpTdx {
                     self.gcp_provenance_checker.verify_provenance(quote).await?;
                 }
@@ -757,6 +786,10 @@ impl AttestationVerifier {
         let attestation_type = attestation_exchange_message.attestation_type();
         tracing::debug!("Verifying {attestation_type} attestation");
 
+        if self.allowed_gcp_instances.is_some() && attestation_type != AttestationType::GcpTdx {
+            return Err(AttestationError::AttestationTypeNotAccepted);
+        }
+
         if self.dump_dcap_quotes {
             log_attestation(&attestation_exchange_message);
         }
@@ -803,6 +836,9 @@ impl AttestationVerifier {
                     expected_input_data,
                     pccs,
                 )?;
+                if let Some(allowed) = &self.allowed_gcp_instances {
+                    gcp::verify_instance(&quote, allowed)?;
+                }
                 if attestation_type == AttestationType::GcpTdx {
                     self.gcp_provenance_checker.verify_provenance_sync(&quote)?;
                 }
@@ -846,9 +882,11 @@ impl AttestationVerifier {
         Ok(Some(verified))
     }
 
-    /// Whether we allow no remote attestation
+    /// Whether remote attestation is required by the measurement policy or
+    /// the GCP instance allowlist.
     pub fn has_remote_attestation(&self) -> bool {
-        self.measurement_policy_read().policy.has_remote_attestation()
+        self.allowed_gcp_instances.is_some() ||
+            self.measurement_policy_read().policy.has_remote_attestation()
     }
 
     /// Returns a snapshot of the measurement policy currently in use.

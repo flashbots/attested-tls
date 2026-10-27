@@ -1,0 +1,15 @@
+{
+  "project_number": 769748474199,
+  "zone": "us-central1-a",
+  "instance_id": 3276058549398918005,
+  "verification_timestamp": 1793093693,
+  "report_data": "f1a1ac0b733904ae5a6bfadd89a6976fc3769a8d445b9c8834bc31291e69c729ddce687b24caaa4a8b0fd34ba416fcce4b3c7687224c2209531e8bfbae49aaf5",
+  "report_data_source": "Extracted from the supplied quote; no independently supplied challenge was available.",
+  "mr_owner": "ef94f882b7b58598ccf8f7920a7df8d7ddc88dc701e066413b6d2355e59c2771dd84101644cf67fe675dcb41ed610384",
+  "quote_sha256": "15f8950822e864860c31d809e91e481435e47cf894f2ae03a1577aeefb8723c6",
+  "ppid": "4de4fb3df113e255504d049dd8a91ade",
+  "identity_source": "Project number, zone, and instance ID supplied by the fixture owner.",
+  "encoding_reference": "google/go-tdx-guest@2108462acb71e7fd471b9535e1af2895d747c7c1/gce/pzid.go",
+  "encoding_cross_check": "Standalone Go fmt.Sprintf/strconv.Quote/crypto/sha512.Sum384 matches the observed MR_OWNER.",
+  "collateral_source": "Intel PCS, fetched at verification_timestamp."
+}

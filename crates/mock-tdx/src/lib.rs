@@ -115,6 +115,22 @@ pub fn generate_mock_tdx_quote_with_collateral(
     collateral: &QuoteCollateralV3,
     report_data: [u8; 64],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    generate_with_mr_owner(collateral, report_data, [0x30; 48])
+}
+
+/// Generate a signed mock quote with a caller-specified MR_OWNER.
+pub fn generate_mock_tdx_quote_with_mr_owner(
+    report_data: [u8; 64],
+    mr_owner: [u8; 48],
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    generate_with_mr_owner(&mock_collateral(), report_data, mr_owner)
+}
+
+fn generate_with_mr_owner(
+    collateral: &QuoteCollateralV3,
+    report_data: [u8; 64],
+    mr_owner: [u8; 48],
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let attestation_key = signing_key_from_secret(ATTESTATION_SK)?;
     let attestation_pubkey = raw_public_key(&attestation_key);
 
@@ -165,7 +181,7 @@ pub fn generate_mock_tdx_quote_with_collateral(
             xfam: [0; 8],
             mr_td: MOCK_MRTD,
             mr_config_id: [0x20; 48],
-            mr_owner: [0x30; 48],
+            mr_owner,
             mr_owner_config: [0x40; 48],
             rt_mr0: MOCK_RTMR0,
             rt_mr1: MOCK_RTMR1,
