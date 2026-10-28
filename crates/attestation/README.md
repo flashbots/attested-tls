@@ -67,6 +67,43 @@ return with either policy does not mean later verification will avoid fetching
 collateral. With `Prewarmed` it means pre-warm bootstrap completed, but
 individual collateral fetches can still have failed.
 
+## GCP instance provenance
+
+GCP evidence always requires the existing host-registry PPID check. To also
+restrict the peer to specific VM instances, configure the verifier builder:
+
+```rust
+use attestation::{AttestationType, AttestationVerifier, GcpInstanceIdentity};
+use attestation::measurements::MeasurementPolicy;
+
+let instance = GcpInstanceIdentity::new(
+    123456789012, "us-central1-a", 112233445566778899,
+)?;
+let verifier = AttestationVerifier::builder(
+    MeasurementPolicy::single_attestation_type(AttestationType::GcpTdx),
+)
+.with_allowed_gcp_instances([instance])
+.build();
+```
+
+Use numeric project and instance IDs and a short zone name. The verifier compares
+`MR_OWNER` against SHA-384 of Google's exact PZID JSON encoding, for example:
+
+```json
+{"instanceId":112233445566778899,"numericalProjectId":123456789012,"zone":"us-central1-a"}
+```
+
+Configuring the allowlist requires GCP evidence, even when the measurement
+policy allows other platforms or missing attestation. Every quote is checked,
+including when host provenance is cached. DCAP authenticity, report-data
+binding, host provenance, and measurement policy checks still apply.
+
+Omitting the option preserves existing behavior. An explicitly empty list
+rejects all instances; repeated builder calls replace the list. Verifier
+clones retain the restriction, and refreshing measurement policies cannot
+remove it. This option is configured through the Rust API; it does not change
+measurement policy JSON or the evidence wire format.
+
 ## Feature flags
 
 ### `azure-attester`
