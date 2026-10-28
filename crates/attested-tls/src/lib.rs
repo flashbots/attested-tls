@@ -1892,4 +1892,28 @@ mod tests {
         client.read_tls(&mut Cursor::new(tls)).unwrap();
         client.process_new_packets().unwrap();
     }
+    #[test]
+    fn gcp_identity_survives_certificate_payload_serialization() {
+        let generator = AttestationGenerator::new(AttestationType::GcpTdx, None).unwrap();
+        let now = SystemTime::now();
+        let payload = AttestedCertificateResolver::create_attestation_payload(
+            vec![1, 2, 3],
+            now,
+            now + Duration::from_secs(60),
+            "gcp",
+            &generator,
+        )
+        .unwrap();
+        let VersionedAttestation::V0 { attestation } = payload else {
+            panic!("expected V0");
+        };
+        let AttestationQuote::DstackTdx(quote) = attestation.quote else {
+            panic!("expected TDX");
+        };
+        let decoded: AttestationExchangeMessage = serde_json::from_slice(&quote.quote).unwrap();
+        assert_eq!(
+            decoded.attestation_evidence.unwrap().gcp_instance.unwrap().project_number(),
+            123456789012
+        );
+    }
 }

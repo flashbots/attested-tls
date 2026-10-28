@@ -220,6 +220,7 @@ fn verify_dcap_attestation_with_collateral_and_timestamp(
 
     Ok((
         VerifiedAttestation {
+            gcp_instance: None,
             measurements,
             expected_measurements: None,
             endorsements: EndorsementSnapshot::dcap(collateral, now),
@@ -255,6 +256,7 @@ pub async fn verify_dcap_attestation(
 
     Ok((
         VerifiedAttestation {
+            gcp_instance: None,
             measurements,
             expected_measurements: None,
             endorsements: EndorsementSnapshot::dcap(collateral, now),
@@ -289,6 +291,7 @@ pub fn verify_dcap_attestation_sync(
     }
     Ok((
         VerifiedAttestation {
+            gcp_instance: None,
             measurements,
             expected_measurements: None,
             endorsements: EndorsementSnapshot::dcap(collateral, now),

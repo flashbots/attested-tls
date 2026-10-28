@@ -111,4 +111,26 @@ mod tests {
         });
         attestation_provider_client(server_addr, AttestationVerifier::expect_none()).await.unwrap();
     }
+    #[tokio::test]
+    async fn provider_transports_gcp_identity() {
+        use attestation::{AttestationGenerator, AttestationType};
+        let generator = AttestationGenerator::new(AttestationType::GcpTdx, None).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let worker = tokio::spawn(async move {
+            attestation_provider_server(listener, generator).await.unwrap();
+        });
+        let response = reqwest::get(format!("http://{addr}/attest/{}", hex::encode([7u8; 64])))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let decoded = AttestationExchangeMessage::decode(&mut &response[..]).unwrap();
+        assert_eq!(
+            decoded.attestation_evidence.unwrap().gcp_instance.unwrap().project_number(),
+            123456789012
+        );
+        worker.abort();
+    }
 }

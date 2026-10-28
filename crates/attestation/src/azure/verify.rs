@@ -125,6 +125,7 @@ async fn verify_azure_attestation_with_given_timestamp(
         now,
     )?;
     Ok(VerifiedAttestation {
+        gcp_instance: None,
         measurements,
         expected_measurements: None,
         endorsements: dcap.endorsements,
@@ -165,6 +166,7 @@ fn verify_azure_attestation_with_given_timestamp_sync(
         now,
     )?;
     Ok(VerifiedAttestation {
+        gcp_instance: None,
         measurements,
         expected_measurements: None,
         endorsements: dcap.endorsements,
