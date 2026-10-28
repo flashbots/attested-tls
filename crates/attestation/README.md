@@ -70,19 +70,16 @@ individual collateral fetches can still have failed.
 ## GCP instance provenance
 
 GCP evidence always requires the existing host-registry PPID check. To also
-restrict the peer to specific VM instances, configure the verifier builder:
+restrict the peer to specific projects, configure the verifier builder:
 
 ```rust
-use attestation::{AttestationType, AttestationVerifier, GcpInstanceIdentity};
+use attestation::{AttestationType, AttestationVerifier};
 use attestation::measurements::MeasurementPolicy;
 
-let instance = GcpInstanceIdentity::new(
-    123456789012, "us-central1-a", 112233445566778899,
-)?;
 let verifier = AttestationVerifier::builder(
     MeasurementPolicy::single_attestation_type(AttestationType::GcpTdx),
 )
-.with_allowed_gcp_instances([instance])
+.with_allowed_gcp_projects([123456789012])
 .build();
 ```
 
@@ -98,11 +95,11 @@ policy allows other platforms or missing attestation. Every quote is checked,
 including when host provenance is cached. DCAP authenticity, report-data
 binding, host provenance, and measurement policy checks still apply.
 
-Omitting the option preserves existing behavior. An explicitly empty list
-rejects all instances; repeated builder calls replace the list. Verifier
+Omitting the option leaves project membership unrestricted. An explicitly empty list
+rejects all projects; repeated builder calls replace the list. Verifier
 clones retain the restriction, and refreshing measurement policies cannot
-remove it. This option is configured through the Rust API; it does not change
-measurement policy JSON or the evidence wire format.
+remove it. This option is configured through the Rust API and does not change
+measurement policy JSON. See the payload migration notes below for wire-format changes.
 
 ## Feature flags
 

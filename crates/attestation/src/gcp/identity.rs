@@ -11,14 +11,47 @@ use super::GcpProvenanceError;
 
 /// A complete GCP instance identity, using numeric project and instance
 /// IDs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, parity_scale_codec::Encode, serde::Deserialize,
+)]
+#[serde(try_from = "IdentityWire")]
 pub struct GcpInstanceIdentity {
     project_number: u64,
     zone: String,
     instance_id: u64,
 }
 
+#[derive(serde::Deserialize, parity_scale_codec::Decode)]
+struct IdentityWire {
+    project_number: u64,
+    zone: String,
+    instance_id: u64,
+}
+impl TryFrom<IdentityWire> for GcpInstanceIdentity {
+    type Error = GcpInstanceIdentityError;
+    fn try_from(v: IdentityWire) -> Result<Self, Self::Error> {
+        Self::new(v.project_number, v.zone, v.instance_id)
+    }
+}
+impl parity_scale_codec::Decode for GcpInstanceIdentity {
+    fn decode<I: parity_scale_codec::Input>(
+        input: &mut I,
+    ) -> Result<Self, parity_scale_codec::Error> {
+        IdentityWire::decode(input)?.try_into().map_err(|_| "invalid GCP identity".into())
+    }
+}
+
 impl GcpInstanceIdentity {
+    pub fn project_number(&self) -> u64 {
+        self.project_number
+    }
+    pub fn zone(&self) -> &str {
+        &self.zone
+    }
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
     /// Constructs an identity. `zone` must be a short zone name such as
     /// `us-central1-a`, containing only lowercase ASCII letters, digits and
     /// `-`.
@@ -254,6 +287,124 @@ mod tests {
                     Err(GcpProvenanceError::InstanceIdentityMismatch { .. })
                 ));
             }
+        }
+    }
+}
+
+/// Collect once at local generator construction; providers supply their own
+/// identity.
+pub(crate) fn collect_identity() -> Result<GcpInstanceIdentity, GcpProvenanceError> {
+    #[cfg(any(test, feature = "mock"))]
+    {
+        Ok(GcpInstanceIdentity::new(123456789012, "us-central1-a", 112233445566778899).unwrap())
+    }
+    #[cfg(not(any(test, feature = "mock")))]
+    collect_identity_from("http://metadata.google.internal/computeMetadata/v1/")
+}
+
+#[cfg(any(test, not(feature = "mock")))]
+fn collect_identity_from(base: &str) -> Result<GcpInstanceIdentity, GcpProvenanceError> {
+    use std::io::Read;
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(2))
+        .build();
+    let read = |key: &str| -> Result<String, GcpProvenanceError> {
+        let response = agent
+            .get(&format!("{base}{key}"))
+            .set("Metadata-Flavor", "Google")
+            .call()
+            .map_err(|e| GcpProvenanceError::Metadata(e.to_string()))?;
+        if response.status() != 200 || response.header("Metadata-Flavor") != Some("Google") {
+            return Err(GcpProvenanceError::Metadata("invalid metadata response".into()));
+        }
+        let mut value = String::new();
+        response
+            .into_reader()
+            .take(1025)
+            .read_to_string(&mut value)
+            .map_err(|e| GcpProvenanceError::Metadata(e.to_string()))?;
+        if value.len() > 1024 {
+            return Err(GcpProvenanceError::Metadata("metadata response too large".into()));
+        }
+        Ok(value.trim().to_owned())
+    };
+    let number = |key| {
+        read(key)?.parse::<u64>().map_err(|e| GcpProvenanceError::Metadata(format!("{key}: {e}")))
+    };
+    let project = number("project/numeric-project-id")?;
+    let instance = number("instance/id")?;
+    let zone = read("instance/zone")?;
+    GcpInstanceIdentity::new(project, zone.rsplit('/').next().unwrap_or_default(), instance)
+        .map_err(|e| GcpProvenanceError::Metadata(e.to_string()))
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use std::io::{Read, Write};
+
+    use super::*;
+
+    #[test]
+    fn metadata_collection_validates_responses() {
+        for (flavor, project, zone, success) in [
+            ("Google", "769748474199", "projects/769748474199/zones/us-central1-a", true),
+            ("Wrong", "769748474199", "us-central1-a", false),
+            ("Google", "not-a-number", "us-central1-a", false),
+            ("Google", "769748474199", "bad zone", false),
+        ] {
+            let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}/", server.local_addr().unwrap());
+            let worker = std::thread::spawn(move || {
+                for index in 0..3 {
+                    let (mut stream, _) = server.accept().unwrap();
+                    let mut buffer = [0; 2048];
+                    let n = stream.read(&mut buffer).unwrap();
+                    let request = String::from_utf8_lossy(&buffer[..n]);
+                    assert!(request.to_ascii_lowercase().contains("metadata-flavor: google"));
+                    let body = match index {
+                        0 => project,
+                        1 => "3276058549398918005",
+                        _ => zone,
+                    };
+                    write!(stream, "HTTP/1.1 200 OK\r\nMetadata-Flavor: {flavor}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    if flavor != "Google" || (index == 0 && project == "not-a-number") {
+                        break;
+                    }
+                }
+            });
+            let result = collect_identity_from(&base);
+            assert_eq!(result.is_ok(), success);
+            if let Ok(identity) = result {
+                assert_eq!(identity.zone(), "us-central1-a");
+            }
+            worker.join().unwrap();
+        }
+    }
+    #[test]
+    fn metadata_limits_redirects_status_and_timeout() {
+        for (status, body, delay) in
+            [(302, "", false), (500, "", false), (200, "", true), (200, "oversized", false)]
+        {
+            let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}/", server.local_addr().unwrap());
+            let worker = std::thread::spawn(move || {
+                let (mut stream, _) = server.accept().unwrap();
+                let mut buffer = [0; 2048];
+                let _ = stream.read(&mut buffer);
+                if delay {
+                    std::thread::sleep(std::time::Duration::from_millis(2200));
+                }
+                let body = if body == "oversized" { "1".repeat(1025) } else { body.to_owned() };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} Test\r\nMetadata-Flavor: Google\r\nLocation: /redirect\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+            assert!(collect_identity_from(&base).is_err());
+            worker.join().unwrap();
         }
     }
 }

@@ -67,7 +67,35 @@ const DYNAMIC_MEASUREMENT_POLICY_REFRESH_INTERVAL: Duration = Duration::from_sec
 pub struct AttestationExchangeMessage {
     /// Attestation payload with platform metadata, if present.
     /// `None` means no evidence presented.
-    pub attestation_evidence: Option<AttestationEvidence>,
+    pub attestation_evidence: Option<AttestationPayload>,
+}
+
+/// Evidence and optional claimed GCP identity. The identity is
+/// authenticated only after verification against the quote's MR_OWNER.
+#[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
+pub struct AttestationPayload {
+    #[serde(flatten)]
+    pub evidence: AttestationEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gcp_instance: Option<GcpInstanceIdentity>,
+}
+
+impl From<AttestationEvidence> for AttestationPayload {
+    fn from(evidence: AttestationEvidence) -> Self {
+        Self { evidence, gcp_instance: None }
+    }
+}
+
+impl std::ops::Deref for AttestationPayload {
+    type Target = AttestationEvidence;
+    fn deref(&self) -> &Self::Target {
+        &self.evidence
+    }
+}
+impl std::ops::DerefMut for AttestationPayload {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.evidence
+    }
 }
 
 impl AttestationExchangeMessage {
@@ -114,7 +142,7 @@ impl AttestationExchangeMessage {
 
 impl From<AttestationEvidence> for AttestationExchangeMessage {
     fn from(attestation_evidence: AttestationEvidence) -> Self {
-        Self { attestation_evidence: Some(attestation_evidence) }
+        Self { attestation_evidence: Some(attestation_evidence.into()) }
     }
 }
 
@@ -227,6 +255,7 @@ impl Display for AttestationType {
 pub struct AttestationGenerator {
     pub attestation_type: AttestationType,
     attestation_provider_url: Option<String>,
+    gcp_instance: Option<GcpInstanceIdentity>,
 }
 
 impl AttestationGenerator {
@@ -240,7 +269,13 @@ impl AttestationGenerator {
         let attestation_provider_url =
             attestation_provider_url.map(map_attestation_provider_url).transpose()?;
 
-        Ok(Self { attestation_type, attestation_provider_url })
+        let gcp_instance =
+            if attestation_type == AttestationType::GcpTdx && attestation_provider_url.is_none() {
+                Some(gcp::collect_identity()?)
+            } else {
+                None
+            };
+        Ok(Self { attestation_type, attestation_provider_url, gcp_instance })
     }
 
     /// Detect what confidential compute platform is present and create the
@@ -251,7 +286,11 @@ impl AttestationGenerator {
 
     /// Do not generate attestations
     pub fn with_no_attestation() -> Self {
-        Self { attestation_type: AttestationType::None, attestation_provider_url: None }
+        Self {
+            attestation_type: AttestationType::None,
+            attestation_provider_url: None,
+            gcp_instance: None,
+        }
     }
 
     /// Create an [AttestationGenerator] detecting the attestation type if
@@ -297,10 +336,13 @@ impl AttestationGenerator {
                             self.attestation_type.try_into()?,
                         )?;
                         Ok(AttestationExchangeMessage {
-                            attestation_evidence: Some(AttestationEvidence {
-                                quote: azure::create_azure_attestation(input_data)?,
-                                platform,
-                            }),
+                            attestation_evidence: Some(
+                                AttestationEvidence {
+                                    quote: azure::create_azure_attestation(input_data)?,
+                                    platform,
+                                }
+                                .into(),
+                            ),
                         })
                     }
                     #[cfg(not(azure_attester_x86_64_linux))]
@@ -317,10 +359,27 @@ impl AttestationGenerator {
                     #[cfg(not(any(test, feature = "mock")))]
                     let platform =
                         attest_measure::platform::metadata_for(self.attestation_type.try_into()?)?;
+                    let identity = if self.attestation_type == AttestationType::GcpTdx {
+                        Some(self.gcp_instance.clone().ok_or(GcpProvenanceError::MissingIdentity)?)
+                    } else {
+                        None
+                    };
+                    #[cfg(any(test, feature = "mock"))]
+                    let quote = if let Some(identity) = &identity {
+                        mock_tdx::generate_mock_tdx_quote_with_mr_owner(
+                            input_data,
+                            identity.digest(),
+                        )
+                        .map_err(|e| AttestationError::Mock(e.to_string()))?
+                    } else {
+                        dcap::create_dcap_attestation(input_data)?
+                    };
+                    #[cfg(not(any(test, feature = "mock")))]
+                    let quote = dcap::create_dcap_attestation(input_data)?;
                     Ok(AttestationExchangeMessage {
-                        attestation_evidence: Some(AttestationEvidence {
-                            quote: dcap::create_dcap_attestation(input_data)?,
-                            platform,
+                        attestation_evidence: Some(AttestationPayload {
+                            evidence: AttestationEvidence { quote, platform },
+                            gcp_instance: identity,
                         }),
                     })
                 }
@@ -414,6 +473,8 @@ pub struct VerifiedAttestation {
     /// chain to the TD quote: its report data commits to the HCL var data
     /// carrying the AK public key that signs the vTPM quote
     pub measurements: MultiMeasurements,
+    /// GCP identity authenticated against MR_OWNER, if supplied.
+    pub gcp_instance: Option<GcpInstanceIdentity>,
     /// The reference measurements from the policy record that matched this
     /// attestation. This is populated by [`AttestationVerifier`], after the
     /// platform-specific verification has completed.
@@ -442,8 +503,8 @@ pub struct AttestationVerifier {
     known_gcp_firmware: GcpFirmwareCache,
     /// Cached PPIDs that have a valid GCP host-registry document
     gcp_provenance_checker: GcpProvenanceChecker,
-    /// Precomputed MR_OWNER values; None disables instance restrictions.
-    allowed_gcp_instances: Option<Vec<[u8; 48]>>,
+    /// Allowed numeric GCP projects; None disables project restrictions.
+    allowed_gcp_projects: Option<Arc<std::collections::HashSet<u64>>>,
     /// Dynamic measurement policy to re-fetch from file or URL
     dynamic_measurement_policy: Option<String>,
 }
@@ -475,8 +536,8 @@ pub struct AttestationVerifierBuilder {
     dump_dcap_quotes: bool,
     /// Whether to override outdated TCB when on Azure
     override_azure_outdated_tcb: bool,
-    /// Precomputed allowed instance digests; None disables the restriction.
-    allowed_gcp_instances: Option<Vec<[u8; 48]>>,
+    /// Allowed numeric GCP projects; None disables the restriction.
+    allowed_gcp_projects: Option<Arc<std::collections::HashSet<u64>>>,
 }
 
 impl AttestationVerifierBuilder {
@@ -491,7 +552,7 @@ impl AttestationVerifierBuilder {
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
             dynamic_measurement_policy: self.dynamic_measurement_policy,
-            allowed_gcp_instances: self.allowed_gcp_instances,
+            allowed_gcp_projects: self.allowed_gcp_projects,
         };
 
         verifier.spawn_dynamic_measurement_policy_refresh();
@@ -554,16 +615,13 @@ impl AttestationVerifierBuilder {
         self
     }
 
-    /// Require GCP evidence from one of these complete instance identities.
+    /// Require a bound GCP identity belonging to one of these projects.
     ///
     /// This restriction applies alongside the measurement policy. An empty
     /// list rejects all evidence. Repeated calls replace the list;
-    /// omitting this option leaves instance identity unrestricted.
-    pub fn with_allowed_gcp_instances(
-        mut self,
-        instances: impl IntoIterator<Item = GcpInstanceIdentity>,
-    ) -> Self {
-        self.allowed_gcp_instances = Some(instances.into_iter().map(|i| i.digest()).collect());
+    /// omitting this option leaves project membership unrestricted.
+    pub fn with_allowed_gcp_projects(mut self, projects: impl IntoIterator<Item = u64>) -> Self {
+        self.allowed_gcp_projects = Some(Arc::new(projects.into_iter().collect()));
         self
     }
 }
@@ -577,7 +635,7 @@ impl AttestationVerifier {
             dump_dcap_quotes: false,
             override_azure_outdated_tcb: false,
             dynamic_measurement_policy: None,
-            allowed_gcp_instances: None,
+            allowed_gcp_projects: None,
         }
     }
 
@@ -597,7 +655,7 @@ impl AttestationVerifier {
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
             dynamic_measurement_policy: None,
-            allowed_gcp_instances: None,
+            allowed_gcp_projects: None,
         }
     }
 
@@ -616,7 +674,7 @@ impl AttestationVerifier {
             ),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
-            allowed_gcp_instances: None,
+            allowed_gcp_projects: None,
             dynamic_measurement_policy: None,
         }
     }
@@ -639,7 +697,7 @@ impl AttestationVerifier {
             ),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
-            allowed_gcp_instances: None,
+            allowed_gcp_projects: None,
             dynamic_measurement_policy: None,
         }
     }
@@ -672,7 +730,13 @@ impl AttestationVerifier {
     ) -> Result<Option<VerifiedAttestation>, AttestationError> {
         let attestation_type = attestation_exchange_message.attestation_type();
         tracing::debug!("Verifying {attestation_type} attestation");
-        if self.allowed_gcp_instances.is_some() && attestation_type != AttestationType::GcpTdx {
+        let claimed_identity = attestation_exchange_message
+            .attestation_evidence
+            .as_ref()
+            .and_then(|p| p.gcp_instance.clone());
+        if (self.allowed_gcp_projects.is_some() || claimed_identity.is_some()) &&
+            attestation_type != AttestationType::GcpTdx
+        {
             return Err(AttestationError::AttestationTypeNotAccepted);
         }
 
@@ -722,8 +786,20 @@ impl AttestationVerifier {
                     self.internal_pccs.clone(),
                 )
                 .await?;
-                if let Some(allowed) = &self.allowed_gcp_instances {
-                    gcp::verify_instance(&quote, allowed)?;
+                if let Some(identity) = &attestation_evidence.gcp_instance {
+                    gcp::verify_instance(&quote, &[identity.digest()])?;
+                }
+                if let Some(projects) = &self.allowed_gcp_projects {
+                    let identity = attestation_evidence
+                        .gcp_instance
+                        .as_ref()
+                        .ok_or(GcpProvenanceError::MissingIdentity)?;
+                    if !projects.contains(&identity.project_number()) {
+                        return Err(GcpProvenanceError::ProjectNotAllowed(
+                            identity.project_number(),
+                        )
+                        .into());
+                    }
                 }
                 if attestation_type == AttestationType::GcpTdx {
                     self.gcp_provenance_checker.verify_provenance(quote).await?;
@@ -768,6 +844,7 @@ impl AttestationVerifier {
 
         tracing::debug!("Verification successful");
         verified.expected_measurements = Some(matched_measurements);
+        verified.gcp_instance = claimed_identity;
         Ok(Some(verified))
     }
 
@@ -786,7 +863,13 @@ impl AttestationVerifier {
         let attestation_type = attestation_exchange_message.attestation_type();
         tracing::debug!("Verifying {attestation_type} attestation");
 
-        if self.allowed_gcp_instances.is_some() && attestation_type != AttestationType::GcpTdx {
+        let claimed_identity = attestation_exchange_message
+            .attestation_evidence
+            .as_ref()
+            .and_then(|p| p.gcp_instance.clone());
+        if (self.allowed_gcp_projects.is_some() || claimed_identity.is_some()) &&
+            attestation_type != AttestationType::GcpTdx
+        {
             return Err(AttestationError::AttestationTypeNotAccepted);
         }
 
@@ -836,8 +919,20 @@ impl AttestationVerifier {
                     expected_input_data,
                     pccs,
                 )?;
-                if let Some(allowed) = &self.allowed_gcp_instances {
-                    gcp::verify_instance(&quote, allowed)?;
+                if let Some(identity) = &attestation_evidence.gcp_instance {
+                    gcp::verify_instance(&quote, &[identity.digest()])?;
+                }
+                if let Some(projects) = &self.allowed_gcp_projects {
+                    let identity = attestation_evidence
+                        .gcp_instance
+                        .as_ref()
+                        .ok_or(GcpProvenanceError::MissingIdentity)?;
+                    if !projects.contains(&identity.project_number()) {
+                        return Err(GcpProvenanceError::ProjectNotAllowed(
+                            identity.project_number(),
+                        )
+                        .into());
+                    }
                 }
                 if attestation_type == AttestationType::GcpTdx {
                     self.gcp_provenance_checker.verify_provenance_sync(&quote)?;
@@ -879,13 +974,14 @@ impl AttestationVerifier {
 
         tracing::debug!("Verification successful");
         verified.expected_measurements = Some(matched_measurements);
+        verified.gcp_instance = claimed_identity;
         Ok(Some(verified))
     }
 
     /// Whether remote attestation is required by the measurement policy or
-    /// the GCP instance allowlist.
+    /// the GCP project allowlist.
     pub fn has_remote_attestation(&self) -> bool {
-        self.allowed_gcp_instances.is_some() ||
+        self.allowed_gcp_projects.is_some() ||
             self.measurement_policy_read().policy.has_remote_attestation()
     }
 
@@ -1514,5 +1610,63 @@ mod tests {
             .expect("mock evidence carries an attestation");
 
         assert!(matches!(verified.expected_measurements, Some(ExpectedMeasurements::Dcap(_))));
+    }
+}
+
+#[cfg(test)]
+mod gcp_payload_tests {
+    use super::*;
+
+    #[test]
+    fn payload_json_and_scale_round_trip_and_legacy_compatibility() {
+        let generator = AttestationGenerator::new(AttestationType::GcpTdx, None).unwrap();
+        let message = generator.generate_attestation([1; 64]).unwrap();
+        let identity = message.attestation_evidence.as_ref().unwrap().gcp_instance.clone().unwrap();
+        let json = serde_json::to_value(&message).unwrap();
+        assert!(json["attestation_evidence"]["quote"].is_string());
+        assert!(json["attestation_evidence"]["platform"].is_object());
+        for decoded in [
+            serde_json::from_value::<AttestationExchangeMessage>(json.clone()).unwrap(),
+            AttestationExchangeMessage::decode(&mut &message.encode()[..]).unwrap(),
+        ] {
+            assert_eq!(decoded.attestation_evidence.unwrap().gcp_instance, Some(identity.clone()));
+        }
+        let mut legacy = json;
+        legacy["attestation_evidence"].as_object_mut().unwrap().remove("gcp_instance");
+        assert!(
+            serde_json::from_value::<AttestationExchangeMessage>(legacy)
+                .unwrap()
+                .attestation_evidence
+                .unwrap()
+                .gcp_instance
+                .is_none()
+        );
+        let old_scale = Some(message.attestation_evidence.unwrap().evidence).encode();
+        assert!(AttestationExchangeMessage::decode(&mut &old_scale[..]).is_err());
+        assert_eq!(AttestationExchangeMessage::without_attestation().encode(), vec![0]);
+        assert!(
+            AttestationExchangeMessage::decode(&mut &[0u8][..])
+                .unwrap()
+                .attestation_evidence
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn identity_decoding_validates_zone() {
+        let invalid = serde_json::json!({"project_number":1,"zone":"bad/zone","instance_id":2});
+        assert!(serde_json::from_value::<GcpInstanceIdentity>(invalid).is_err());
+        let bytes = (1u64, "bad/zone".to_owned(), 2u64).encode();
+        assert!(GcpInstanceIdentity::decode(&mut &bytes[..]).is_err());
+    }
+
+    #[test]
+    fn provider_mode_does_not_collect_client_metadata() {
+        let generator = AttestationGenerator::new(
+            AttestationType::GcpTdx,
+            Some("http://127.0.0.1:12345".into()),
+        )
+        .unwrap();
+        assert!(generator.gcp_instance.is_none());
     }
 }

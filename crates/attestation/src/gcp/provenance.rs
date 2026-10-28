@@ -230,6 +230,12 @@ fn validate_provenance_document(document: &str) -> Result<(), GcpProvenanceError
 
 #[derive(Error, Debug)]
 pub enum GcpProvenanceError {
+    #[error("GCP identity is required")]
+    MissingIdentity,
+    #[error("GCP project not allowed: {0}")]
+    ProjectNotAllowed(u64),
+    #[error("GCP metadata: {0}")]
+    Metadata(String),
     #[error("MR_OWNER does not match an allowed GCP instance: {actual}")]
     InstanceIdentityMismatch { actual: String },
     #[error("quote parse: {0}")]
@@ -551,11 +557,15 @@ mod tests {
     }
 
     fn message(owner: [u8; 48], kind: crate::AttestationType) -> crate::AttestationExchangeMessage {
-        crate::AttestationEvidence {
+        let mut message: crate::AttestationExchangeMessage = crate::AttestationEvidence {
             quote: mock_tdx::generate_mock_tdx_quote_with_mr_owner([7; 64], owner).unwrap(),
             platform: crate::mock_platform_metadata(kind).unwrap(),
         }
-        .into()
+        .into();
+        if kind == crate::AttestationType::GcpTdx {
+            message.attestation_evidence.as_mut().unwrap().gcp_instance = Some(instance());
+        }
+        message
     }
 
     fn verifier_with_cached_host(
@@ -565,7 +575,8 @@ mod tests {
             crate::measurements::MeasurementPolicy::accept_anything(),
         );
         if let Some(identities) = identities {
-            builder = builder.with_allowed_gcp_instances(identities);
+            builder = builder
+                .with_allowed_gcp_projects(identities.into_iter().map(|i| i.project_number()));
         }
         let verifier = builder.build();
         let quote = Quote::parse(&dcap::create_dcap_attestation([7; 64]).unwrap()).unwrap();
@@ -586,7 +597,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn instance_allowlist_enforced_by_async_and_sync_verifiers_with_cached_host() {
+    async fn project_allowlist_enforced_by_async_and_sync_verifiers_with_cached_host() {
         use crate::{AttestationError, AttestationType};
         let expected = instance();
         let wrong = crate::GcpInstanceIdentity::new(1, "us-central1-a", 2).unwrap();
@@ -608,9 +619,7 @@ mod tests {
             for error in [async_error, sync_error] {
                 assert!(matches!(
                     error,
-                    AttestationError::GcpProvenance(
-                        GcpProvenanceError::InstanceIdentityMismatch { .. }
-                    )
+                    AttestationError::GcpProvenance(GcpProvenanceError::ProjectNotAllowed(_))
                 ));
             }
         }
@@ -634,7 +643,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn instance_allowlist_requires_gcp_even_with_permissive_measurement_policy() {
+    async fn project_allowlist_requires_gcp_even_with_permissive_measurement_policy() {
         use crate::{AttestationError, AttestationExchangeMessage, AttestationType};
         let expected = instance();
         let verifier = verifier_with_cached_host(Some(vec![expected.clone()]));
@@ -660,8 +669,8 @@ mod tests {
         use crate::{AttestationError, AttestationType, measurements::MeasurementPolicy};
         let removed = crate::GcpInstanceIdentity::new(1, "us-central1-a", 2).unwrap();
         let mut verifier = crate::AttestationVerifier::builder(MeasurementPolicy::expect_none())
-            .with_allowed_gcp_instances([removed.clone()])
-            .with_allowed_gcp_instances([instance()])
+            .with_allowed_gcp_projects([removed.project_number()])
+            .with_allowed_gcp_projects([instance().project_number()])
             .build();
         verifier.gcp_provenance_checker = verifier_with_cached_host(None).gcp_provenance_checker;
         // The same state update used by dynamic policy refresh must not
@@ -749,5 +758,50 @@ mod tests {
             verifier.verify_attestation_sync(evidence, [7; 64]),
             Err(AttestationError::GcpProvenance(GcpProvenanceError::CacheLock(_)))
         ));
+    }
+    #[tokio::test]
+    async fn project_policy_accepts_new_instances_and_requires_bound_identity() {
+        use crate::{AttestationError, AttestationType, GcpInstanceIdentity};
+        let verifier = verifier_with_cached_host(Some(vec![instance()]));
+        for (id, zone) in [(112233445566778900, "us-central1-a"), (3, "europe-west1-b")] {
+            let identity = GcpInstanceIdentity::new(instance().project_number(), zone, id).unwrap();
+            let mut evidence = message(identity.digest(), AttestationType::GcpTdx);
+            evidence.attestation_evidence.as_mut().unwrap().gcp_instance = Some(identity.clone());
+            for result in [
+                verifier.verify_attestation(evidence.clone(), [7; 64]).await,
+                verifier.verify_attestation_sync(evidence.clone(), [7; 64]),
+            ] {
+                assert_eq!(result.unwrap().unwrap().gcp_instance, Some(identity.clone()));
+            }
+            evidence.attestation_evidence.as_mut().unwrap().gcp_instance = None;
+            assert!(matches!(
+                verifier.verify_attestation(evidence.clone(), [7; 64]).await,
+                Err(AttestationError::GcpProvenance(GcpProvenanceError::MissingIdentity))
+            ));
+            assert!(verifier.verify_attestation_sync(evidence, [7; 64]).is_err());
+        }
+        let unrestricted = verifier_with_cached_host(None);
+        let forged = message([0; 48], AttestationType::GcpTdx);
+        assert!(unrestricted.verify_attestation(forged.clone(), [7; 64]).await.is_err());
+        assert!(unrestricted.verify_attestation_sync(forged, [7; 64]).is_err());
+        let mut legacy = message(instance().digest(), AttestationType::GcpTdx);
+        legacy.attestation_evidence.as_mut().unwrap().gcp_instance = None;
+        assert!(
+            unrestricted
+                .verify_attestation(legacy.clone(), [7; 64])
+                .await
+                .unwrap()
+                .unwrap()
+                .gcp_instance
+                .is_none()
+        );
+        assert!(
+            unrestricted
+                .verify_attestation_sync(legacy, [7; 64])
+                .unwrap()
+                .unwrap()
+                .gcp_instance
+                .is_none()
+        );
     }
 }
