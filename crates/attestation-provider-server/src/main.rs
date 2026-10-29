@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{os::fd::AsFd, path::PathBuf};
 
 use attestation::{
     AttestationGenerator,
@@ -6,9 +6,12 @@ use attestation::{
     AttestationVerifier,
     measurements::MeasurementPolicy,
 };
-use attestation_provider_server::{attestation_provider_client, attestation_provider_server};
+use attestation_provider_server::{
+    ProviderSocket,
+    attestation_provider_client,
+    attestation_provider_server,
+};
 use clap::{Parser, Subcommand};
-use tokio::net::TcpListener;
 use tracing::level_filters::LevelFilter;
 
 const GIT_REV: &str = match option_env!("GIT_REV") {
@@ -21,6 +24,14 @@ const GIT_REV: &str = match option_env!("GIT_REV") {
 struct Cli {
     #[clap(subcommand)]
     command: CliCommand,
+    /// Filesystem socket used by both server and client
+    #[arg(
+        long,
+        global = true,
+        env = "ATTESTATION_PROVIDER_SOCKET",
+        default_value = "/run/attestation-provider/attestation.sock"
+    )]
+    socket_path: PathBuf,
     /// Log debug messages
     #[arg(long, global = true)]
     log_debug: bool,
@@ -34,17 +45,12 @@ struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 enum CliCommand {
     Server {
-        /// Socket address to listen on
-        #[arg(short, long, default_value = "127.0.0.1:0", env = "LISTEN_ADDR")]
-        listen_addr: SocketAddr,
-        /// Type of attestation to present (will attempt to detect if not
-        /// given)
+        /// Type of attestation to present (will attempt to detect if
+        /// not given)
         #[arg(long)]
         server_attestation_type: Option<String>,
     },
     Client {
-        /// Socket address of a attestation provider server
-        server_addr: SocketAddr,
         /// Optional path to file containing JSON measurements to be
         /// enforced on the remote party
         #[arg(long, global = true, env = "MEASUREMENTS_FILE")]
@@ -75,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        CliCommand::Server { listen_addr, server_attestation_type } => {
+        CliCommand::Server { server_attestation_type } => {
             let none_requested = server_attestation_type.as_deref() == Some("none");
             let attestation_generator =
                 AttestationGenerator::new_with_detection(server_attestation_type, None)?;
@@ -86,12 +92,19 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
 
-            let listener = TcpListener::bind(listen_addr).await?;
-
-            println!("Listening on {}", listener.local_addr()?);
-            attestation_provider_server(listener, attestation_generator).await?;
+            let socket = ProviderSocket::bind(&cli.socket_path)?;
+            println!("Listening on {}", cli.socket_path.display());
+            let listener = std::os::unix::net::UnixListener::from(
+                socket.listener.as_fd().try_clone_to_owned()?,
+            );
+            let listener = tokio::net::UnixListener::from_std(listener)?;
+            tokio::select! {
+                result = attestation_provider_server(listener, attestation_generator) => result?,
+                _ = shutdown_signal() => {},
+            }
+            drop(socket);
         }
-        CliCommand::Client { server_addr, measurements_file } => {
+        CliCommand::Client { measurements_file } => {
             let measurement_policy = match measurements_file {
                 Some(measurements_file) => MeasurementPolicy::from_file(measurements_file).await?,
                 None => MeasurementPolicy::accept_anything(),
@@ -102,11 +115,17 @@ async fn main() -> anyhow::Result<()> {
                 .build();
 
             let attestation_message =
-                attestation_provider_client(server_addr, attestation_verifier).await?;
+                attestation_provider_client(cli.socket_path, attestation_verifier).await?;
 
             println!("{attestation_message:?}")
         }
     }
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("Install SIGTERM handler");
+    tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
 }

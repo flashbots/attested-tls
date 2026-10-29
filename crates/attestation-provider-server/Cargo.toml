@@ -1,6 +1,6 @@
 [package]
 name = "attestation-provider-server"
-description = "An HTTP server which provides attestations"
+description = "A Unix socket server which provides attestations"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -12,15 +12,15 @@ workspace = true
 
 [dependencies]
 attestation = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "signal", "macros", "rt-multi-thread"] }
 rustls = { workspace = true, default-features = false, features = ["aws_lc_rs"] }
 
-axum = "0.8.6"
 clap = { version = "4.5.51", features = ["derive", "env"] }
 anyhow = "1.0.100"
-hex = "0.4.3"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
-parity-scale-codec = "3.7.5"
-reqwest = { workspace = true }
-thiserror = "2.0.17"
+
+nix = { version = "=0.26.4", default-features = false, features = ["user"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"
