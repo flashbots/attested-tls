@@ -118,7 +118,7 @@ be rejected with an error.
 
 Enables verification of Microsoft Azure vTPM attestation evidence.
 Verification is pure computation over the evidence bytes; it requires
-`openssl` but no TPM stack, and builds and runs on any platform, including
+`openssl` but no TPM stack, and builds and runs on Unix platforms, including
 MacOS.
 
 *** Note ***
@@ -161,8 +161,11 @@ interface. This means that the binary must be run with access to
 configfs-tsm is unavailable, quote generation via vSOCK to the QGS will be
 attempted.
 
-Alternatively, an external 'attestation provider service' URL can be provided
-which outsources the attestation generation to another process.
+Alternatively, an absolute Unix socket path (`Option<PathBuf>`) can be provided
+to `AttestationGenerator::new` or `new_with_detection` to outsource both quote
+generation and platform metadata collection to another process. TCP/HTTP provider
+URLs are no longer supported. See the [provider documentation](../attestation-provider-server/README.md)
+for socket configuration and permissions.
 
 When verifying DCAP attestations, collateral is retrieved according to the
 configured collateral source and cache policy. The source defaults to Intel PCS
