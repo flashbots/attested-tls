@@ -8,6 +8,7 @@ repository = "https://github.com/flashbots/attested-tls"
 keywords = ["attestation", "CVM", "TDX"]
 
 [dependencies]
+socket2 = "0.6.3"
 dcap-qvl = { workspace = true }
 pccs = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt", "rt-multi-thread", "time"] }

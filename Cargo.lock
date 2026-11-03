@@ -406,6 +406,7 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
+ "socket2 0.6.3",
  "tdx-attest 0.6.0",
  "tempfile",
  "thiserror 2.0.18",
@@ -422,13 +423,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "attestation",
- "axum",
  "clap",
- "hex",
- "parity-scale-codec",
- "reqwest 0.13.4",
+ "nix 0.26.4",
  "rustls",
- "thiserror 2.0.18",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3182,6 +3180,17 @@ dependencies = [
 
 [[package]]
 name = "nix"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "598beaf3cc6fdd9a5dfb1630c2800c7acd31df7aaf0f565796fba2b53ca1af1b"
+dependencies = [
+ "bitflags 1.3.2",
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
+name = "nix"
 version = "0.31.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d6d0705320c1e6ba1d912b5e37cf18071b6c2e9b7fa8215a1e8a7651966f5d3"
@@ -5637,7 +5646,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ba782755fc073877e567c2253c0be48e4aa9a254c232d36d3985dfae0bd5205"
 dependencies = [
  "libc",
- "nix",
+ "nix 0.31.2",
 ]
 
 [[package]]
