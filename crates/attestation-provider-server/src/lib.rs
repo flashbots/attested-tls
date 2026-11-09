@@ -2,7 +2,7 @@
 //! socket.
 use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 
@@ -30,17 +30,7 @@ pub struct ProviderSocket {
 impl ProviderSocket {
     /// Existing paths are never removed at startup.
     pub fn bind(path: &Path) -> anyhow::Result<Self> {
-        anyhow::ensure!(path.is_absolute(), "Expected an absolute socket path");
-        let parent = std::fs::symlink_metadata(
-            path.parent().ok_or_else(|| anyhow::anyhow!("Missing parent"))?,
-        )?;
-        let uid = nix::unistd::geteuid().as_raw();
-        anyhow::ensure!(
-            parent.is_dir() &&
-                (parent.uid() == 0 || parent.uid() == uid) &&
-                parent.mode() & 0o022 == 0,
-            "Socket parent must be service/root-owned and not group/other writable"
-        );
+        validate_socket_path(path)?;
         let socket = UnixSocket::new_stream()?;
         socket.bind(path)?;
         let metadata = std::fs::symlink_metadata(path)?;
@@ -63,6 +53,40 @@ impl ProviderSocket {
         cleanup.armed = false;
         Ok(result)
     }
+}
+
+/// Walk from the root so each directory is protected against replacement
+/// before looking up its child. Only root and the service uid are trusted
+/// to change these directories. This keeps subsequent path-based
+/// bind/chmod/unlink calls from being redirected by another user.
+fn validate_socket_path(path: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(path.is_absolute(), "Expected an absolute socket path");
+    anyhow::ensure!(
+        !path.components().any(|component| matches!(component, Component::ParentDir)),
+        "Socket path must not contain '..'"
+    );
+    anyhow::ensure!(path.file_name().is_some(), "Missing socket filename");
+    let parent = path.parent().ok_or_else(|| anyhow::anyhow!("Missing parent"))?;
+    let uid = nix::unistd::geteuid().as_raw();
+    let mut directory = PathBuf::new();
+    for component in parent.components() {
+        directory.push(component);
+        let metadata = std::fs::symlink_metadata(&directory)?;
+        anyhow::ensure!(
+            metadata.is_dir() && (metadata.uid() == 0 || metadata.uid() == uid),
+            "Socket directory {} must be a service/root-owned directory, not a symlink",
+            directory.display()
+        );
+        // A trusted sticky ancestor (e.g. /tmp) protects its trusted-owned
+        // children from replacement. The immediate parent must additionally
+        // prevent other users from creating entries, including the socket.
+        anyhow::ensure!(
+            metadata.mode() & 0o022 == 0 || (directory != parent && metadata.mode() & 0o1000 != 0),
+            "Socket directory {} must not be group/other writable (except sticky ancestors)",
+            directory.display()
+        );
+    }
+    Ok(())
 }
 
 struct SocketCleanup {
@@ -169,6 +193,31 @@ mod tests {
     use attestation::{AttestationType, Decode, provider::request_attestation};
 
     use super::*;
+
+    #[tokio::test]
+    async fn rejects_replaceable_ancestors() {
+        let dir = tempfile::tempdir().unwrap();
+        let ancestor = dir.path().join("ancestor");
+        let parent = ancestor.join("service");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let path = parent.join("provider.sock");
+        for mode in [0o777, 0o770] {
+            std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(ProviderSocket::bind(&path).is_err());
+            assert!(!path.exists());
+        }
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        drop(ProviderSocket::bind(&path).unwrap());
+        assert!(validate_socket_path(&ancestor.join("provider.sock")).is_err());
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o750)).unwrap();
+        drop(ProviderSocket::bind(&path).unwrap());
+
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&ancestor, &alias).unwrap();
+        assert!(validate_socket_path(&alias.join("service/provider.sock")).is_err());
+        assert!(validate_socket_path(&parent.join("../provider.sock")).is_err());
+    }
 
     #[tokio::test]
     async fn unix_generator_round_trip_and_lifecycle() {
