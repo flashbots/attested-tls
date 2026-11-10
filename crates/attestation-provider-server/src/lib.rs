@@ -1,6 +1,7 @@
 //! Attestation generation through a group-accessible filesystem Unix
 //! socket.
 use std::{
+    io,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     time::Duration,
@@ -18,6 +19,9 @@ use tokio::{
     net::{UnixListener, UnixSocket, UnixStream},
     time::timeout,
 };
+
+/// How long to wait before retrying on a recoverable accept error
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// The underlying unix socket for the service
 pub struct ProviderSocket {
@@ -126,7 +130,7 @@ pub async fn attestation_provider_server(
     generator: AttestationGenerator,
 ) -> anyhow::Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = accept_with_retry(|| listener.accept()).await?;
         let generator = generator.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_connection(stream, generator).await {
@@ -134,6 +138,41 @@ pub async fn attestation_provider_server(
             }
         });
     }
+}
+
+/// Retry connection failures and resource exhaustion without spinning.
+/// Errors indicating a broken listener still propagate to the caller.
+async fn accept_with_retry<T, F, Fut>(mut accept: F) -> io::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = io::Result<T>>,
+{
+    loop {
+        match accept().await {
+            Ok(connection) => return Ok(connection),
+            Err(error) if retryable_accept_error(&error) => {
+                tracing::warn!(%error, "Temporary accept failure; retrying in 100ms");
+                tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn retryable_accept_error(error: &io::Error) -> bool {
+    use nix::errno::Errno;
+
+    matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted |
+            io::ErrorKind::WouldBlock |
+            io::ErrorKind::ConnectionAborted |
+            io::ErrorKind::ConnectionReset |
+            io::ErrorKind::TimedOut
+    ) || matches!(
+        error.raw_os_error().map(Errno::from_i32),
+        Some(Errno::EMFILE | Errno::ENFILE | Errno::ENOBUFS | Errno::ENOMEM)
+    )
 }
 
 async fn serve_connection(
@@ -193,6 +232,40 @@ mod tests {
     use attestation::{AttestationType, Decode, provider::request_attestation};
 
     use super::*;
+
+    #[tokio::test]
+    async fn accept_recovers_after_resource_exhaustion_with_backoff() {
+        use nix::errno::Errno;
+
+        let mut errors = [Errno::EMFILE, Errno::ENFILE, Errno::ENOBUFS, Errno::ENOMEM].into_iter();
+        let start = tokio::time::Instant::now();
+        let connection = accept_with_retry(|| {
+            std::future::ready(match errors.next() {
+                Some(error) => Err(io::Error::from_raw_os_error(error as i32)),
+                None => Ok(42),
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(connection, 42);
+        assert!(start.elapsed() >= ACCEPT_RETRY_DELAY * 4);
+    }
+
+    #[tokio::test]
+    async fn accept_propagates_broken_listener_errors_without_retrying() {
+        use nix::errno::Errno;
+
+        for error in [Errno::EBADF, Errno::EINVAL, Errno::ENOTSOCK, Errno::EACCES] {
+            let mut attempts = 0;
+            let result = accept_with_retry(|| {
+                attempts += 1;
+                assert_eq!(attempts, 1, "permanent errors must not be retried");
+                std::future::ready(Err::<(), _>(io::Error::from_raw_os_error(error as i32)))
+            })
+            .await;
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(error as i32));
+        }
+    }
 
     #[tokio::test]
     async fn rejects_replaceable_ancestors() {
