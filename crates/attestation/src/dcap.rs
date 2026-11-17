@@ -149,7 +149,7 @@ fn unix_time_now_secs() -> Result<u64, DcapVerificationError> {
 }
 
 /// Fetch collateral through the PCCS and verify at the wall clock
-pub(crate) async fn verify_quote(
+async fn verify_quote(
     raw_quote: Vec<u8>,
     expected_input_data: [u8; 64],
     pccs: Pccs,
@@ -168,7 +168,7 @@ pub(crate) async fn verify_quote(
 /// [verify_quote], for a caller with no async runtime
 ///
 /// The collateral has to be in the PCCS cache already.
-pub(crate) fn verify_quote_sync(
+fn verify_quote_sync(
     raw_quote: Vec<u8>,
     expected_input_data: [u8; 64],
     pccs: Pccs,

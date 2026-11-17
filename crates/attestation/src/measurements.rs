@@ -126,7 +126,11 @@ impl DcapMeasurements {
 
 impl fmt::Debug for DcapMeasurements {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        DcapHexDebug(self).fmt(f)
+        let mut map = f.debug_map();
+        for (register, value) in self.iter() {
+            map.entry(&register, &hex::encode(value));
+        }
+        map.finish()
     }
 }
 
@@ -143,23 +147,8 @@ impl fmt::Debug for MultiMeasurements {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Dcap(measurements) => f.debug_tuple("DCAP").field(measurements).finish(),
-
             Self::NoAttestation => f.write_str("NoAttestation"),
         }
-    }
-}
-
-/// Used to display DCAP measurements as hex
-struct DcapHexDebug<'a>(&'a DcapMeasurements);
-
-impl fmt::Debug for DcapHexDebug<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let mut map = f.debug_map();
-        for (register, value) in self.0.iter() {
-            let hex_value = hex::encode(value);
-            map.entry(&register, &hex_value);
-        }
-        map.finish()
     }
 }
 
@@ -206,9 +195,7 @@ impl ExpectedMeasurements {
 
     /// Parse the JSON used in HTTP headers
     pub fn from_header_format(input: &str) -> Result<Self, MeasurementFormatError> {
-        fn decode_values<const N: usize>(
-            values: Vec<String>,
-        ) -> Result<Vec<[u8; N]>, MeasurementFormatError> {
+        fn decode_values(values: Vec<String>) -> Result<Vec<[u8; 48]>, MeasurementFormatError> {
             values
                 .into_iter()
                 .map(|value| {
@@ -223,7 +210,7 @@ impl ExpectedMeasurements {
                 dcap_measurements
                     .into_iter()
                     .map(|(register, values)| {
-                        Ok((register.parse::<u8>()?.try_into()?, decode_values::<48>(values)?))
+                        Ok((register.parse::<u8>()?.try_into()?, decode_values(values)?))
                     })
                     .collect::<Result<_, MeasurementFormatError>>()?,
             ),
@@ -308,9 +295,8 @@ impl MeasurementRecord {
 /// type
 #[derive(Clone, Debug)]
 pub struct MeasurementPolicy {
-    /// A map of accepted attestation types to accepted measurement values
-    /// A value of None means accept any measurement value for this
-    /// measurement type
+    /// Accepted policy records. An empty DCAP register map accepts any
+    /// measurement values for the record's attestation type.
     pub(crate) accepted_measurements: Vec<MeasurementRecord>,
 }
 
@@ -334,19 +320,14 @@ impl MeasurementPolicy {
             accepted_measurements: vec![
                 MeasurementRecord::allow_no_attestation(),
                 MeasurementRecord::allow_any_measurement(AttestationType::DcapTdx),
-                MeasurementRecord::allow_any_measurement(AttestationType::GcpTdx),
             ],
         }
     }
 
     /// Accept any TDX attestation regardless of platform
     pub fn tdx() -> Self {
-        Self {
-            accepted_measurements: vec![
-                MeasurementRecord::allow_any_measurement(AttestationType::DcapTdx),
-                MeasurementRecord::allow_any_measurement(AttestationType::GcpTdx),
-            ],
-        }
+        // Generic DCAP policy also accepts GCP evidence.
+        Self::single_attestation_type(AttestationType::DcapTdx)
     }
 
     /// Expect mock measurements used in tests
@@ -425,7 +406,6 @@ impl MeasurementPolicy {
                         ExpectedMeasurements::NoAttestation => false,
                     }
                 }
-
                 MultiMeasurements::NoAttestation => {
                     matches!(measurement_record.measurements, ExpectedMeasurements::NoAttestation)
                 }
@@ -545,13 +525,13 @@ impl MeasurementPolicy {
             expected_any: Option<Vec<String>>,
         }
 
-        fn parse_measurement_entry<const N: usize>(
+        fn parse_measurement_entry(
             entry: &MeasurementEntry,
             register_name: &str,
-        ) -> Result<Vec<[u8; N]>, MeasurementFormatError> {
+        ) -> Result<Vec<[u8; 48]>, MeasurementFormatError> {
             match (&entry.expected, &entry.expected_any) {
                 (Some(single), None) => {
-                    let bytes: [u8; N] = hex::decode(single)?
+                    let bytes: [u8; 48] = hex::decode(single)?
                         .try_into()
                         .map_err(|_| MeasurementFormatError::BadLength)?;
                     Ok(vec![bytes])
@@ -569,7 +549,7 @@ impl MeasurementPolicy {
                                 .try_into()
                                 .map_err(|_| MeasurementFormatError::BadLength)
                         })
-                        .collect::<Result<Vec<[u8; N]>, _>>()?;
+                        .collect::<Result<Vec<[u8; 48]>, _>>()?;
                     Ok(values)
                 }
                 (Some(_), Some(_)) => Err(MeasurementFormatError::BothExpectedAndExpectedAny(
@@ -631,7 +611,7 @@ impl MeasurementPolicy {
                                 .map(|(index_str, entry)| {
                                     Ok((
                                         DcapMeasurementRegister::from_policy_key(index_str)?,
-                                        parse_measurement_entry::<48>(entry, index_str)?,
+                                        parse_measurement_entry(entry, index_str)?,
                                     ))
                                 })
                                 .collect::<Result<
@@ -1624,6 +1604,26 @@ mod removal_tests {
     use parity_scale_codec::{Decode, Encode};
 
     use super::*;
+
+    #[test]
+    fn permissive_policies_accept_both_supported_platforms() {
+        let measurements = mock_dcap_measurements();
+        for kind in [AttestationType::DcapTdx, AttestationType::GcpTdx] {
+            let metadata = crate::mock_platform_metadata(kind).unwrap();
+            MeasurementPolicy::tdx().check_measurement(&measurements, Some(&metadata)).unwrap();
+            MeasurementPolicy::accept_anything()
+                .check_measurement(&measurements, Some(&metadata))
+                .unwrap();
+        }
+        assert!(
+            MeasurementPolicy::tdx()
+                .check_measurement(&MultiMeasurements::NoAttestation, None)
+                .is_err()
+        );
+        MeasurementPolicy::accept_anything()
+            .check_measurement(&MultiMeasurements::NoAttestation, None)
+            .unwrap();
+    }
 
     #[test]
     fn unsupported_policy_records_and_headers_are_rejected() {
