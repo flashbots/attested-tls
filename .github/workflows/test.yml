@@ -12,11 +12,6 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
 
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y pkg-config libtss2-dev
-
     - name: Set up stable Rust
       uses: dtolnay/rust-toolchain@stable
       with:
@@ -41,14 +36,20 @@ jobs:
     - name: Check formatting using nightly
       run: cargo +nightly fmt --all -- --check
 
+    - name: Check production build
+      run: cargo check --workspace --locked
+
     - name: Run cargo clippy using stable
-      run: cargo +stable clippy --workspace --features azure-attester -- -D warnings
+      run: cargo +stable clippy --workspace --all-features -- -D warnings
 
-    - name: Run cargo test
-      run: cargo test --workspace --features azure-attester --all-targets
+    - name: Test default features
+      run: cargo test --workspace --all-targets
 
-  azure_verifier_portability:
-    name: "CI: Azure verifier portability (macOS)"
+    - name: Test all features
+      run: cargo test --workspace --all-features
+
+  attestation_portability:
+    name: "CI: Attestation portability (macOS)"
 
     runs-on: macos-latest
 
@@ -70,15 +71,8 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-
 
-    - name: Check azure-verifier builds without the TPM stack
-      run: cargo check -p attestation --no-default-features --features azure-verifier
-
-    # `azure-attester` carries its generation dependencies per-target, so off
-    # x86_64 linux it has to stay enabled and contribute nothing rather than
-    # fail to build. macos-latest is aarch64-darwin, the target
-    # tss-esapi-sys has no bindings for.
-    - name: Check azure-attester builds off x86_64 linux
+    - name: Check all features
       run: cargo check -p attestation --all-features
 
-    - name: Test azure-verifier
-      run: cargo test -p attestation --no-default-features --features azure-verifier
+    - name: Test default features
+      run: cargo test -p attestation --no-default-features

@@ -20,8 +20,6 @@
 //! [VerifiedAttestation]: verification parses it anyway, and the GCP
 //! provenance check needs the PPID from its PCK leaf. Other callers drop
 //! it.
-#[cfg(feature = "azure-verifier")]
-use dcap_qvl::tcb_info::TcbInfo;
 use dcap_qvl::{
     QuoteCollateralV3,
     intel::{quote_ca, quote_fmspc},
@@ -42,11 +40,6 @@ use crate::{
     measurements::MultiMeasurements,
 };
 
-/// FMSPC with which to override TCB level checks on Azure (not used for GCP
-/// or other platforms)
-#[cfg(feature = "azure-verifier")]
-const AZURE_BAD_FMSPC: &str = "90C06F000000";
-
 /// Generate a TDX quote
 pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
     let quote = generate_quote(input_data)?;
@@ -61,7 +54,7 @@ pub async fn verify_dcap_attestation(
     expected_input_data: [u8; 64],
     pccs: Pccs,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
-    verify_quote(input, expected_input_data, pccs, false, &QuoteVerifier::new_prod()).await
+    verify_quote(input, expected_input_data, pccs, &QuoteVerifier::new_prod()).await
 }
 
 /// Synchronous version - verify a DCAP TDX quote
@@ -78,7 +71,7 @@ pub fn verify_dcap_attestation_sync(
     expected_input_data: [u8; 64],
     pccs: Pccs,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
-    verify_quote_sync(input, expected_input_data, pccs, false, &QuoteVerifier::new_prod())
+    verify_quote_sync(input, expected_input_data, pccs, &QuoteVerifier::new_prod())
 }
 
 /// Re-verify a DCAP TDX quote against the endorsements a previous
@@ -93,13 +86,7 @@ pub fn verify_dcap_attestation_archived(
     expected_input_data: [u8; 64],
     endorsements: &EndorsementSnapshot,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
-    verify_quote_archived(
-        input,
-        expected_input_data,
-        endorsements,
-        false,
-        &QuoteVerifier::new_prod(),
-    )
+    verify_quote_archived(input, expected_input_data, endorsements, &QuoteVerifier::new_prod())
 }
 
 /// Verify a quote minted by [mock_tdx], which chains to the mock root CA
@@ -117,11 +104,10 @@ pub async fn verify_dcap_attestation(
             input,
             expected_input_data,
             &mock_endorsements_now()?,
-            false,
             &mock_tdx::mock_dcap_verifier(),
         );
     }
-    verify_quote(input, expected_input_data, pccs, false, &mock_tdx::mock_dcap_verifier()).await
+    verify_quote(input, expected_input_data, pccs, &mock_tdx::mock_dcap_verifier()).await
 }
 
 /// Synchronous version - verify a quote minted by [mock_tdx]
@@ -136,11 +122,10 @@ pub fn verify_dcap_attestation_sync(
             input,
             expected_input_data,
             &mock_endorsements_now()?,
-            false,
             &mock_tdx::mock_dcap_verifier(),
         );
     }
-    verify_quote_sync(input, expected_input_data, pccs, false, &mock_tdx::mock_dcap_verifier())
+    verify_quote_sync(input, expected_input_data, pccs, &mock_tdx::mock_dcap_verifier())
 }
 
 /// Re-verify a quote minted by [mock_tdx] against a reported snapshot
@@ -150,13 +135,7 @@ pub fn verify_dcap_attestation_archived(
     expected_input_data: [u8; 64],
     endorsements: &EndorsementSnapshot,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
-    verify_quote_archived(
-        input,
-        expected_input_data,
-        endorsements,
-        false,
-        &mock_tdx::mock_dcap_verifier(),
-    )
+    verify_quote_archived(input, expected_input_data, endorsements, &mock_tdx::mock_dcap_verifier())
 }
 
 /// The embedded mock collateral, held to the wall clock
@@ -174,7 +153,6 @@ pub(crate) async fn verify_quote(
     raw_quote: Vec<u8>,
     expected_input_data: [u8; 64],
     pccs: Pccs,
-    override_azure_outdated_tcb: bool,
     verifier: &QuoteVerifier,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
     let now = unix_time_now_secs()?;
@@ -184,15 +162,7 @@ pub(crate) async fn verify_quote(
 
     let (collateral, _is_fresh) = pccs.get_collateral(fmspc, ca, now).await?;
 
-    verify_quote_with_collateral(
-        raw_quote,
-        quote,
-        expected_input_data,
-        collateral,
-        now,
-        override_azure_outdated_tcb,
-        verifier,
-    )
+    verify_quote_with_collateral(raw_quote, quote, expected_input_data, collateral, now, verifier)
 }
 
 /// [verify_quote], for a caller with no async runtime
@@ -202,7 +172,6 @@ pub(crate) fn verify_quote_sync(
     raw_quote: Vec<u8>,
     expected_input_data: [u8; 64],
     pccs: Pccs,
-    override_azure_outdated_tcb: bool,
     verifier: &QuoteVerifier,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
     let now = unix_time_now_secs()?;
@@ -212,15 +181,7 @@ pub(crate) fn verify_quote_sync(
 
     let collateral = pccs.get_collateral_sync(fmspc, ca, now)?;
 
-    verify_quote_with_collateral(
-        raw_quote,
-        quote,
-        expected_input_data,
-        collateral,
-        now,
-        override_azure_outdated_tcb,
-        verifier,
-    )
+    verify_quote_with_collateral(raw_quote, quote, expected_input_data, collateral, now, verifier)
 }
 
 /// Verify against a reported snapshot: its bundle, at its instant, with
@@ -229,7 +190,6 @@ pub(crate) fn verify_quote_archived(
     raw_quote: Vec<u8>,
     expected_input_data: [u8; 64],
     endorsements: &EndorsementSnapshot,
-    override_azure_outdated_tcb: bool,
     verifier: &QuoteVerifier,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
     let collateral =
@@ -242,7 +202,6 @@ pub(crate) fn verify_quote_archived(
         expected_input_data,
         collateral,
         endorsements.at,
-        override_azure_outdated_tcb,
         verifier,
     )
 }
@@ -254,41 +213,13 @@ fn verify_quote_with_collateral(
     expected_input_data: [u8; 64],
     collateral: QuoteCollateralV3,
     now: u64,
-    override_azure_outdated_tcb: bool,
     verifier: &QuoteVerifier,
 ) -> Result<(VerifiedAttestation, Quote), DcapVerificationError> {
     tracing::info!("Verifying DCAP attestation: {quote:?}");
 
     let fmspc = hex::encode_upper(quote_fmspc(&quote)?);
 
-    #[cfg(feature = "azure-verifier")]
-    let verified_report = if override_azure_outdated_tcb {
-        verifier.dangerous_verify_with_tcb_override(
-            &raw_quote,
-            &collateral,
-            now,
-            |mut tcb_info: TcbInfo| {
-                // Work around a known outdated Azure FMSPC only when
-                // explicitly enabled.
-                if tcb_info.fmspc == AZURE_BAD_FMSPC {
-                    for tcb_level in &mut tcb_info.tcb_levels {
-                        if tcb_level.tcb.sgx_components[7].svn > 3 {
-                            tcb_level.tcb.sgx_components[7].svn = 3
-                        }
-                    }
-                }
-                tcb_info
-            },
-        )?
-    } else {
-        verifier.verify(&raw_quote, &collateral, now)?
-    };
-
-    #[cfg(not(feature = "azure-verifier"))]
-    let verified_report = {
-        let _ = override_azure_outdated_tcb;
-        verifier.verify(&raw_quote, &collateral, now)?
-    };
+    let verified_report = verifier.verify(&raw_quote, &collateral, now)?;
 
     if verified_report.status != "UpToDate" {
         tracing::warn!(
@@ -373,7 +304,7 @@ mod tests {
 
         let measurements_json = br#"
         [{
-            "measurement_id": "cvm-image-azure-tdx.rootfs-20241107200854.wic.vhd",
+            "measurement_id": "dcap-test-image",
             "attestation_type": "dcap-tdx",
             "measurements": {
             "0": { "expected": "a5844e88897b70c318bef929ef4dfd6c7304c52c4bc9c3f39132f0fdccecf3eb5bab70110ee42a12509a31c037288694"},
@@ -405,7 +336,6 @@ mod tests {
                 173, 129, 180, 32, 247, 70, 250, 141, 176, 248, 99, 125,
             ],
             &EndorsementSnapshot::dcap(fixture_collateral.clone(), now),
-            false,
             &QuoteVerifier::new_prod(),
         )
         .unwrap();
@@ -429,38 +359,6 @@ mod tests {
     }
 
     // This specifically tests a quote which has outdated TCB level from
-    // Azure
-    #[test]
-    fn test_dcap_verify_azure_override() {
-        let attestation_bytes: &'static [u8] =
-            include_bytes!("../test-assets/azure_failed_dcap_quote_10.bin");
-
-        // To avoid this test stopping working when the certificate is no
-        // longer valid we pass in a timestamp
-        let now = 1771414156;
-
-        let collateral_bytes: &'static [u8] =
-            include_bytes!("../test-assets/azure-collateral.yaml");
-
-        let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
-
-        let result = verify_quote_archived(
-            attestation_bytes.to_vec(),
-            [
-                210, 20, 43, 100, 53, 152, 235, 95, 174, 43, 200, 82, 157, 215, 154, 85, 139, 41,
-                248, 104, 204, 187, 101, 49, 203, 40, 218, 185, 220, 228, 119, 40, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            ],
-            &EndorsementSnapshot::dcap(collateral, now),
-            true,
-            &QuoteVerifier::new_prod(),
-        );
-
-        #[cfg(feature = "azure-verifier")]
-        result.unwrap();
-        #[cfg(not(feature = "azure-verifier"))]
-        assert!(result.is_err());
-    }
 
     #[tokio::test]
     async fn test_mock_dcap_verify_uses_pccs_when_provided() {
