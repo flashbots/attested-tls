@@ -170,7 +170,7 @@ fn retryable_accept_error(error: &io::Error) -> bool {
             io::ErrorKind::ConnectionReset |
             io::ErrorKind::TimedOut
     ) || matches!(
-        error.raw_os_error().map(Errno::from_i32),
+        error.raw_os_error().map(Errno::from_raw),
         Some(Errno::EMFILE | Errno::ENFILE | Errno::ENOBUFS | Errno::ENOMEM)
     )
 }
