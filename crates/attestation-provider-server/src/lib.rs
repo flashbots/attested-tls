@@ -126,7 +126,7 @@ impl Drop for ProviderSocket {
 /// Serve an already-bound listener. The caller controls permissions and
 /// path cleanup.
 pub async fn attestation_provider_server(
-    listener: UnixListener,
+    listener: &UnixListener,
     generator: AttestationGenerator,
 ) -> anyhow::Result<()> {
     loop {
