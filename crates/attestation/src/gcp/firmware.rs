@@ -163,7 +163,6 @@ mod tests {
             attestation_bytes.to_vec(),
             expected_input_data,
             &EndorsementSnapshot::dcap(collateral, GCP_TDX_PORTABLE_FIXTURE_TIMESTAMP),
-            false,
             &QuoteVerifier::new_prod(),
         )
         .unwrap();
