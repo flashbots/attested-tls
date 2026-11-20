@@ -1,8 +1,9 @@
 //! Attestation generation through a group-accessible filesystem Unix
 //! socket.
 use std::{
+    fs::{File, OpenOptions},
     io,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     time::Duration,
 };
@@ -14,6 +15,7 @@ use attestation::{
     Encode,
     provider::{MAX_RESPONSE_SIZE, ProviderError, ProviderResponse},
 };
+use nix::fcntl::{Flock, FlockArg, OFlag};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixSocket, UnixStream},
@@ -29,12 +31,17 @@ pub struct ProviderSocket {
     path: PathBuf,
     device: u64,
     inode: u64,
+    // Fields drop after our Drop implementation, so cleanup runs while locked.
+    _lock: Flock<File>,
 }
 
 impl ProviderSocket {
-    /// Existing paths are never removed at startup.
+    /// Remove stale service-owned sockets at startup; preserve active
+    /// sockets and all other existing paths.
     pub fn bind(path: &Path) -> anyhow::Result<Self> {
         validate_socket_path(path)?;
+        let lock = lock_socket(path)?;
+        remove_stale_socket(path)?;
         let socket = UnixSocket::new_stream()?;
         socket.bind(path)?;
         let metadata = std::fs::symlink_metadata(path)?;
@@ -53,10 +60,72 @@ impl ProviderSocket {
             path: cleanup.path.clone(),
             device: cleanup.device,
             inode: cleanup.inode,
+            _lock: lock,
         };
         cleanup.armed = false;
         Ok(result)
     }
+}
+
+fn lock_socket(path: &Path) -> anyhow::Result<Flock<File>> {
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    // Keep this file permanently: unlinking it would allow two instances to
+    // lock different inodes. O_NONBLOCK also prevents a FIFO from hanging
+    // open.
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
+        .open(Path::new(&lock_path))?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.uid() == nix::unistd::geteuid().as_raw(),
+        "Lock file {} must be a service-owned regular file",
+        Path::new(&lock_path).display()
+    );
+    Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|(_, error)| {
+        if error == nix::errno::Errno::EWOULDBLOCK {
+            anyhow::anyhow!("Provider already running for {}", path.display())
+        } else {
+            error.into()
+        }
+    })
+}
+
+fn remove_stale_socket(path: &Path) -> anyhow::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        metadata.file_type().is_socket() && metadata.uid() == nix::unistd::geteuid().as_raw(),
+        "Existing socket path {} must be a service-owned socket",
+        path.display()
+    );
+
+    // A nonblocking probe cannot hang if a live listener's backlog is full.
+    // Only connection refusal proves that the socket has no listener.
+    let probe = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+    probe.set_nonblocking(true)?;
+    match probe.connect(&socket2::SockAddr::unix(path)?) {
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {}
+        Err(error) => return Err(error.into()),
+        Ok(()) => anyhow::bail!("Socket {} is already in use", path.display()),
+    }
+
+    let current = std::fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        current.dev() == metadata.dev() && current.ino() == metadata.ino(),
+        "Socket {} changed during stale socket cleanup",
+        path.display()
+    );
+    std::fs::remove_file(path)?;
+    Ok(())
 }
 
 /// Walk from the root so each directory is protected against replacement
@@ -290,6 +359,68 @@ mod tests {
         std::os::unix::fs::symlink(&ancestor, &alias).unwrap();
         assert!(validate_socket_path(&alias.join("service/provider.sock")).is_err());
         assert!(validate_socket_path(&parent.join("../provider.sock")).is_err());
+    }
+
+    #[tokio::test]
+    async fn lock_protects_socket_before_listen_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.sock");
+        let lock_path = dir.path().join("provider.sock.lock");
+        let lock = lock_socket(&path).unwrap();
+        let lock_inode = std::fs::metadata(&lock_path).unwrap().ino();
+        let pending = UnixSocket::new_stream().unwrap();
+        pending.bind(&path).unwrap();
+        let socket_inode = std::fs::metadata(&path).unwrap().ino();
+
+        let error = ProviderSocket::bind(&path).err().unwrap();
+        assert!(error.to_string().contains("Provider already running"));
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), socket_inode);
+        drop(pending);
+        drop(lock);
+
+        let socket = ProviderSocket::bind(&path).unwrap();
+        assert!(ProviderSocket::bind(&path).is_err());
+        drop(socket);
+        assert!(!path.exists());
+        assert_eq!(std::fs::metadata(&lock_path).unwrap().ino(), lock_inode);
+        drop(ProviderSocket::bind(&path).unwrap());
+        assert_eq!(std::fs::metadata(&lock_path).unwrap().ino(), lock_inode);
+    }
+
+    #[tokio::test]
+    async fn rejects_symlink_and_nonregular_lock_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.sock");
+        let lock_path = dir.path().join("provider.sock.lock");
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, &lock_path).unwrap();
+        assert!(ProviderSocket::bind(&path).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        assert!(!path.exists());
+        std::fs::remove_file(&lock_path).unwrap();
+        nix::unistd::mkfifo(
+            &lock_path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        assert!(ProviderSocket::bind(&path).is_err());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn replaces_stale_socket_after_listener_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(ProviderSocket::bind(&path).is_err());
+        drop(listener);
+        assert!(path.exists());
+
+        let socket = ProviderSocket::bind(&path).unwrap();
+        assert!(path.exists());
+        drop(socket);
+        assert!(!path.exists());
     }
 
     #[tokio::test]
