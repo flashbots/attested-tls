@@ -287,7 +287,7 @@ impl Pccs {
 
             upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
         }
-        self.ensure_refresh_task(&cache_key).await;
+        self.ensure_refresh_task(&cache_key);
         Ok((collateral, true))
     }
 
@@ -331,7 +331,7 @@ impl Pccs {
                 // Start a background task to renew
                 let pccs = self.clone();
                 tokio::spawn(async move {
-                    pccs.ensure_refresh_task(&cache_key).await;
+                    pccs.ensure_refresh_task(&cache_key);
                 });
 
                 return Ok(collateral);
@@ -364,13 +364,13 @@ impl Pccs {
             let mut cache = inner.cache.write().map_err(|_| PccsError::CachePoisoned)?;
             upsert_cache_entry(&mut cache, cache_key.clone(), collateral.clone(), next_update);
         }
-        self.ensure_refresh_task(&cache_key).await;
+        self.ensure_refresh_task(&cache_key);
         Ok(collateral)
     }
 
     /// Starts a background refresh loop for a cache key when no task is
     /// active
-    async fn ensure_refresh_task(&self, cache_key: &PccsInput) {
+    fn ensure_refresh_task(&self, cache_key: &PccsInput) {
         let Some(inner) = &self.inner else {
             return;
         };
