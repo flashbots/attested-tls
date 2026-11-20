@@ -9,13 +9,12 @@ pub mod azure;
 pub mod dcap;
 mod gcp;
 pub mod measurements;
+pub mod provider;
 mod trusted_firmware;
 #[cfg(test)]
 use std::sync::OnceLock;
 use std::{
     fmt::{self, Display, Formatter},
-    io::Read,
-    net::IpAddr,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -225,21 +224,20 @@ impl Display for AttestationType {
 #[derive(Debug, Clone)]
 pub struct AttestationGenerator {
     pub attestation_type: AttestationType,
-    attestation_provider_url: Option<String>,
+    attestation_provider_socket: Option<std::path::PathBuf>,
 }
 
 impl AttestationGenerator {
     /// Create an attestation generator with given attestation type
     pub fn new(
         attestation_type: AttestationType,
-        attestation_provider_url: Option<String>,
+        attestation_provider_socket: Option<std::path::PathBuf>,
     ) -> Result<Self, AttestationError> {
-        // If an attestation provider is given, normalize the URL and check
-        // that it looks like a local IP
-        let attestation_provider_url =
-            attestation_provider_url.map(map_attestation_provider_url).transpose()?;
+        if let Some(path) = &attestation_provider_socket {
+            provider::validate_path(path)?;
+        }
 
-        Ok(Self { attestation_type, attestation_provider_url })
+        Ok(Self { attestation_type, attestation_provider_socket })
     }
 
     /// Detect what confidential compute platform is present and create the
@@ -250,21 +248,21 @@ impl AttestationGenerator {
 
     /// Do not generate attestations
     pub fn with_no_attestation() -> Self {
-        Self { attestation_type: AttestationType::None, attestation_provider_url: None }
+        Self { attestation_type: AttestationType::None, attestation_provider_socket: None }
     }
 
     /// Create an [AttestationGenerator] detecting the attestation type if
     /// it is not given
     pub fn new_with_detection(
         attestation_type_string: Option<String>,
-        attestation_provider_url: Option<String>,
+        attestation_provider_socket: Option<std::path::PathBuf>,
     ) -> Result<Self, AttestationError> {
-        if attestation_provider_url.is_some() {
+        if attestation_provider_socket.is_some() {
             // If a remote provider is used, dont do detection
             let attestation_type = serde_json::from_value(serde_json::Value::String(
                 attestation_type_string.ok_or(AttestationError::AttestationTypeNotGiven)?,
             ))?;
-            return Self::new(attestation_type, attestation_provider_url);
+            return Self::new(attestation_type, attestation_provider_socket);
         };
 
         let attestation_type_string = attestation_type_string.unwrap_or_else(|| "auto".to_string());
@@ -284,8 +282,8 @@ impl AttestationGenerator {
         &self,
         input_data: [u8; 64],
     ) -> Result<AttestationExchangeMessage, AttestationError> {
-        if let Some(url) = &self.attestation_provider_url {
-            Self::use_attestation_provider(url, self.attestation_type, input_data)
+        if let Some(path) = &self.attestation_provider_socket {
+            Self::use_attestation_provider(path, self.attestation_type, input_data)
         } else {
             match self.attestation_type {
                 AttestationType::None => Ok(AttestationExchangeMessage::without_attestation()),
@@ -330,35 +328,14 @@ impl AttestationGenerator {
     /// Generate an attestation by using an external service for the
     /// attestation generation
     fn use_attestation_provider(
-        url: &str,
+        path: &std::path::Path,
         attestation_type: AttestationType,
         input_data: [u8; 64],
     ) -> Result<AttestationExchangeMessage, AttestationError> {
         if attestation_type == AttestationType::None {
             return Ok(AttestationExchangeMessage::without_attestation());
         }
-
-        let url = format!("{}/attest/{}", url, hex::encode(input_data));
-
-        let timeout = Duration::from_secs(1);
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .proxy(None)
-            .max_redirects(5)
-            .timeout_global(Some(timeout))
-            .build()
-            .into();
-        let response = agent
-            .get(&url)
-            .call()
-            .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?;
-        let mut response = response.into_body().into_reader();
-        let mut body = Vec::new();
-        response
-            .read_to_end(&mut body)
-            .map_err(|err| AttestationError::AttestationProvider(err.to_string()))?;
-
-        AttestationExchangeMessage::decode(&mut &body[..])
-            .map_err(|err| AttestationError::AttestationProvider(err.to_string()))
+        provider::request_attestation(path, input_data)
     }
 }
 
@@ -1123,57 +1100,6 @@ fn running_on_gcp() -> Result<bool, AttestationError> {
     Ok(false)
 }
 
-/// If an attestation provider service is used, we ensure that it looks like
-/// a local IP
-///
-/// This is to avoid dangerous configuration where the attestation is
-/// provided by a remote machine
-///
-/// This by no means guarantees a safe configuration
-fn map_attestation_provider_url(url: String) -> Result<String, AttestationError> {
-    // Fist put it in the format that reqwest expects
-    let url = if url.starts_with("http://") || url.starts_with("https://") {
-        url.to_string()
-    } else {
-        format!("http://{}", url.trim_start_matches("http://"))
-    };
-
-    let url = url.strip_suffix('/').unwrap_or(&url).to_string();
-    let url = url.strip_suffix("/attest").unwrap_or(&url).to_string();
-
-    // If compiled in test mode, skip this check
-    if !cfg!(test) {
-        let parsed = url
-            .parse::<std::net::SocketAddr>()
-            .or_else(|_| {
-                // Try parsing as a URL to extract host
-                let parsed = url.parse::<http::Uri>().map_err(|_| "Invalid URL")?;
-
-                let host = parsed.host().ok_or("URL missing host")?;
-
-                host.parse::<std::net::IpAddr>()
-                    .map_err(|_| "Only local IP addresses may be used as attestation provider URL")
-                    .map(|ip| std::net::SocketAddr::new(ip, 0))
-            })
-            .map_err(|e| AttestationError::AttestationProviderUrl(e.to_string()))?;
-
-        if !is_local_ip(parsed.ip()) {
-            return Err(AttestationError::AttestationProviderUrl(
-                "Given URL does not appear to contain a local IP address".to_string(),
-            ));
-        }
-    }
-    Ok(url)
-}
-
-/// Check if an IP address looks like it is local
-fn is_local_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
-        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
-    }
-}
-
 #[cfg(any(test, feature = "mock"))]
 /// Create mock platform metadata for tests
 pub fn mock_platform_metadata(
@@ -1223,8 +1149,8 @@ pub enum AttestationError {
     AttestationTypeNotGiven,
     #[error("Attestation provider server: {0}")]
     AttestationProvider(String),
-    #[error("Attestation provider URL: {0}")]
-    AttestationProviderUrl(String),
+    #[error("Attestation provider socket: {0}")]
+    AttestationProviderPath(String),
     #[error("JSON: {0}")]
     SerdeJson(#[from] serde_json::Error),
     #[error("HTTP client: {0}")]
