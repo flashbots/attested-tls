@@ -637,7 +637,7 @@ impl AttestationVerifier {
 
     /// Synchronously verifies an attestation against the configured policy.
     ///
-    /// DCAP verification require [`CachePolicy::OnDemand`] or
+    /// DCAP verification requires [`CachePolicy::OnDemand`] or
     /// [`CachePolicy::Prewarmed`] with the requested collateral already
     /// cached. [`CachePolicy::Passthrough`] cannot fetch collateral
     /// synchronously. A cache miss returns an error and starts a background
