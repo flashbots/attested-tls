@@ -31,7 +31,8 @@ pub struct ProviderSocket {
     path: PathBuf,
     device: u64,
     inode: u64,
-    // Fields drop after our Drop implementation, so cleanup runs while locked.
+    // Fields drop after our Drop implementation, so cleanup runs while
+    // locked.
     _lock: Flock<File>,
 }
 
