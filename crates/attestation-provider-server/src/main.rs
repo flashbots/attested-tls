@@ -1,4 +1,4 @@
-use std::{os::fd::AsFd, path::PathBuf};
+use std::path::PathBuf;
 
 use attestation::{
     AttestationGenerator,
@@ -94,12 +94,8 @@ async fn main() -> anyhow::Result<()> {
 
             let socket = ProviderSocket::bind(&cli.socket_path)?;
             println!("Listening on {}", cli.socket_path.display());
-            let listener = std::os::unix::net::UnixListener::from(
-                socket.listener.as_fd().try_clone_to_owned()?,
-            );
-            let listener = tokio::net::UnixListener::from_std(listener)?;
             tokio::select! {
-                result = attestation_provider_server(listener, attestation_generator) => result?,
+                result = attestation_provider_server(&socket.listener, attestation_generator) => result?,
                 _ = shutdown_signal() => {},
             }
             drop(socket);
