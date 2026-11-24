@@ -5,9 +5,8 @@ policy handling.
 
 This crate provides:
 
-- Attestation type detection (`none`, `dcap-tdx`, `gcp-tdx`, and `azure-tdx`
-  when enabled)
-- Attestation generation and verification for DCAP and (optionally) Azure
+- Attestation type detection (`none`, `dcap-tdx`, and `gcp-tdx`)
+- Attestation generation and verification for DCAP
 - Parsing and evaluation of measurement policies
 
 ## Verification results
@@ -81,53 +80,6 @@ individual collateral fetches can still have failed.
 
 ## Feature flags
 
-### `azure-attester`
-
-Enables generation of Microsoft Azure vTPM attestation evidence on Azure TDX
-CVMs, through `tss-esapi`. Implies `azure-verifier`, giving full Azure
-attestation support.
-
-This feature requires [tpm2](https://tpm2-software.github.io) and `openssl` to
-be installed. On Debian-based systems tpm2 is provided by
-[`libtss2-dev`](https://packages.debian.org/trixie/libtss2-dev), and on nix
-`tpm2-tss`.
-
-The generation code is compiled for x86_64 Linux targets only — where an Azure
-TDX CVM actually runs. **Elsewhere, MacOS and aarch64 Linux included,
-`azure-attester` stays enabled but contributes nothing:** its generation
-dependencies are target-gated out, so the crate behaves as if only
-`azure-verifier` were enabled. `--all-features` still builds everywhere, but
-`AttestationType::detect` will never report `AzureTdx` and generation will fail
-with `AttestationTypeNotSupported`. Verification is unaffected. `build.rs` emits
-a `cargo::warning` when this happens.
-
-The condition is on the target, not the build host, so any machine can produce a
-build with generation in it via `--target x86_64-unknown-linux-gnu`, given a
-cross toolchain and tpm2-tss and openssl for that target.
-
-**Note:** Azure support is currently **not actively maintained** as we do not
-have production CVMs deployed on Azure and so are unlikely to notice when this
-implementation of Azure attestation generation or verification ceases to work.
-Use at your own risk.
-
-All Azure features are disabled by default. Without `azure-verifier`,
-verification of azure attestations is not possible and azure attestations will
-be rejected with an error.
-
-### `azure-verifier`
-
-Enables verification of Microsoft Azure vTPM attestation evidence.
-Verification is pure computation over the evidence bytes; it requires
-`openssl` but no TPM stack, and builds and runs on Unix platforms, including
-MacOS.
-
-*** Note ***
-
-Azure is known to use an outdated FMSPC `90C06F000000` which will cause
-verifications to fail.  A workaround is provided which will allow this, but it
-must be explicitly enabled via the `override_azure_outdated_tcb` flag on
-`AttestationVerifier`.
-
 ### `mock`
 
 Enables mock quote support via the local `mock-tdx` crate for tests and
@@ -146,13 +98,10 @@ These are the attestation type names used in the measurements file.
 
 - `none` - No attestation provided
 - `gcp-tdx` - DCAP TDX on Google Cloud Platform
-- `azure-tdx` - TDX on Azure, with vTPM attestation
 - `dcap-tdx` - DCAP TDX (platform not specified)
 
-Local attestation types can be automatically detected. This works by initially
-attempting an Azure attestation, and if it fails attempting a DCAP attestation,
-and if that fails assume no CVM attestation.  On detecting DCAP, a call to the
-Google Cloud metadata API is used to detect whether we are on Google Cloud.
+Local detection checks TDX interfaces and uses Google Cloud metadata to identify GCP.
+Without TDX interfaces, no attestation is selected.
 
 In the case of attestation types `dcap-tdx` and `gcp-tdx`, a
 standard DCAP attestation is generated using the `configfs-tsm` linux filesystem
@@ -289,34 +238,7 @@ unacceptable measurements.
 
 ### Measurement field names
 
-For Azure vTMP attestations, the preferred field names are PCR register
-indexes prefixed with `pcr` or `PCR`. For example the following specifies PCRs
-4 and 9:
-
-```JSON
-{
-    "measurement_id": "cvm-image-azure-tdx.rootfs-20241107200854.wic.vhd",
-    "attestation_type": "azure-tdx",
-    "measurements": {
-        "pcr4": {
-            "expected_any": ["1b8cd655f5ebdf50bedabfb5db6b896a0a7c56de54f318103a2de1e7cea57b6b"]
-        },
-        "pcr9": {
-            "expected_any": ["992465f922102234c196f596fdaba86ea16eaa4c264dc425ec26bc2d1c364472"]
-        }
-    }
-}
-```
-
-Legacy numeric field names are still supported for backwards compatibility:
-
-- `"4"` - PCR 4
-- `"9"` - PCR 9
-- `"11"` - PCR 11
-- and so on for valid PCR indices `0` through `23`
-
-All other attestation types are DCAP based. In measurement-policy JSON, the
-preferred field names are the register names and they are matched
+For DCAP policies, preferred field names are register names, matched
 case-insensitively:
 
 - `mrtd` - MRTD
@@ -337,15 +259,13 @@ Legacy numeric field names are still supported for backwards compatibility:
 
 `ExpectedMeasurements::to_header_format` serializes the matched policy value
 as self-describing JSON suitable for an HTTP `HeaderValue`. Hashes are
-lowercase hexadecimal strings. Both SHA-384 DCAP values and SHA-256 Azure
-values are represented as hex.
+lowercase hexadecimal strings. SHA-384 DCAP values are represented as hex.
 
-DCAP and Azure register values are arrays because a policy can accept more
+DCAP register values are arrays because a policy can accept more
 than one value for each register. Header JSON uses numeric register keys:
 
 - DCAP: `"0"` is MRTD, followed by `"1"` through `"4"` for RTMR0 through
   RTMR3.
-- Azure: the key is the PCR index.
 
 DCAP example:
 
@@ -355,18 +275,6 @@ DCAP example:
   "measurements": {
     "0": ["<96 hex characters>"],
     "3": ["<96 hex characters>", "<96 hex characters>"]
-  }
-}
-```
-
-Azure example:
-
-```JSON
-{
-  "type": "azure",
-  "measurements": {
-    "4": ["<64 hex characters>"],
-    "11": ["<64 hex characters>"]
   }
 }
 ```
@@ -452,19 +360,13 @@ rejected. The accepted firmware assets and their provenance are documented in
 Google-endorsed platform firmware blob keyed by MRTD.
 
 The JSON object emitted directly by `attest measure portable` is also accepted
-as a measurement policy. Its optional `azure` PCR values and its `dcap` image
-hashes are converted into an Azure TDX record and a generic DCAP record
-respectively. It can be supplied on its own or as an element of a policy array,
+as a measurement policy. Its `dcap` image hashes are converted into a generic
+DCAP record. It can be supplied on its own or as an element of a policy array,
 including an array mixed with records in the policy format described above:
 
 ```JSON
 {
   "kind": "portable",
-  "azure": {
-    "pcr4": "<64 hex characters>",
-    "pcr9": "<64 hex characters>",
-    "pcr11": "<64 hex characters>"
-  },
   "dcap": {
     "uki_authenticode": "<96 hex characters>",
     "kernel_authenticode": "<96 hex characters>",
@@ -475,8 +377,7 @@ including an array mixed with records in the policy format described above:
 }
 ```
 
-The non-portable `"kind": "azure"` output from `attest measure` is accepted in
-the same places and pins PCRs 4, 9, and 11. The `"kind": "dcap"` output is
-rejected because it only pins RTMR1 and RTMR2, leaving the other DCAP registers
+The `"kind": "dcap"` output is rejected because it only pins RTMR1 and RTMR2,
+leaving the other DCAP registers
 unconstrained. Use the portable output or an explicit measurement policy
 instead.

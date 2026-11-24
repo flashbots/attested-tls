@@ -1,11 +1,5 @@
 //! CVM attestation generation and verification
 
-// `azure-verifier` is the base Azure feature: it gates the whole module,
-// and `azure-attester` (which implies it) additionally enables the
-// generation code inside, on the x86_64 linux targets where the vTPM it
-// reads exists.
-#[cfg(feature = "azure-verifier")]
-pub mod azure;
 pub mod dcap;
 mod gcp;
 pub mod measurements;
@@ -82,18 +76,8 @@ impl AttestationExchangeMessage {
             return Ok(None);
         };
 
-        match self.attestation_type() {
+        match self.attestation_type()? {
             AttestationType::None => Ok(None),
-            AttestationType::AzureTdx => {
-                #[cfg(feature = "azure-verifier")]
-                {
-                    Ok(Some(azure::get_measurements(&attestation_evidence.quote)?))
-                }
-                #[cfg(not(feature = "azure-verifier"))]
-                {
-                    Err(AttestationError::AttestationTypeNotSupported)
-                }
-            }
             AttestationType::DcapTdx | AttestationType::GcpTdx => {
                 let quote = dcap_qvl::verify::Quote::parse(&attestation_evidence.quote)
                     .map_err(DcapVerificationError::from)?;
@@ -102,11 +86,13 @@ impl AttestationExchangeMessage {
         }
     }
 
-    pub fn attestation_type(&self) -> AttestationType {
+    /// Returns the supported platform type, or an error for unsupported
+    /// evidence.
+    pub fn attestation_type(&self) -> Result<AttestationType, AttestationError> {
         self.attestation_evidence
             .as_ref()
-            .map(|evidence| evidence.platform.attestation_type.into())
-            .unwrap_or(AttestationType::None)
+            .map(|evidence| evidence.platform.attestation_type.try_into())
+            .unwrap_or(Ok(AttestationType::None))
     }
 }
 
@@ -116,12 +102,13 @@ impl From<AttestationEvidence> for AttestationExchangeMessage {
     }
 }
 
-impl From<attest_types::AttestationType> for AttestationType {
-    fn from(attestation_type: attest_types::AttestationType) -> Self {
+impl TryFrom<attest_types::AttestationType> for AttestationType {
+    type Error = AttestationError;
+    fn try_from(attestation_type: attest_types::AttestationType) -> Result<Self, Self::Error> {
         match attestation_type {
-            attest_types::AttestationType::GcpTdx => AttestationType::GcpTdx,
-            attest_types::AttestationType::AzureTdx => AttestationType::AzureTdx,
-            attest_types::AttestationType::SelfHostedTdx => AttestationType::DcapTdx,
+            attest_types::AttestationType::GcpTdx => Ok(AttestationType::GcpTdx),
+            attest_types::AttestationType::SelfHostedTdx => Ok(AttestationType::DcapTdx),
+            _ => Err(AttestationError::AttestationTypeNotSupported),
         }
     }
 }
@@ -132,7 +119,6 @@ impl TryFrom<AttestationType> for attest_types::AttestationType {
     fn try_from(attestation_type: AttestationType) -> Result<Self, Self::Error> {
         match attestation_type {
             AttestationType::None => Err(AttestationError::AttestationTypeNotAccepted),
-            AttestationType::AzureTdx => Ok(attest_types::AttestationType::AzureTdx),
             AttestationType::GcpTdx => Ok(attest_types::AttestationType::GcpTdx),
             AttestationType::DcapTdx => Ok(attest_types::AttestationType::SelfHostedTdx),
         }
@@ -148,8 +134,6 @@ pub enum AttestationType {
     None,
     /// TDX on Google Cloud Platform
     GcpTdx,
-    /// TDX on Azure, with MAA
-    AzureTdx,
     /// DCAP TDX (no cloud platform specified)
     #[serde(alias = "qemu-tdx")] // To support legacy measurements file format
     DcapTdx,
@@ -160,7 +144,6 @@ impl AttestationType {
     pub fn as_str(&self) -> &'static str {
         match self {
             AttestationType::None => "none",
-            AttestationType::AzureTdx => "azure-tdx",
             AttestationType::GcpTdx => "gcp-tdx",
             AttestationType::DcapTdx => "dcap-tdx",
         }
@@ -177,13 +160,6 @@ impl AttestationType {
 
     /// Detect the platform using local interfaces and cloud metadata.
     pub fn detect() -> Result<Self, AttestationError> {
-        // First attempt azure, if the feature is present
-        #[cfg(azure_attester_x86_64_linux)]
-        {
-            if azure::detect_azure_cvm()? {
-                return Ok(AttestationType::AzureTdx);
-            }
-        }
         // Check local TDX interfaces without depending on quote generation
         // or the readiness of QGS/PCCS.
         if tdx_attest::is_tdx_available() {
@@ -287,27 +263,7 @@ impl AttestationGenerator {
         } else {
             match self.attestation_type {
                 AttestationType::None => Ok(AttestationExchangeMessage::without_attestation()),
-                AttestationType::AzureTdx => {
-                    #[cfg(azure_attester_x86_64_linux)]
-                    {
-                        let platform = attest_measure::platform::metadata_for(
-                            self.attestation_type.try_into()?,
-                        )?;
-                        Ok(AttestationExchangeMessage {
-                            attestation_evidence: Some(AttestationEvidence {
-                                quote: azure::create_azure_attestation(input_data)?,
-                                platform,
-                            }),
-                        })
-                    }
-                    #[cfg(not(azure_attester_x86_64_linux))]
-                    {
-                        tracing::error!(
-                            "Azure attestation generation requires the `azure-attester` feature on an x86_64 linux host"
-                        );
-                        Err(AttestationError::AttestationTypeNotSupported)
-                    }
-                }
+
                 AttestationType::DcapTdx | AttestationType::GcpTdx => {
                     #[cfg(any(test, feature = "mock"))]
                     let platform = mock_platform_metadata(self.attestation_type)?;
@@ -391,10 +347,7 @@ impl EndorsementSnapshot {
 /// [RFC 9334]: https://www.rfc-editor.org/rfc/rfc9334.html
 #[derive(Clone, Debug)]
 pub struct VerifiedAttestation {
-    /// MRTD and RTMR0–3 from the quote on DCAP and GCP. On Azure the vTPM
-    /// PCRs, which measure the guest boot rather than the launched TD and
-    /// chain to the TD quote: its report data commits to the HCL var data
-    /// carrying the AK public key that signs the vTPM quote
+    /// MRTD and RTMR0–3 from the DCAP or GCP quote.
     pub measurements: MultiMeasurements,
     /// The reference measurements from the policy record that matched this
     /// attestation. This is populated by [`AttestationVerifier`], after the
@@ -413,11 +366,6 @@ pub struct AttestationVerifier {
     measurement_policy: Arc<RwLock<MeasurementPolicyState>>,
     /// Whether to write quotes to files on disk
     dump_dcap_quotes: bool,
-    /// Whether to override outdated TCB when on Azure
-    ///
-    /// This provides a workaround for a known outdated FMSPC used by Azure
-    #[cfg_attr(not(feature = "azure-verifier"), allow(dead_code))]
-    override_azure_outdated_tcb: bool,
     /// PCCS collateral source, optionally backed by an internal cache
     internal_pccs: Pccs,
     /// Cached GCP firmware blobs indexed by MRTD
@@ -453,8 +401,6 @@ pub struct AttestationVerifierBuilder {
     /// A dynamic measurement policy file or URL
     dynamic_measurement_policy: Option<String>,
     dump_dcap_quotes: bool,
-    /// Whether to override outdated TCB when on Azure
-    override_azure_outdated_tcb: bool,
 }
 
 impl AttestationVerifierBuilder {
@@ -464,7 +410,6 @@ impl AttestationVerifierBuilder {
                 self.measurement_policy,
             ))),
             dump_dcap_quotes: self.dump_dcap_quotes,
-            override_azure_outdated_tcb: self.override_azure_outdated_tcb,
             internal_pccs: Pccs::new(self.collateral_source, self.cache_policy),
             known_gcp_firmware: GcpFirmwareCache::new(),
             gcp_provenance_checker: GcpProvenanceChecker::new(),
@@ -481,18 +426,7 @@ impl AttestationVerifierBuilder {
         self
     }
 
-    /// Whether to override outdated TCB when on Azure
-    ///
-    /// This provides a workaround for a known outdated FMSPC used by Azure
-    /// When `azure-verifier` is disabled, this option has no effect because
-    /// Azure attestations are not supported.
-    pub fn with_override_azure_outdated_tcb(mut self, override_azure_outdated_tcb: bool) -> Self {
-        self.override_azure_outdated_tcb = override_azure_outdated_tcb;
-        self
-    }
-
     /// Configures the service from which DCAP collateral is fetched.
-    ///
     /// The default is anonymous Intel PCS.
     pub fn with_collateral_source(mut self, collateral_source: CollateralSource) -> Self {
         self.collateral_source = collateral_source;
@@ -539,7 +473,6 @@ impl AttestationVerifier {
             collateral_source: CollateralSource::IntelPcs { subscription_key: None },
             cache_policy: CachePolicy::Passthrough,
             dump_dcap_quotes: false,
-            override_azure_outdated_tcb: false,
             dynamic_measurement_policy: None,
         }
     }
@@ -552,7 +485,6 @@ impl AttestationVerifier {
                 MeasurementPolicy::expect_none(),
             ))),
             dump_dcap_quotes: false,
-            override_azure_outdated_tcb: false,
             internal_pccs: Pccs::new(
                 CollateralSource::IntelPcs { subscription_key: None },
                 CachePolicy::Passthrough,
@@ -571,7 +503,6 @@ impl AttestationVerifier {
                 MeasurementPolicy::mock(),
             ))),
             dump_dcap_quotes: false,
-            override_azure_outdated_tcb: false,
             internal_pccs: Pccs::new(
                 CollateralSource::IntelPcs { subscription_key: None },
                 CachePolicy::Passthrough,
@@ -593,7 +524,6 @@ impl AttestationVerifier {
                 MeasurementPolicy::mock(),
             ))),
             dump_dcap_quotes: false,
-            override_azure_outdated_tcb: false,
             internal_pccs: Pccs::new(
                 CollateralSource::Pccs { url: pccs_url },
                 CachePolicy::Prewarmed,
@@ -630,7 +560,7 @@ impl AttestationVerifier {
         attestation_exchange_message: AttestationExchangeMessage,
         expected_input_data: [u8; 64],
     ) -> Result<Option<VerifiedAttestation>, AttestationError> {
-        let attestation_type = attestation_exchange_message.attestation_type();
+        let attestation_type = attestation_exchange_message.attestation_type()?;
         tracing::debug!("Verifying {attestation_type} attestation");
 
         if self.dump_dcap_quotes {
@@ -646,26 +576,6 @@ impl AttestationVerifier {
                     return Ok(None);
                 } else {
                     return Err(AttestationError::AttestationGivenWhenNoneExpected);
-                }
-            }
-            AttestationType::AzureTdx => {
-                #[cfg(feature = "azure-verifier")]
-                {
-                    let attestation_evidence = attestation_exchange_message
-                        .attestation_evidence
-                        .as_ref()
-                        .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                    azure::verify_azure_attestation(
-                        attestation_evidence.quote.clone(),
-                        expected_input_data,
-                        self.internal_pccs.clone(),
-                        self.override_azure_outdated_tcb,
-                    )
-                    .await?
-                }
-                #[cfg(not(feature = "azure-verifier"))]
-                {
-                    return Err(AttestationError::AttestationTypeNotSupported);
                 }
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx => {
@@ -727,7 +637,7 @@ impl AttestationVerifier {
 
     /// Synchronously verifies an attestation against the configured policy.
     ///
-    /// DCAP and Azure verification require [`CachePolicy::OnDemand`] or
+    /// DCAP verification requires [`CachePolicy::OnDemand`] or
     /// [`CachePolicy::Prewarmed`] with the requested collateral already
     /// cached. [`CachePolicy::Passthrough`] cannot fetch collateral
     /// synchronously. A cache miss returns an error and starts a background
@@ -775,7 +685,7 @@ impl AttestationVerifier {
         if self.dynamic_measurement_policy.is_some() {
             return Err(AttestationError::ArchivedWithDynamicMeasurementPolicy);
         }
-        if attestation_exchange_message.attestation_type() == AttestationType::GcpTdx {
+        if attestation_exchange_message.attestation_type()? == AttestationType::GcpTdx {
             return Err(AttestationError::ArchivedGcpNotSupported);
         }
         self.verify_attestation_blocking(
@@ -794,7 +704,7 @@ impl AttestationVerifier {
         expected_input_data: [u8; 64],
         archived: Option<&EndorsementSnapshot>,
     ) -> Result<Option<VerifiedAttestation>, AttestationError> {
-        let attestation_type = attestation_exchange_message.attestation_type();
+        let attestation_type = attestation_exchange_message.attestation_type()?;
         tracing::debug!("Verifying {attestation_type} attestation");
 
         if self.dump_dcap_quotes {
@@ -810,33 +720,6 @@ impl AttestationVerifier {
                     return Ok(None);
                 } else {
                     return Err(AttestationError::AttestationGivenWhenNoneExpected);
-                }
-            }
-            AttestationType::AzureTdx => {
-                #[cfg(feature = "azure-verifier")]
-                {
-                    let attestation_evidence = attestation_exchange_message
-                        .attestation_evidence
-                        .as_ref()
-                        .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                    match archived {
-                        None => azure::verify_azure_attestation_sync(
-                            attestation_evidence.quote.clone(),
-                            expected_input_data,
-                            self.internal_pccs.clone(),
-                            self.override_azure_outdated_tcb,
-                        )?,
-                        Some(endorsements) => azure::verify_azure_attestation_archived(
-                            attestation_evidence.quote.clone(),
-                            expected_input_data,
-                            endorsements,
-                            self.override_azure_outdated_tcb,
-                        )?,
-                    }
-                }
-                #[cfg(not(feature = "azure-verifier"))]
-                {
-                    return Err(AttestationError::AttestationTypeNotSupported);
                 }
             }
             AttestationType::DcapTdx | AttestationType::GcpTdx => {
@@ -1061,7 +944,9 @@ fn log_attestation(attestation: &AttestationExchangeMessage) {
         let timestamp =
             SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_nanos();
 
-        let attestation_type = attestation.attestation_type();
+        let Ok(attestation_type) = attestation.attestation_type() else {
+            return;
+        };
         let filename = format!("quotes/{attestation_type}-{timestamp}");
         let attestation_bytes = attestation_evidence.quote.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -1120,12 +1005,6 @@ pub fn mock_platform_metadata(
 pub enum AttestationError {
     #[error("Certificate chain is empty")]
     NoCertificate,
-    #[cfg(feature = "azure-verifier")]
-    #[error("X509 parse: {0}")]
-    X509Parse(#[from] x509_parser::asn1_rs::Err<x509_parser::error::X509Error>),
-    #[cfg(feature = "azure-verifier")]
-    #[error("X509: {0}")]
-    X509(#[from] x509_parser::error::X509Error),
     #[error("Configuration mismatch - expected no remote attestation")]
     AttestationGivenWhenNoneExpected,
     #[error("TDX quote generation: {0}")]
@@ -1142,9 +1021,6 @@ pub enum AttestationError {
     MeasurementsNotAccepted,
     #[error("Failed to refresh measurement policy: {0}")]
     MeasurementPolicyRefresh(#[from] MeasurementFormatError),
-    #[cfg(feature = "azure-verifier")]
-    #[error("Microsoft Azure Attestation (MAA): {0}")]
-    Maa(#[from] azure::MaaError),
     #[error("If using a an attestation provider an attestation type must be given")]
     AttestationTypeNotGiven,
     #[error("Attestation provider server: {0}")]
@@ -1556,5 +1432,67 @@ mod tests {
             .expect("mock evidence carries an attestation");
 
         assert!(matches!(verified.expected_measurements, Some(ExpectedMeasurements::Dcap(_))));
+    }
+}
+
+#[cfg(test)]
+mod unsupported_platform_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_unsupported_evidence_even_with_permissive_policies() {
+        let mut platform = mock_platform_metadata(AttestationType::DcapTdx).unwrap();
+        platform.attestation_type = attest_types::AttestationType::AzureTdx;
+        let message = AttestationExchangeMessage::from(AttestationEvidence {
+            quote: vec![],
+            platform: platform.clone(),
+        });
+        assert!(matches!(
+            message.attestation_type(),
+            Err(AttestationError::AttestationTypeNotSupported)
+        ));
+        assert!(matches!(
+            message.get_measurements(),
+            Err(AttestationError::AttestationTypeNotSupported)
+        ));
+        for policy in [
+            MeasurementPolicy::accept_anything(),
+            MeasurementPolicy::tdx(),
+            MeasurementPolicy::expect_none(),
+        ] {
+            assert!(matches!(
+                policy.check_measurement(&measurements::mock_dcap_measurements(), Some(&platform)),
+                Err(AttestationError::AttestationTypeNotSupported)
+            ));
+            let verifier = AttestationVerifier::builder(policy).build();
+            assert!(matches!(
+                verifier.verify_attestation(message.clone(), [0; 64]).await,
+                Err(AttestationError::AttestationTypeNotSupported)
+            ));
+            assert!(matches!(
+                verifier.verify_attestation_sync(message.clone(), [0; 64]),
+                Err(AttestationError::AttestationTypeNotSupported)
+            ));
+            let endorsements = EndorsementSnapshot::dcap(mock_tdx::mock_collateral(), 0);
+            assert!(matches!(
+                verifier.verify_attestation_archived(message.clone(), [0; 64], &endorsements),
+                Err(AttestationError::AttestationTypeNotSupported)
+            ));
+        }
+    }
+
+    #[test]
+    fn supported_types_and_absent_evidence_convert() {
+        for (external, local) in [
+            (attest_types::AttestationType::GcpTdx, AttestationType::GcpTdx),
+            (attest_types::AttestationType::SelfHostedTdx, AttestationType::DcapTdx),
+        ] {
+            assert_eq!(AttestationType::try_from(external).unwrap(), local);
+            assert_eq!(attest_types::AttestationType::try_from(local).unwrap(), external);
+        }
+        assert_eq!(
+            AttestationExchangeMessage::without_attestation().attestation_type().unwrap(),
+            AttestationType::None
+        );
     }
 }
