@@ -15,7 +15,7 @@ use std::{
 
 use attest_measure::platform::PlatformError;
 pub use attest_types::{AttestationEvidence, PlatformMetadata};
-/// Re-exported so callers can archive [EndorsementSnapshot::dcap] without
+/// Re-exported so callers can use [EndorsementSnapshot::dcap] without
 /// depending on `dcap-qvl` directly
 pub use dcap_qvl::QuoteCollateralV3;
 use measurements::{ExpectedMeasurements, MultiMeasurements};
@@ -295,42 +295,18 @@ impl AttestationGenerator {
     }
 }
 
-/// Fetched endorsement material, bound to the instant it was evaluated at
-///
-/// Everything fetched expires — `nextUpdate` on TCB Info, QE Identity and
-/// both CRLs, `notAfter` on the issuer chains — so a bundle answers
-/// freshness only with respect to an instant. Pairing the two is what makes
-/// a verdict reproducible: same evidence, same snapshot, same verdict.
-///
-/// What a verifier fetches is a transport choice of the protocol, not a
-/// property of the platform: evidence can carry its own endorsements
-/// instead. Hence a struct that grows fields rather than an enum keyed by
-/// platform, and `#[non_exhaustive]` to keep that growth additive.
-///
-/// Handed back by every verification and accepted back by
-/// [`AttestationVerifier::verify_attestation_archived`], which re-verifies
-/// the evidence against it with nothing fetched.
-///
-/// Two caveats. Trust anchors are compiled in rather than captured here, so
-/// a replay needs a build carrying the same ones — under `mock`, the mock
-/// root. And "endorsements" is loose: in [RFC 9334] terms a DCAP bundle
-/// spans both Endorsements (issuer chains, CRLs) and Reference Values (TCB
-/// Info, QE Identity).
-///
-/// [RFC 9334]: https://www.rfc-editor.org/rfc/rfc9334.html
+/// Endorsement material and the instant at which it was evaluated
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EndorsementSnapshot {
     /// Seconds since the Unix epoch — the unit `dcap-qvl` and webpki take
     pub at: u64,
-    /// `Some` when the verification fetched a DCAP bundle, `None` when the
-    /// evidence carried its own or the platform has no DCAP leg. The bundle
-    /// consumed, not a second copy: a cache can refresh between two fetches
+    /// The DCAP collateral bundle used during verification, if any.
     pub dcap: Option<QuoteCollateralV3>,
 }
 
 impl EndorsementSnapshot {
-    /// A verification that fetched one DCAP collateral bundle
+    /// A verification that used one DCAP collateral bundle
     pub fn dcap(collateral: QuoteCollateralV3, at: u64) -> Self {
         Self { at, dcap: Some(collateral) }
     }
@@ -341,8 +317,7 @@ impl EndorsementSnapshot {
 ///
 /// Not an Attestation Result in [RFC 9334] terms: the appraisal policy runs
 /// after this value is built, and a caller may configure it to check
-/// nothing, so no Reference Value comparison is implied. Archived beside
-/// the evidence, it reproduces the verdict.
+/// nothing, so no Reference Value comparison is implied.
 ///
 /// [RFC 9334]: https://www.rfc-editor.org/rfc/rfc9334.html
 #[derive(Clone, Debug)]
@@ -353,8 +328,7 @@ pub struct VerifiedAttestation {
     /// attestation. This is populated by [`AttestationVerifier`], after the
     /// platform-specific verification has completed.
     pub expected_measurements: Option<ExpectedMeasurements>,
-    /// The half of a reproducible verdict that does not ride in the
-    /// evidence
+    /// Collateral used to verify the evidence and when it was evaluated.
     pub endorsements: EndorsementSnapshot,
 }
 
@@ -647,63 +621,6 @@ impl AttestationVerifier {
         attestation_exchange_message: AttestationExchangeMessage,
         expected_input_data: [u8; 64],
     ) -> Result<Option<VerifiedAttestation>, AttestationError> {
-        self.verify_attestation_blocking(attestation_exchange_message, expected_input_data, None)
-    }
-
-    /// Reproduces a past verdict: re-verifies archived evidence against the
-    /// [`EndorsementSnapshot`] its original verification reported, then
-    /// checks the configured policy.
-    ///
-    /// For a relying party that must reach the same answer as an earlier
-    /// one, such as a node replaying a log whose state depended on that
-    /// verdict, or a third party re-checking published evidence without
-    /// trusting whoever verified it first. It says whether the evidence was
-    /// valid when first verified, not whether the platform is trustworthy
-    /// now: freshness is judged at the snapshot's instant, so collateral
-    /// that has since expired or been revoked still passes. Live
-    /// verification belongs on [`Self::verify_attestation`].
-    ///
-    /// The snapshot's instant is taken as given: nothing in the evidence
-    /// attests to it, so a caller replaying someone else's archive should
-    /// know what pins it.
-    ///
-    /// Nothing is fetched. GCP evidence is refused: its provenance registry
-    /// is unsigned and mutable, so a replay cannot reproduce that check.
-    ///
-    /// Fails with
-    /// [`AttestationError::ArchivedWithDynamicMeasurementPolicy`]
-    /// on a verifier with a dynamic measurement policy, with
-    /// [`AttestationError::ArchivedGcpNotSupported`] on GCP evidence, and
-    /// with [`DcapVerificationError::ArchivedWithoutDcapCollateral`] on a
-    /// snapshot with no DCAP bundle.
-    pub fn verify_attestation_archived(
-        &self,
-        attestation_exchange_message: AttestationExchangeMessage,
-        expected_input_data: [u8; 64],
-        endorsements: &EndorsementSnapshot,
-    ) -> Result<Option<VerifiedAttestation>, AttestationError> {
-        if self.dynamic_measurement_policy.is_some() {
-            return Err(AttestationError::ArchivedWithDynamicMeasurementPolicy);
-        }
-        if attestation_exchange_message.attestation_type()? == AttestationType::GcpTdx {
-            return Err(AttestationError::ArchivedGcpNotSupported);
-        }
-        self.verify_attestation_blocking(
-            attestation_exchange_message,
-            expected_input_data,
-            Some(endorsements),
-        )
-    }
-
-    /// The body shared by [`Self::verify_attestation_sync`] and
-    /// [`Self::verify_attestation_archived`], which differ only in where
-    /// the DCAP leg gets its endorsements
-    fn verify_attestation_blocking(
-        &self,
-        attestation_exchange_message: AttestationExchangeMessage,
-        expected_input_data: [u8; 64],
-        archived: Option<&EndorsementSnapshot>,
-    ) -> Result<Option<VerifiedAttestation>, AttestationError> {
         let attestation_type = attestation_exchange_message.attestation_type()?;
         tracing::debug!("Verifying {attestation_type} attestation");
 
@@ -727,18 +644,11 @@ impl AttestationVerifier {
                     .attestation_evidence
                     .as_ref()
                     .ok_or(AttestationError::AttestationTypeNotAccepted)?;
-                let (verified, quote) = match archived {
-                    None => dcap::verify_dcap_attestation_sync(
-                        attestation_evidence.quote.clone(),
-                        expected_input_data,
-                        self.internal_pccs.clone(),
-                    )?,
-                    Some(endorsements) => dcap::verify_dcap_attestation_archived(
-                        attestation_evidence.quote.clone(),
-                        expected_input_data,
-                        endorsements,
-                    )?,
-                };
+                let (verified, quote) = dcap::verify_dcap_attestation_sync(
+                    attestation_evidence.quote.clone(),
+                    expected_input_data,
+                    self.internal_pccs.clone(),
+                )?;
                 if attestation_type == AttestationType::GcpTdx {
                     self.gcp_provenance_checker.verify_provenance_sync(&quote)?;
                 }
@@ -1038,10 +948,6 @@ pub enum AttestationError {
     Mock(String),
     #[error("Cannot retrieve platform metadata: {0}")]
     PlatformMetadata(#[from] PlatformError),
-    #[error("Archived verification cannot use a dynamic measurement policy")]
-    ArchivedWithDynamicMeasurementPolicy,
-    #[error("Archived verification of GCP evidence is not supported")]
-    ArchivedGcpNotSupported,
 }
 
 #[cfg(test)]
@@ -1148,80 +1054,6 @@ mod tests {
         );
     }
 
-    /// What a live verification reports is enough to reproduce its verdict
-    /// later, policy check included, with nothing fetched
-    #[tokio::test]
-    async fn archived_replay_reproduces_the_live_verdict() {
-        let input_data = [7u8; 64];
-        let quote = dcap::create_dcap_attestation(input_data).unwrap();
-        let attestation_evidence = AttestationEvidence {
-            quote,
-            platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
-        };
-        let verifier = AttestationVerifier::mock();
-        let message: AttestationExchangeMessage = attestation_evidence.into();
-
-        let live = verifier
-            .verify_attestation(message.clone(), input_data)
-            .await
-            .unwrap()
-            .expect("mock evidence carries an attestation");
-        let replayed = verifier
-            .verify_attestation_archived(message, input_data, &live.endorsements)
-            .unwrap()
-            .expect("mock evidence carries an attestation");
-
-        assert_eq!(replayed.measurements, live.measurements);
-        assert_eq!(replayed.expected_measurements, live.expected_measurements);
-        assert_eq!(replayed.endorsements, live.endorsements);
-    }
-
-    /// A dynamic policy can change between the original verification and
-    /// the replay, so the replay would not reproduce the verdict
-    #[test]
-    fn archived_replay_refuses_a_dynamic_measurement_policy() {
-        let input_data = [7u8; 64];
-        let quote = dcap::create_dcap_attestation(input_data).unwrap();
-        let attestation_evidence = AttestationEvidence {
-            quote,
-            platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
-        };
-        let mut verifier = AttestationVerifier::mock();
-        verifier.dynamic_measurement_policy = Some("measurements.json".to_string());
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let endorsements = EndorsementSnapshot::dcap(mock_tdx::mock_collateral(), now);
-
-        let err = verifier
-            .verify_attestation_archived(attestation_evidence.into(), input_data, &endorsements)
-            .unwrap_err();
-
-        assert!(matches!(err, AttestationError::ArchivedWithDynamicMeasurementPolicy), "{err:?}");
-    }
-
-    /// A replay cannot reproduce GCP's provenance check, so GCP evidence is
-    /// refused rather than verified as plain DCAP
-    #[test]
-    fn archived_gcp_replay_is_refused() {
-        let input_data = [7u8; 64];
-        let quote = dcap::create_dcap_attestation(input_data).unwrap();
-        let attestation_evidence = AttestationEvidence {
-            quote,
-            platform: mock_platform_metadata(AttestationType::GcpTdx).unwrap(),
-        };
-        let verifier = AttestationVerifier::mock();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let endorsements = EndorsementSnapshot::dcap(mock_tdx::mock_collateral(), now);
-
-        let err = verifier
-            .verify_attestation_archived(attestation_evidence.into(), input_data, &endorsements)
-            .unwrap_err();
-
-        assert!(matches!(err, AttestationError::ArchivedGcpNotSupported), "{err:?}");
-    }
-
-    /// On the fetching path, the reported bundle is the one the fetch
-    /// produced — the property that makes archiving it provenance rather
-    /// than a second, possibly different, copy.
     #[tokio::test]
     async fn verify_reports_the_collateral_the_fetch_produced() {
         let input_data = [7u8; 64];
@@ -1471,11 +1303,6 @@ mod unsupported_platform_tests {
             ));
             assert!(matches!(
                 verifier.verify_attestation_sync(message.clone(), [0; 64]),
-                Err(AttestationError::AttestationTypeNotSupported)
-            ));
-            let endorsements = EndorsementSnapshot::dcap(mock_tdx::mock_collateral(), 0);
-            assert!(matches!(
-                verifier.verify_attestation_archived(message.clone(), [0; 64], &endorsements),
                 Err(AttestationError::AttestationTypeNotSupported)
             ));
         }
