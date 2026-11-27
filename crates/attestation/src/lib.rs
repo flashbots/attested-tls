@@ -1,4 +1,4 @@
-//! CVM attestation generation and verification
+//! CVM attestation requests and verification
 
 pub mod dcap;
 mod gcp;
@@ -13,7 +13,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use attest_measure::platform::PlatformError;
 pub use attest_types::{AttestationEvidence, PlatformMetadata};
 /// Re-exported so callers can archive [EndorsementSnapshot::dcap] without
 /// depending on `dcap-qvl` directly
@@ -24,6 +23,7 @@ use measurements::{ExpectedMeasurements, MultiMeasurements};
 pub use parity_scale_codec::{Decode, Encode};
 pub use pccs::{CachePolicy, CollateralSource};
 use pccs::{Pccs, PccsError};
+pub use provider::AttestationGeneratorClient;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::time::sleep;
@@ -157,20 +157,6 @@ impl AttestationType {
     pub fn accepts(&self, peer: AttestationType) -> bool {
         matches!((self, peer), (AttestationType::DcapTdx, AttestationType::GcpTdx)) || *self == peer
     }
-
-    /// Detect the platform using local interfaces and cloud metadata.
-    pub fn detect() -> Result<Self, AttestationError> {
-        // Check local TDX interfaces without depending on quote generation
-        // or the readiness of QGS/PCCS.
-        if tdx_attest::is_tdx_available() {
-            if running_on_gcp()? {
-                return Ok(AttestationType::GcpTdx);
-            } else {
-                return Ok(AttestationType::DcapTdx);
-            }
-        }
-        Ok(AttestationType::None)
-    }
 }
 
 /// SCALE encode (used over the wire)
@@ -193,105 +179,6 @@ impl Decode for AttestationType {
 impl Display for AttestationType {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
-    }
-}
-
-/// Can generate a local attestation based on attestation type
-#[derive(Debug, Clone)]
-pub struct AttestationGenerator {
-    pub attestation_type: AttestationType,
-    attestation_provider_socket: Option<std::path::PathBuf>,
-}
-
-impl AttestationGenerator {
-    /// Create an attestation generator with given attestation type
-    pub fn new(
-        attestation_type: AttestationType,
-        attestation_provider_socket: Option<std::path::PathBuf>,
-    ) -> Result<Self, AttestationError> {
-        if let Some(path) = &attestation_provider_socket {
-            provider::validate_path(path)?;
-        }
-
-        Ok(Self { attestation_type, attestation_provider_socket })
-    }
-
-    /// Detect what confidential compute platform is present and create the
-    /// appropriate attestation generator
-    pub fn detect() -> Result<Self, AttestationError> {
-        Self::new_with_detection(None, None)
-    }
-
-    /// Do not generate attestations
-    pub fn with_no_attestation() -> Self {
-        Self { attestation_type: AttestationType::None, attestation_provider_socket: None }
-    }
-
-    /// Create an [AttestationGenerator] detecting the attestation type if
-    /// it is not given
-    pub fn new_with_detection(
-        attestation_type_string: Option<String>,
-        attestation_provider_socket: Option<std::path::PathBuf>,
-    ) -> Result<Self, AttestationError> {
-        if attestation_provider_socket.is_some() {
-            // If a remote provider is used, dont do detection
-            let attestation_type = serde_json::from_value(serde_json::Value::String(
-                attestation_type_string.ok_or(AttestationError::AttestationTypeNotGiven)?,
-            ))?;
-            return Self::new(attestation_type, attestation_provider_socket);
-        };
-
-        let attestation_type_string = attestation_type_string.unwrap_or_else(|| "auto".to_string());
-        let attestation_type = if attestation_type_string == "auto" {
-            tracing::info!("Doing attestation type detection...");
-            AttestationType::detect()?
-        } else {
-            serde_json::from_value(serde_json::Value::String(attestation_type_string))?
-        };
-        tracing::info!("Local platform: {attestation_type}");
-
-        Self::new(attestation_type, None)
-    }
-
-    /// Generate an attestation exchange message with given input data
-    pub fn generate_attestation(
-        &self,
-        input_data: [u8; 64],
-    ) -> Result<AttestationExchangeMessage, AttestationError> {
-        if let Some(path) = &self.attestation_provider_socket {
-            Self::use_attestation_provider(path, self.attestation_type, input_data)
-        } else {
-            match self.attestation_type {
-                AttestationType::None => Ok(AttestationExchangeMessage::without_attestation()),
-
-                AttestationType::DcapTdx | AttestationType::GcpTdx => {
-                    #[cfg(any(test, feature = "mock"))]
-                    let platform = mock_platform_metadata(self.attestation_type)?;
-                    #[cfg(not(any(test, feature = "mock")))]
-                    let platform =
-                        attest_measure::platform::metadata_for(self.attestation_type.try_into()?)?;
-                    Ok(AttestationExchangeMessage {
-                        attestation_evidence: Some(AttestationEvidence {
-                            quote: dcap::create_dcap_attestation(input_data)?,
-                            platform,
-                        }),
-                    })
-                }
-            }
-        }
-    }
-
-    /// Generate an attestation by using an external service for the
-    /// attestation generation
-    fn use_attestation_provider(
-        path: &std::path::Path,
-        attestation_type: AttestationType,
-        input_data: [u8; 64],
-    ) -> Result<AttestationExchangeMessage, AttestationError> {
-        if attestation_type == AttestationType::None {
-            return Ok(AttestationExchangeMessage::without_attestation());
-        }
-        provider::request_attestation(path, input_data)
     }
 }
 
@@ -965,9 +852,12 @@ fn log_attestation(attestation: &AttestationExchangeMessage) {
     }
 }
 
-/// Test whether it looks like we are running on GCP by hitting the metadata
-/// API
-fn running_on_gcp() -> Result<bool, AttestationError> {
+/// Select the attestation type for a deployment that already expects TDX.
+///
+/// Returns `GcpTdx` when the GCP metadata service responds successfully
+/// with the Google metadata header, or `DcapTdx` otherwise. This does not
+/// probe TDX hardware or determine whether attestation should be enabled.
+pub fn detect_gcp() -> AttestationType {
     let timeout = Duration::from_millis(200);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .proxy(None)
@@ -975,14 +865,15 @@ fn running_on_gcp() -> Result<bool, AttestationError> {
         .timeout_global(Some(timeout))
         .build()
         .into();
-    let resp = agent.get(GCP_METADATA_API).call();
 
-    if let Ok(r) = resp {
-        return Ok(r.status() == 200 &&
-            r.headers().get("Metadata-Flavor").map(|v| v == "Google").unwrap_or(false));
+    if let Ok(response) = agent.get(GCP_METADATA_API).call() &&
+        response.status() == 200 &&
+        response.headers().get("Metadata-Flavor").is_some_and(|value| value == "Google")
+    {
+        AttestationType::GcpTdx
+    } else {
+        AttestationType::DcapTdx
     }
-
-    Ok(false)
 }
 
 #[cfg(any(test, feature = "mock"))]
@@ -1007,8 +898,6 @@ pub enum AttestationError {
     NoCertificate,
     #[error("Configuration mismatch - expected no remote attestation")]
     AttestationGivenWhenNoneExpected,
-    #[error("TDX quote generation: {0}")]
-    QuoteGeneration(#[from] tdx_attest::TdxAttestError),
     #[error("DCAP verification: {0}")]
     DcapVerification(#[from] DcapVerificationError),
     #[error("GCP provenance: {0}")]
@@ -1021,8 +910,6 @@ pub enum AttestationError {
     MeasurementsNotAccepted,
     #[error("Failed to refresh measurement policy: {0}")]
     MeasurementPolicyRefresh(#[from] MeasurementFormatError),
-    #[error("If using a an attestation provider an attestation type must be given")]
-    AttestationTypeNotGiven,
     #[error("Attestation provider server: {0}")]
     AttestationProvider(String),
     #[error("Attestation provider socket: {0}")]
@@ -1033,11 +920,6 @@ pub enum AttestationError {
     Reqwest(#[from] reqwest::Error),
     #[error("PCCS: {0}")]
     Pccs(#[from] PccsError),
-    #[cfg(any(test, feature = "mock"))]
-    #[error("Cannot create mock attestation: {0}")]
-    Mock(String),
-    #[error("Cannot retrieve platform metadata: {0}")]
-    PlatformMetadata(#[from] PlatformError),
     #[error("Archived verification cannot use a dynamic measurement policy")]
     ArchivedWithDynamicMeasurementPolicy,
     #[error("Archived verification of GCP evidence is not supported")]
@@ -1051,26 +933,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn attestation_detection_completes_within_one_second() {
+    fn gcp_detection_completes_within_one_second() {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         // Detection is synchronous, so run it on a separate thread to let
         // the test fail promptly even if a probe blocks.
         let worker = std::thread::spawn(move || {
-            // The platform and result may vary; require completion without
-            // a panic, as in the original detection test.
-            let _ = AttestationGenerator::new_with_detection(None, None);
-            sender.send(()).unwrap();
+            sender.send(detect_gcp()).unwrap();
         });
 
-        receiver
+        let attestation_type = receiver
             .recv_timeout(Duration::from_secs(1))
-            .expect("attestation detection panicked or did not complete within one second");
-        worker.join().expect("attestation detection panicked");
-    }
-
-    #[test]
-    fn running_on_gcp_check_does_not_panic() {
-        let _ = running_on_gcp();
+            .expect("GCP detection panicked or did not complete within one second");
+        assert!(matches!(attestation_type, AttestationType::GcpTdx | AttestationType::DcapTdx));
+        worker.join().expect("GCP detection panicked");
     }
 
     #[test]
@@ -1114,7 +989,7 @@ mod tests {
     #[tokio::test]
     async fn mock_verifier_uses_mock_collateral_for_async_and_sync_verification() {
         let input_data = [7u8; 64];
-        let quote = dcap::create_dcap_attestation(input_data).unwrap();
+        let quote = mock_tdx::generate_mock_tdx_quote(input_data).unwrap();
         let attestation_evidence = AttestationEvidence {
             quote,
             platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
@@ -1153,7 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn archived_replay_reproduces_the_live_verdict() {
         let input_data = [7u8; 64];
-        let quote = dcap::create_dcap_attestation(input_data).unwrap();
+        let quote = mock_tdx::generate_mock_tdx_quote(input_data).unwrap();
         let attestation_evidence = AttestationEvidence {
             quote,
             platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
@@ -1181,7 +1056,7 @@ mod tests {
     #[test]
     fn archived_replay_refuses_a_dynamic_measurement_policy() {
         let input_data = [7u8; 64];
-        let quote = dcap::create_dcap_attestation(input_data).unwrap();
+        let quote = mock_tdx::generate_mock_tdx_quote(input_data).unwrap();
         let attestation_evidence = AttestationEvidence {
             quote,
             platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
@@ -1203,7 +1078,7 @@ mod tests {
     #[test]
     fn archived_gcp_replay_is_refused() {
         let input_data = [7u8; 64];
-        let quote = dcap::create_dcap_attestation(input_data).unwrap();
+        let quote = mock_tdx::generate_mock_tdx_quote(input_data).unwrap();
         let attestation_evidence = AttestationEvidence {
             quote,
             platform: mock_platform_metadata(AttestationType::GcpTdx).unwrap(),
@@ -1225,7 +1100,7 @@ mod tests {
     #[tokio::test]
     async fn verify_reports_the_collateral_the_fetch_produced() {
         let input_data = [7u8; 64];
-        let quote_bytes = dcap::create_dcap_attestation(input_data).unwrap();
+        let quote_bytes = mock_tdx::generate_mock_tdx_quote(input_data).unwrap();
         let quote = dcap_qvl::quote::Quote::parse(&quote_bytes).unwrap();
         let fmspc = hex::encode_upper(dcap_qvl::intel::quote_fmspc(&quote).unwrap());
         let ca = dcap_qvl::intel::quote_ca(&quote).unwrap().as_id_str();
@@ -1307,7 +1182,7 @@ mod tests {
             .build();
 
         let input_data = [7u8; 64];
-        let quote = dcap::create_dcap_attestation(input_data).unwrap();
+        let quote = mock_tdx::generate_mock_tdx_quote(input_data).unwrap();
         let attestation = AttestationEvidence {
             quote,
             platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),
@@ -1418,7 +1293,7 @@ mod tests {
         verifier.ready().await.unwrap();
 
         let input_data = [7u8; 64];
-        let quote = dcap::create_dcap_attestation(input_data).unwrap();
+        let quote = mock_tdx::generate_mock_tdx_quote(input_data).unwrap();
         let attestation = AttestationEvidence {
             quote,
             platform: mock_platform_metadata(AttestationType::DcapTdx).unwrap(),

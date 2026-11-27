@@ -8,13 +8,16 @@ use std::{
     time::Duration,
 };
 
-pub use attestation::AttestationGenerator;
+mod generator;
+
 use attestation::{
     AttestationExchangeMessage,
+    AttestationGeneratorClient,
     AttestationVerifier,
     Encode,
     provider::{MAX_RESPONSE_SIZE, ProviderError, ProviderResponse},
 };
+pub use generator::AttestationGenerator;
 use nix::fcntl::{Flock, FlockArg, OFlag};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -261,10 +264,13 @@ async fn serve_connection(
 
     let result: ProviderResponse = match request {
         Err(_) => Err(ProviderError::InvalidRequest),
-        Ok(input) => generator.generate_attestation(input).map_err(|error| {
-            tracing::error!(%error, "Attestation generation failed");
-            ProviderError::GenerationFailed
-        }),
+        Ok(input) => generator
+            .generate_attestation(input)
+            .map(AttestationExchangeMessage::from)
+            .map_err(|error| {
+                tracing::error!(%error, "Attestation generation failed");
+                ProviderError::GenerationFailed
+            }),
     };
 
     let mut body = result.encode();
@@ -289,10 +295,9 @@ pub async fn attestation_provider_client(
     verifier: AttestationVerifier,
 ) -> anyhow::Result<AttestationExchangeMessage> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let message = tokio::task::spawn_blocking(move || {
-        attestation::provider::request_attestation(&path, [0; 64])
-    })
-    .await??;
+    let client = AttestationGeneratorClient::new(path)?;
+    let message =
+        tokio::task::spawn_blocking(move || client.generate_attestation([0; 64])).await??;
     verifier.verify_attestation(message.clone(), [0; 64]).await?;
     Ok(message)
 }
@@ -424,6 +429,11 @@ mod tests {
         assert!(!path.exists());
     }
 
+    #[test]
+    fn generator_requires_a_quote_type() {
+        assert!(AttestationGenerator::new(AttestationType::None).is_err());
+    }
+
     #[tokio::test]
     async fn unix_generator_round_trip_and_lifecycle() {
         let dir = tempfile::tempdir().unwrap();
@@ -434,15 +444,14 @@ mod tests {
         assert_eq!(metadata.mode() & 0o777, 0o660);
         assert_eq!(metadata.gid(), std::fs::metadata(dir.path()).unwrap().gid());
         assert!(ProviderSocket::bind(&path).is_err());
-        let client_path = path.clone();
-        let client = tokio::task::spawn_blocking(move || {
-            let generator =
-                AttestationGenerator::new(AttestationType::DcapTdx, Some(client_path)).unwrap();
-            generator.generate_attestation([42; 64]).unwrap()
-        });
+        let client = AttestationGeneratorClient::new(path.clone()).unwrap();
+        let client =
+            tokio::task::spawn_blocking(move || client.generate_attestation([42; 64]).unwrap());
         let (stream, _) = socket.listener.accept().await.unwrap();
-        serve_connection(stream, AttestationGenerator::with_no_attestation()).await.unwrap();
-        assert!(client.await.unwrap().attestation_evidence.is_none());
+        serve_connection(stream, AttestationGenerator::mock()).await.unwrap();
+        let message = client.await.unwrap();
+        let verifier = AttestationVerifier::mock();
+        assert!(verifier.verify_attestation(message, [42; 64]).await.unwrap().is_some());
         drop(socket);
         assert!(!path.exists());
     }
@@ -451,8 +460,7 @@ mod tests {
     async fn invalid_requests_never_generate() {
         for input in [vec![1; 63], vec![1; 65]] {
             let (mut client, server) = UnixStream::pair().unwrap();
-            let worker =
-                tokio::spawn(serve_connection(server, AttestationGenerator::with_no_attestation()));
+            let worker = tokio::spawn(serve_connection(server, AttestationGenerator::mock()));
             client.write_all(&input).await.unwrap();
             client.shutdown().await.unwrap();
             let len = client.read_u32().await.unwrap();
@@ -496,11 +504,14 @@ mod tests {
             io::{Read, Write},
             os::unix::net::UnixListener,
         };
-        let valid =
-            ProviderResponse::Ok(AttestationExchangeMessage::without_attestation()).encode();
+        let valid = ProviderResponse::Ok(
+            AttestationGenerator::mock().generate_attestation([42; 64]).unwrap().into(),
+        )
+        .encode();
         let mut frames =
             vec![vec![], vec![0; 4], ((MAX_RESPONSE_SIZE + 1) as u32).to_be_bytes().to_vec()];
         for body in [
+            ProviderResponse::Ok(AttestationExchangeMessage::without_attestation()).encode(),
             vec![99],
             ProviderResponse::Err(ProviderError::GenerationFailed).encode(),
             [valid.clone(), vec![99]].concat(),
@@ -534,18 +545,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("provider.sock");
         let socket = ProviderSocket::bind(&path).unwrap();
-        let client =
-            tokio::spawn(attestation_provider_client(path, AttestationVerifier::expect_none()));
+        let client = tokio::spawn(attestation_provider_client(path, AttestationVerifier::mock()));
         let (stream, _) = socket.listener.accept().await.unwrap();
-        serve_connection(stream, AttestationGenerator::with_no_attestation()).await.unwrap();
-        assert!(client.await.unwrap().unwrap().attestation_evidence.is_none());
+        serve_connection(stream, AttestationGenerator::mock()).await.unwrap();
+        assert!(client.await.unwrap().unwrap().attestation_evidence.is_some());
     }
 
     #[tokio::test]
     async fn missing_request_eof_times_out() {
         let (mut client, server) = UnixStream::pair().unwrap();
         client.write_all(&[42; 64]).await.unwrap();
-        let result = serve_connection(server, AttestationGenerator::with_no_attestation()).await;
+        let result = serve_connection(server, AttestationGenerator::mock()).await;
         assert!(result.is_err());
     }
 

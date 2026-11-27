@@ -89,3 +89,8 @@ This is demonstrated in [tests/nested_tls.rs](./tests/nested_tls.rs).
 ## Runtime requirements
 
 This crate expects to run in a Tokio runtime.
+
+Pass `Some(AttestationGeneratorClient::new(socket_path)?)` to
+`AttestedCertificateResolver::build` or `try_default` to request evidence
+from the provider during certificate issuance and renewal. Pass `None` to
+issue and renew certificates with an empty attestation payload locally.

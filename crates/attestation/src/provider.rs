@@ -3,7 +3,7 @@ use std::{
     io::{self, Read, Write},
     net::Shutdown,
     os::unix::net::UnixStream,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -23,7 +23,31 @@ pub enum ProviderError {
 }
 pub type ProviderResponse = Result<AttestationExchangeMessage, ProviderError>;
 
-pub(crate) fn validate_path(path: &Path) -> Result<(), AttestationError> {
+/// Requests attestation evidence from a provider over a filesystem Unix
+/// socket.
+#[derive(Debug, Clone)]
+pub struct AttestationGeneratorClient {
+    socket_path: PathBuf,
+}
+
+impl AttestationGeneratorClient {
+    /// Configure the provider's absolute socket path.
+    pub fn new(socket_path: PathBuf) -> Result<Self, AttestationError> {
+        validate_path(&socket_path)?;
+        Ok(Self { socket_path })
+    }
+
+    /// Request attestation for the supplied report data. Blocks for up to
+    /// one second.
+    pub fn generate_attestation(
+        &self,
+        report_data: [u8; 64],
+    ) -> Result<AttestationExchangeMessage, AttestationError> {
+        request_attestation(&self.socket_path, report_data)
+    }
+}
+
+fn validate_path(path: &Path) -> Result<(), AttestationError> {
     if !path.is_absolute() {
         return Err(AttestationError::AttestationProviderPath(
             "Expected an absolute filesystem path".into(),
@@ -104,7 +128,11 @@ fn request_unix(path: &Path, input: [u8; 64]) -> std::io::Result<AttestationExch
         return Err(invalid("Trailing SCALE data"));
     }
 
-    result.map_err(|e| invalid(format!("Provider returned {e:?}")))
+    let message = result.map_err(|e| invalid(format!("Provider returned {e:?}")))?;
+    if message.attestation_evidence.is_none() {
+        return Err(invalid("Provider returned no attestation evidence"));
+    }
+    Ok(message)
 }
 
 fn remaining(deadline: Instant) -> io::Result<Duration> {
