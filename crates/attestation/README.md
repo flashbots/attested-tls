@@ -20,17 +20,8 @@ returns `ExpectedMeasurements::Image`, while an allow-any DCAP policy returns
 `ExpectedMeasurements::Dcap` with an empty register map. Successful
 verification without attestation returns `None`.
 
-`VerifiedAttestation` also carries an `EndorsementSnapshot`: the DCAP
-collateral bundle the verification consumed and the instant its freshness
-checks were evaluated at. Archived beside the evidence, it lets
-`AttestationVerifier::verify_attestation_archived` reproduce the verdict later,
-for a relying party that must reach the same answer as an earlier one, such as
-a node replaying a log whose state depended on that verdict, or a third party
-re-checking published evidence without trusting whoever verified it first. It
-says whether the evidence was valid when first verified, not whether the
-platform is trustworthy now: collateral that has since expired or been revoked
-still passes. GCP evidence is not supported: its provenance registry is
-unsigned and mutable, so a replay cannot reproduce that check.
+The `EndorsementSnapshot` field records the DCAP collateral bundle used for
+verification and when its freshness was checked.
 
 Matched expected measurements can be transported in an HTTP header using
 `ExpectedMeasurements::to_header_format` and reconstructed with

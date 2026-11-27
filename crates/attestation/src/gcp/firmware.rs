@@ -77,10 +77,9 @@ mod tests {
 
     use super::GcpFirmwareCache;
     use crate::{
-        EndorsementSnapshot,
         PlatformMetadata,
         VerifiedAttestation,
-        dcap::{get_quote_input_data, verify_quote_archived},
+        dcap::{get_quote_input_data, verify_quote_with_collateral},
         measurements::{ExpectedMeasurements, MeasurementPolicy, MeasurementRecord},
     };
 
@@ -150,19 +149,19 @@ mod tests {
         let firmware_bytes: &'static [u8] =
             include_bytes!("../../test-assets/gcp-tdx-firmware-1782809233226668671.yaml");
 
-        let expected_input_data = {
-            let quote = Quote::parse(attestation_bytes).unwrap();
-            get_quote_input_data(&quote.report)
-        };
+        let quote = Quote::parse(attestation_bytes).unwrap();
+        let expected_input_data = get_quote_input_data(&quote.report);
 
         let collateral = serde_saphyr::from_slice(collateral_bytes).unwrap();
         let firmware = serde_saphyr::from_slice(firmware_bytes).unwrap();
         // A real GCP quote, so it is checked against Intel's root whatever
         // the build
-        let (VerifiedAttestation { measurements, .. }, _) = verify_quote_archived(
+        let (VerifiedAttestation { measurements, .. }, _) = verify_quote_with_collateral(
             attestation_bytes.to_vec(),
+            quote,
             expected_input_data,
-            &EndorsementSnapshot::dcap(collateral, GCP_TDX_PORTABLE_FIXTURE_TIMESTAMP),
+            collateral,
+            GCP_TDX_PORTABLE_FIXTURE_TIMESTAMP,
             &QuoteVerifier::new_prod(),
         )
         .unwrap();
