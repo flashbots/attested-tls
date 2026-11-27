@@ -1,5 +1,4 @@
-//! Data Center Attestation Primitives (DCAP) evidence generation and
-//! verification
+//! Data Center Attestation Primitives (DCAP) evidence verification
 //!
 //! Three entry points, one per situation a relying party is in:
 //!
@@ -26,26 +25,12 @@ use dcap_qvl::{
     quote::{Quote, Report},
     verify::QuoteVerifier,
 };
-#[cfg(any(test, feature = "mock"))]
-use mock_tdx::generate_mock_tdx_quote;
 #[cfg(test)]
 use pccs::{CachePolicy, CollateralSource};
 use pccs::{Pccs, PccsError};
 use thiserror::Error;
 
-use crate::{
-    AttestationError,
-    EndorsementSnapshot,
-    VerifiedAttestation,
-    measurements::MultiMeasurements,
-};
-
-/// Generate a TDX quote
-pub fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
-    let quote = generate_quote(input_data)?;
-    tracing::info!("Generated TDX quote of {} bytes", quote.len());
-    Ok(quote)
-}
+use crate::{EndorsementSnapshot, VerifiedAttestation, measurements::MultiMeasurements};
 
 /// Verify a DCAP TDX quote
 #[cfg(not(any(test, feature = "mock")))]
@@ -246,18 +231,6 @@ fn verify_quote_with_collateral(
     ))
 }
 
-/// Create a mock quote for testing on non-confidential hardware
-#[cfg(any(test, feature = "mock"))]
-fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
-    generate_mock_tdx_quote(input).map_err(|error| AttestationError::Mock(format!("{error}")))
-}
-
-/// Create a quote
-#[cfg(not(any(test, feature = "mock")))]
-fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
-    Ok(tdx_attest::get_quote(&input)?)
-}
-
 /// Given a [Report] get the input data regardless of report type
 pub fn get_quote_input_data(report: &Report) -> [u8; 64] {
     match report {
@@ -373,7 +346,7 @@ mod tests {
             CachePolicy::OnDemand,
         );
         let expected_input_data = [0xA5; 64];
-        let quote = create_dcap_attestation(expected_input_data).unwrap();
+        let quote = mock_tdx::generate_mock_tdx_quote(expected_input_data).unwrap();
 
         let (verified, _) =
             verify_dcap_attestation(quote, expected_input_data, pccs).await.unwrap();

@@ -1,17 +1,13 @@
 use std::path::PathBuf;
 
-use attestation::{
-    AttestationGenerator,
-    AttestationType,
-    AttestationVerifier,
-    measurements::MeasurementPolicy,
-};
+use attestation::{AttestationType, AttestationVerifier, measurements::MeasurementPolicy};
 use attestation_provider_server::{
+    AttestationGenerator,
     ProviderSocket,
     attestation_provider_client,
     attestation_provider_server,
 };
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use tracing::level_filters::LevelFilter;
 
 const GIT_REV: &str = match option_env!("GIT_REV") {
@@ -45,10 +41,9 @@ struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 enum CliCommand {
     Server {
-        /// Type of attestation to present (will attempt to detect if
-        /// not given)
-        #[arg(long)]
-        server_attestation_type: Option<String>,
+        /// Type of attestation to generate
+        #[arg(long, value_enum)]
+        server_attestation_type: QuoteType,
     },
     Client {
         /// Optional path to file containing JSON measurements to be
@@ -56,6 +51,22 @@ enum CliCommand {
         #[arg(long, global = true, env = "MEASUREMENTS_FILE")]
         measurements_file: Option<PathBuf>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum QuoteType {
+    #[value(alias = "qemu-tdx")]
+    DcapTdx,
+    GcpTdx,
+}
+
+impl From<QuoteType> for AttestationType {
+    fn from(quote_type: QuoteType) -> Self {
+        match quote_type {
+            QuoteType::DcapTdx => Self::DcapTdx,
+            QuoteType::GcpTdx => Self::GcpTdx,
+        }
+    }
 }
 
 #[tokio::main]
@@ -82,16 +93,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         CliCommand::Server { server_attestation_type } => {
-            let none_requested = server_attestation_type.as_deref() == Some("none");
-            let attestation_generator =
-                AttestationGenerator::new_with_detection(server_attestation_type, None)?;
-
-            if attestation_generator.attestation_type == AttestationType::None && !none_requested {
-                anyhow::bail!(
-                    "Failed to detect attestation type. To run without attestation, pass --server-attestation-type none"
-                );
-            }
-
+            let attestation_generator = AttestationGenerator::new(server_attestation_type.into())?;
             let socket = ProviderSocket::bind(&cli.socket_path)?;
             println!("Listening on {}", cli.socket_path.display());
             tokio::select! {
@@ -124,4 +126,33 @@ async fn shutdown_signal() {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("Install SIGTERM handler");
     tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_requires_a_quote_type() {
+        assert!(Cli::try_parse_from(["provider", "server"]).is_err());
+        for value in ["none", "auto"] {
+            assert!(
+                Cli::try_parse_from(["provider", "server", "--server-attestation-type", value])
+                    .is_err()
+            );
+        }
+        for (value, expected) in [
+            ("dcap-tdx", QuoteType::DcapTdx),
+            ("qemu-tdx", QuoteType::DcapTdx),
+            ("gcp-tdx", QuoteType::GcpTdx),
+        ] {
+            let cli =
+                Cli::try_parse_from(["provider", "server", "--server-attestation-type", value])
+                    .unwrap();
+            assert!(matches!(
+                cli.command,
+                CliCommand::Server { server_attestation_type } if server_attestation_type == expected
+            ));
+        }
+    }
 }

@@ -39,7 +39,7 @@ More details in the individual READMEs of the provided crates:
 - [`nested-tls`](./crates/nested-tls) - provides two TLS sessions, such that
   the outer session can be used for a CA signed certificate and the inner
   session for attestation.
-- [`attestation`](./crates/attestation) - provides attestation generation,
+- [`attestation`](./crates/attestation) - provides attestation requests,
   verification and measurement handling.
 - [`pccs`](./crates/pccs) provides collateral fetching and optional caching
   for DCAP

@@ -271,7 +271,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::dcap;
 
     const MOCK_PPID_HEX: &str = "d04ec06d4e6d92dc90d0ad3cf5ee2ddf";
 
@@ -329,7 +328,7 @@ mod tests {
 
     #[test]
     fn extracts_ppid_from_mock_tdx_quote() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let attestation = mock_tdx::generate_mock_tdx_quote([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
         let ppid = extract_ppid_from_quote(&quote).unwrap();
 
@@ -348,7 +347,7 @@ mod tests {
 
     #[test]
     fn provenance_check_fetches_registry_document_for_ppid() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let attestation = mock_tdx::generate_mock_tdx_quote([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
         let (addr, request_handle) = spawn_test_registry_server(
             200,
@@ -369,7 +368,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_provenance_check_remains_cancellable() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let attestation = mock_tdx::generate_mock_tdx_quote([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
         let (addr, request_started, send_response, request_handle) =
             spawn_blocked_test_registry_server(
@@ -393,7 +392,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sync_provenance_check_runs_from_tokio_worker() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let attestation = mock_tdx::generate_mock_tdx_quote([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
         let (addr, request_handle) = spawn_test_registry_server(
             200,
@@ -414,7 +413,7 @@ mod tests {
 
     #[test]
     fn provenance_check_caches_known_gcp_ppids() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let attestation = mock_tdx::generate_mock_tdx_quote([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
         let (addr, request_handle) = spawn_test_registry_server(
             200,
@@ -436,7 +435,7 @@ mod tests {
 
     #[test]
     fn provenance_check_revalidates_stale_cached_ppids() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let attestation = mock_tdx::generate_mock_tdx_quote([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
         let (addr, request_handle) = spawn_test_registry_server(
             200,
@@ -459,7 +458,7 @@ mod tests {
 
     #[test]
     fn provenance_check_fails_closed_on_registry_miss() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let attestation = mock_tdx::generate_mock_tdx_quote([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
         let (addr, request_handle) = spawn_test_registry_server(404, "not found");
 
@@ -477,7 +476,7 @@ mod tests {
 
     #[test]
     fn provenance_check_rejects_non_200_success_status() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let attestation = mock_tdx::generate_mock_tdx_quote([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
         let (addr, request_handle) = spawn_test_registry_server(201, "created");
 
@@ -495,7 +494,7 @@ mod tests {
 
     #[test]
     fn provenance_check_fails_closed_on_invalid_document() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let attestation = mock_tdx::generate_mock_tdx_quote([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
         let (addr, request_handle) = spawn_test_registry_server(200, r#"{"zone":""}"#);
 
@@ -513,7 +512,7 @@ mod tests {
 
     #[test]
     fn provenance_check_fails_closed_on_oversized_document() {
-        let attestation = dcap::create_dcap_attestation([0u8; 64]).unwrap();
+        let attestation = mock_tdx::generate_mock_tdx_quote([0u8; 64]).unwrap();
         let quote = Quote::parse(&attestation).unwrap();
         let oversized_body = "x".repeat((GCP_PROVENANCE_DOCUMENT_MAX_BYTES + 1) as usize);
         let (addr, request_handle) = spawn_test_registry_server(200, oversized_body);

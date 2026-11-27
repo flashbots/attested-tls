@@ -4,6 +4,18 @@ Generates quotes and collects platform metadata in a privileged process so
 applications can request attestations through a Unix socket without those
 privileges.
 
+Start the server with an explicit platform type:
+
+```sh
+attestation-provider-server server --server-attestation-type dcap-tdx
+```
+
+Use `gcp-tdx` on Google Cloud TDX, or `dcap-tdx` for generic TDX.
+The legacy alias `qemu-tdx` selects `dcap-tdx`.
+The server uses local ConfigFS or the local vSOCK quote service and can run
+without IP networking. The `client` subcommand verifies received evidence
+and may fetch verification collateral over the network.
+
 Use `--socket-path` and provision its parent directory with the application's
 access group and mode `2750`.
 

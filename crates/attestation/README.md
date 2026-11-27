@@ -1,12 +1,12 @@
 # attestation
 
-Attestation generation and verification for confidential VMs, plus measurement
+Attestation requests and verification for confidential VMs, plus measurement
 policy handling.
 
 This crate provides:
 
-- Attestation type detection (`none`, `dcap-tdx`, and `gcp-tdx`)
-- Attestation generation and verification for DCAP
+- Google Cloud detection for deployments that expect TDX
+- Attestation requests over a Unix socket and verification for DCAP
 - Parsing and evaluation of measurement policies
 
 ## Verification results
@@ -82,7 +82,7 @@ individual collateral fetches can still have failed.
 
 ### `mock`
 
-Enables mock quote support via the local `mock-tdx` crate for tests and
+Enables verification of mock quotes via the local `mock-tdx` crate for tests and
 development on non-TDX hardware.
 
 In mock builds, `CachePolicy::Passthrough` uses embedded mock collateral rather
@@ -100,21 +100,15 @@ These are the attestation type names used in the measurements file.
 - `gcp-tdx` - DCAP TDX on Google Cloud Platform
 - `dcap-tdx` - DCAP TDX (platform not specified)
 
-Local detection checks TDX interfaces and uses Google Cloud metadata to identify GCP.
-Without TDX interfaces, no attestation is selected.
+Applications that already expect TDX can call `detect_gcp()`. It returns
+`GcpTdx` when the Google Cloud metadata service identifies GCP and defaults
+to `DcapTdx` otherwise, including when the metadata service is unreachable.
+Applications choose whether to enable attestation separately.
 
-In the case of attestation types `dcap-tdx` and `gcp-tdx`, a
-standard DCAP attestation is generated using the `configfs-tsm` linux filesystem
-interface. This means that the binary must be run with access to
-`/sys/kernel/config/tsm/report` which on many systems requires sudo.  If
-configfs-tsm is unavailable, quote generation via vSOCK to the QGS will be
-attempted.
-
-Alternatively, an absolute Unix socket path (`Option<PathBuf>`) can be provided
-to `AttestationGenerator::new` or `new_with_detection` to outsource both quote
-generation and platform metadata collection to another process. TCP/HTTP provider
-URLs are no longer supported. See the [provider documentation](../attestation-provider-server/README.md)
-for socket configuration and permissions.
+Use `AttestationGeneratorClient::new(socket_path)` with an absolute Unix
+socket path to request quotes and platform metadata from the
+[attestation provider](../attestation-provider-server/README.md). Each request
+supplies 64 bytes of report data.
 
 When verifying DCAP attestations, collateral is retrieved according to the
 configured collateral source and cache policy. The source defaults to Intel PCS

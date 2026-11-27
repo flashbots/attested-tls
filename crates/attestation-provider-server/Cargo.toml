@@ -12,6 +12,9 @@ workspace = true
 
 [dependencies]
 attestation = { workspace = true }
+attest-measure = { git = "https://github.com/easy-tee/attest.git", rev = "12f1e29f6ea63ecc2f80f39c2c1f1172720bcf24" }
+tdx-attest = { git = "https://github.com/Dstack-TEE/dstack.git", rev = "4699c48ea3a7e568dff4f8792421299f27d50758" }
+mock-tdx = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["net", "io-util", "signal", "macros", "rt-multi-thread"] }
 rustls = { workspace = true, default-features = false, features = ["aws_lc_rs"] }
 
@@ -23,5 +26,10 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 nix = { version = "0.31.2", default-features = false, features = ["user", "fs"] }
 socket2 = "0.6.3"
 
+[features]
+mock = ["dep:mock-tdx"]
+
 [dev-dependencies]
+attestation = { workspace = true, features = ["mock"] }
+mock-tdx = { workspace = true }
 tempfile = "3.23.0"
